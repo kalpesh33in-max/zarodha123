@@ -30,5 +30,5 @@ def run_scanner(kite):
             print(f"Error in scanner loop: {e}")
             send_telegram_message(f"Scanner Error: {e}")
 
-        # Wait for 5 minutes (300 seconds)
-        time.sleep(300)
+        # Wait for 3 minutes (180 seconds)
+        time.sleep(180)
