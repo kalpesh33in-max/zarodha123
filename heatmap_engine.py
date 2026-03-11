@@ -27,8 +27,9 @@ last_oi_store = {}
 # Specifically for ITM/ATM Option alerts (Stores history for one-hour health check)
 option_history = {} # {token: [list of (time, oi, price)]}
 
-# Cache options data
+# Cache options and futures data
 _options_df = None
+_futures_df = None
 
 def load_options_data():
     global _options_df
@@ -38,14 +39,44 @@ def load_options_data():
             _options_df = df[df['segment'] == 'NFO-OPT'].copy()
             _options_df['expiry'] = pd.to_datetime(_options_df['expiry'])
         except Exception as e:
-            print(f"Error loading instruments.csv: {e}")
+            print(f"Error loading NFO-OPT from instruments.csv: {e}")
     return _options_df
 
+def load_futures_data():
+    global _futures_df
+    if _futures_df is None:
+        try:
+            df = pd.read_csv("instruments.csv")
+            _futures_df = df[df['segment'].str.contains('-FUT', na=False)].copy()
+            _futures_df['expiry'] = pd.to_datetime(_futures_df['expiry'])
+        except Exception as e:
+            print(f"Error loading futures from instruments.csv: {e}")
+    return _futures_df
+
+def get_active_future(name, segment, exchange):
+    df = load_futures_data()
+    if df is None or df.empty: return None
+    futures = df[(df['name'] == name) & (df['segment'] == segment)]
+    if futures.empty: return None
+    nearest_expiry = futures['expiry'].min()
+    active_contract = futures[futures['expiry'] == nearest_expiry]
+    if not active_contract.empty:
+        return f"{exchange}:" + active_contract.iloc[0]['tradingsymbol']
+    return None
+
 def get_bank_futures(kite):
-    now = datetime.now()
-    month_str = now.strftime("%b").upper()
-    year_str = now.strftime("%y")
-    return [f"NFO:{name}{year_str}{month_str}FUT" for name in BANK_NAMES]
+    symbols = []
+    for name in BANK_NAMES:
+        sym = get_active_future(name, 'NFO-FUT', 'NFO')
+        if sym:
+            symbols.append(sym)
+        else:
+            # Fallback
+            now = datetime.now()
+            month_str = now.strftime("%b").upper()
+            year_str = now.strftime("%y")
+            symbols.append(f"NFO:{name}{year_str}{month_str}FUT")
+    return symbols
 
 def get_live_pcr(kite, underlying_name, ltp):
     try:
@@ -156,7 +187,13 @@ def scan_option_alerts(kite, name, ltp):
 
 def calculate_heatmap(kite):
     fut_symbols = get_bank_futures(kite)
-    all_symbols = fut_symbols + [INDEX_SYMBOL, TEST_SYMBOL]
+    
+    # Dynamically fetch Crude Oil
+    crude_symbol = get_active_future("CRUDEOIL", "MCX-FUT", "MCX")
+    if not crude_symbol:
+        crude_symbol = TEST_SYMBOL # fallback
+        
+    all_symbols = fut_symbols + [INDEX_SYMBOL, crude_symbol]
     
     try:
         data = kite.quote(all_symbols)
@@ -167,8 +204,8 @@ def calculate_heatmap(kite):
     report = "📊 *COMMODITY TEST (CRUDE OIL)* 🛢\n"
     
     # 0. Process Crude Oil (Test Only)
-    if TEST_SYMBOL in data:
-        crude_d = data[TEST_SYMBOL]
+    if crude_symbol in data:
+        crude_d = data[crude_symbol]
         ltp, open_p, oi = crude_d["last_price"], crude_d["ohlc"]["open"], crude_d.get("oi", 0)
         change = ((ltp - open_p) / open_p) * 100 if open_p > 0 else 0
         
