@@ -155,7 +155,7 @@ def scan_option_alerts(kite, name, ltp):
 
 def calculate_heatmap(kite):
     fut_symbols = get_bank_futures(kite)
-    all_symbols = fut_symbols + [INDEX_SYMBOL]
+    all_symbols = fut_symbols + [INDEX_SYMBOL, TEST_SYMBOL]
     
     try:
         data = kite.quote(all_symbols)
@@ -163,7 +163,17 @@ def calculate_heatmap(kite):
         return 0, f"Error: {e}"
 
     score = 0
-    report = "📊 BANK MOVEMENT (FUTURES)\n\n"
+    report = "📊 *COMMODITY TEST (CRUDE OIL)* 🛢\n"
+    
+    # 0. Process Crude Oil (Test Only)
+    if TEST_SYMBOL in data:
+        crude_d = data[TEST_SYMBOL]
+        ltp, open_p, oi = crude_d["last_price"], crude_d["ohlc"]["open"], crude_d.get("oi", 0)
+        change = ((ltp - open_p) / open_p) * 100 if open_p > 0 else 0
+        
+        report += f"CRUDEOIL={ltp} , COP%={change:+.2f}% , TOI: {oi/1000:.0f}K\n\n"
+
+    report += "📊 BANK MOVEMENT (FUTURES)\n\n"
     itm_alerts_list = []
 
     # Short names mapping
