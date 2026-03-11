@@ -1,18 +1,34 @@
 import pandas as pd
+import time
 from heatmap_engine import calculate_heatmap
+from telegram_utils import send_telegram_message
 
 def run_scanner(kite):
 
-    score = calculate_heatmap(kite)
+    print("Scanner started. Sending initial status to Telegram...")
+    send_telegram_message("Kite Scanner Started Successfully!")
 
-    if score > 30:
+    while True:
 
-        print("BANKNIFTY STRONG BULLISH")
+        try:
+            score, report = calculate_heatmap(kite)
+            
+            # Combine report with the sentiment score
+            final_message = report + f"\n⚖️ *SENTIMENT SCORE*: {score:.2f}\n"
 
-    elif score < -30:
+            if score > 30:
+                final_message += "🚀 *STATUS: STRONG BULLISH*"
+            elif score < -30:
+                final_message += "📉 *STATUS: STRONG BEARISH*"
+            else:
+                final_message += "⚖️ *STATUS: SIDEWAYS*"
 
-        print("BANKNIFTY STRONG BEARISH")
+            print(final_message)
+            send_telegram_message(final_message)
 
-    else:
+        except Exception as e:
+            print(f"Error in scanner loop: {e}")
+            send_telegram_message(f"Scanner Error: {e}")
 
-        print("SIDEWAYS")
+        # Wait for 5 minutes (300 seconds)
+        time.sleep(300)
