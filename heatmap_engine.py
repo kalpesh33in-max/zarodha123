@@ -220,6 +220,9 @@ def calculate_heatmap(kite):
         weighted = (change / 100) * BANK_WEIGHTS.get(name, 0)
         score += weighted * 100
 
+        # High-Speed Future Burst Logic (for Stocks)
+        process_future_burst(s, name, ltp, oi, stock_alerts)
+
         oi_increase_lots = 0
         if name in last_oi_store:
             oi_increase_lots = int((oi - last_oi_store[name]) / LOT_SIZES.get(name, 1))
@@ -239,12 +242,25 @@ def calculate_heatmap(kite):
         idx_d = data[INDEX_SYMBOL]
         ltp, open_p, oi = idx_d["last_price"], idx_d["ohlc"]["open"], idx_d.get("oi", 0)
         change = ((ltp - open_p) / open_p) * 100 if open_p > 0 else 0
+        
+        # High-Speed Future Burst Logic (for Bank Nifty)
+        # Note: We look for the active future symbol for BN alerts
+        bn_fut_sym = get_active_future("BANKNIFTY", "NFO-FUT", "NFO")
+        if bn_fut_sym in data:
+            f_d = data[bn_fut_sym]
+            process_future_burst(bn_fut_sym, "BANKNIFTY", f_d["last_price"], f_d.get("oi", 0), bn_alerts)
+
         idx_oi_increase_lots = int((oi - last_oi_store.get("BANKNIFTY", oi)) / LOT_SIZES["BANKNIFTY"])
         last_oi_store["BANKNIFTY"] = oi
         pcr = process_option_logic("BANKNIFTY", underlying_option_map.get("BANKNIFTY", (pd.DataFrame(), ltp)), option_quotes, bn_alerts)
         oi_str = f"{oi/1000000:.1f}M" if oi >= 1000000 else f"{oi/1000:.0f}K"
         oi_icon = "⬆️" if idx_oi_increase_lots >= 0 else "⬇️"
         report += f"BANKNIFTY={ltp} , COP%={change:+.2f}% , TOI: {oi_str},OI{oi_icon}={abs(idx_oi_increase_lots)}LOT,PCR-{pcr:.2f}\n\n"
+
+    # Process Crude Oil Futures Burst
+    if crude_symbol in data:
+        f_d = data[crude_symbol]
+        process_future_burst(crude_symbol, "CRUDEOIL", f_d["last_price"], f_d.get("oi", 0), crude_alerts)
 
     # Process Crude Oil Options
     if "CRUDEOIL" in underlying_option_map:
@@ -259,6 +275,60 @@ def calculate_heatmap(kite):
         report += "\n--- CRUDE ALERTS ---\n" + "\n".join(crude_alerts[:3])
 
     return score, report, bn_alerts, stock_alerts
+
+def process_future_burst(symbol, name, ltp, oi, alerts_list):
+    """Detects 100-lot Bursts for Futures using the 2-minute Watch logic."""
+    lot_size = LOT_SIZES.get(name, 1)
+    now = datetime.now()
+    
+    # We use instrument tokens or symbols as keys for history
+    key = f"FUT_{symbol}"
+    if key not in option_history:
+        option_history[key] = []
+    
+    history = option_history[key]
+    prev_oi = history[-1]['oi'] if history else 0
+    prev_price = history[-1]['price'] if history else 0
+
+    # 1. Trigger Watch (100+ Lots)
+    if prev_oi > 0:
+        tick_lots = int(abs(oi - prev_oi) / lot_size)
+        if tick_lots >= 100 and key not in active_watches:
+            active_watches[key] = {
+                "start_oi": prev_oi,
+                "start_price": prev_price,
+                "end_time": now + timedelta(minutes=2),
+                "symbol": symbol,
+                "name": name
+            }
+
+    # 2. Confirm Watch
+    if key in active_watches:
+        watch = active_watches[key]
+        if now >= watch["end_time"]:
+            final_oi_chg = oi - watch["start_oi"]
+            final_price_chg = ltp - watch["start_price"]
+            final_lots = int(abs(final_oi_chg) / lot_size)
+            
+            if final_lots >= 100:
+                strength = get_strength_label(final_lots)
+                action = classify_action(watch['symbol'], final_oi_chg, final_price_chg)
+                price_icon = "▲" if final_price_chg >= 0 else "▼"
+                alerts_list.append(
+                    f"{strength}\n"
+                    f"🚨 {action}\n"
+                    f"Symbol: {watch['symbol']}\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"LOTS: {final_lots}\n"
+                    f"PRICE: {ltp:.2f} ({price_icon})\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"OI CHANGE: {final_oi_chg:+,}\n"
+                    f"NEW OI: {oi:,}\n"
+                )
+            del active_watches[key]
+
+    history.append({'time': now, 'oi': oi, 'price': ltp})
+    if len(history) > 20: history.pop(0)
 
 def process_option_logic(name, underlying_data, option_quotes, itm_alerts_list):
     """Handles PCR and GDFL-style 100-lot Burst Alert Logic."""
