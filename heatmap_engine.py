@@ -15,7 +15,8 @@ LOT_SIZES = {
     "SBIN": 750,
     "AXISBANK": 625,
     "KOTAKBANK": 2000,
-    "BANKNIFTY": 30
+    "BANKNIFTY": 30,
+    "CRUDEOIL": 100
 }
 
 BANK_NAMES = ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"]
@@ -24,8 +25,9 @@ TEST_SYMBOL = "MCX:CRUDEOIL26MARFUT"
 
 # Store previous OI to calculate OI INCREASE
 last_oi_store = {}
-# Specifically for ITM/ATM Option alerts (Stores history for one-hour health check)
+# Specifically for ITM/ATM Option alerts
 option_history = {} # {token: [list of (time, oi, price)]}
+active_watches = {} # {token: {start_oi, start_price, end_time}}
 
 # Cache options and futures data
 _options_df = None
@@ -36,10 +38,11 @@ def load_options_data():
     if _options_df is None:
         try:
             df = pd.read_csv("instruments.csv")
-            _options_df = df[df['segment'] == 'NFO-OPT'].copy()
+            # Include both NFO (Stocks/Index) and MCX (Commodities)
+            _options_df = df[df['segment'].isin(['NFO-OPT', 'MCX-OPT'])].copy()
             _options_df['expiry'] = pd.to_datetime(_options_df['expiry'], dayfirst=True)
         except Exception as e:
-            print(f"Error loading NFO-OPT from instruments.csv: {e}")
+            print(f"Error loading Options from instruments.csv: {e}")
     return _options_df
 
 def load_futures_data():
@@ -58,9 +61,6 @@ def get_active_future(name, segment, exchange):
     if df is None or df.empty: return None
     futures = df[(df['name'] == name) & (df['segment'] == segment)]
     if futures.empty: return None
-    # For Monthly, we pick the furthest expiry that is still within the current near-month period
-    # Usually the nearest available future IS the monthly future in NFO.
-    # To be safe, we pick the minimum expiry which is the near-month monthly contract.
     nearest_expiry = futures['expiry'].min()
     active_contract = futures[futures['expiry'] == nearest_expiry]
     if not active_contract.empty:
@@ -88,23 +88,17 @@ def get_relevant_options(underlying_name, ltp):
     if options.empty: return pd.DataFrame()
     
     # Logic for Monthly Expiry:
-    # 1. Get all unique expiries
     expiries = sorted(options['expiry'].unique())
-    # 2. Monthly expiries in NSE are usually the last Thursday. 
-    # Stock options ONLY have monthly. Index (BANKNIFTY) has weekly.
-    # If it's BANKNIFTY, we must find the monthly one.
     
     if underlying_name == "BANKNIFTY":
-        # Strategy: The monthly expiry is the one that has the most strikes or is the last one of the month
-        # A reliable way: Monthly expiry is the same as the Future's expiry
         fut_df = load_futures_data()
         bn_fut = fut_df[fut_df['name'] == "BANKNIFTY"]
-        if not bn_fut.empty:
-            monthly_expiry = bn_fut['expiry'].min()
-        else:
-            monthly_expiry = expiries[0] # Fallback
+        monthly_expiry = bn_fut['expiry'].min() if not bn_fut.empty else expiries[0]
+    elif underlying_name == "CRUDEOIL":
+        # Crude options have specific expiries, usually the nearest one
+        monthly_expiry = expiries[0]
     else:
-        # Stocks only have monthly, so nearest is monthly
+        # Stocks only have monthly
         monthly_expiry = expiries[0]
 
     current_expiry_options = options[options['expiry'] == monthly_expiry]
@@ -115,8 +109,9 @@ def get_relevant_options(underlying_name, ltp):
     atm_strike = min(strikes, key=lambda x: abs(x - ltp))
     idx = strikes.index(atm_strike)
     
-    # We take 10 strikes above and below ATM
-    min_idx, max_idx = max(0, idx - 10), min(len(strikes) - 1, idx + 10)
+    # NEW: Dynamic ranges (±15 for BANKNIFTY, ±10 for others)
+    range_size = 15 if underlying_name == "BANKNIFTY" else 10
+    min_idx, max_idx = max(0, idx - range_size), min(len(strikes) - 1, idx + range_size)
     relevant_strikes = strikes[min_idx : max_idx+1]
     
     return current_expiry_options[current_expiry_options['strike'].isin(relevant_strikes)]
@@ -129,14 +124,14 @@ def get_strength_label(lots):
     else: return ""
 
 def classify_action(symbol, oi_change, price_change):
-    # Futures logic
-    if symbol.endswith("-FUT") or "FUT" in symbol:
+    # Futures logic (Detects -FUT, -I for GDFL style, or MCX Futures)
+    if any(x in symbol for x in ["-FUT", "FUT", "-I"]):
         if oi_change > 0:
             return "FUTURE BUY (LONG) 📈" if price_change >= 0 else "FUTURE SELL (SHORT) 📉"
         else:
             return "SHORT COVERING ↗️" if price_change >= 0 else "LONG UNWINDING ↘️"
     
-    # Options logic
+    # Options logic (Checks for CE/PE at the end of the symbol)
     is_call = symbol.endswith("CE")
     if oi_change > 0:
         if price_change >= 0:
@@ -166,11 +161,12 @@ def calculate_heatmap(kite):
     score = 0
     report = "📊 *COMMODITY TEST (CRUDE OIL)* 🛢\n"
     
+    crude_ltp = 0
     if crude_symbol in data:
         crude_d = data[crude_symbol]
-        ltp, open_p, oi = crude_d["last_price"], crude_d["ohlc"]["open"], crude_d.get("oi", 0)
-        change = ((ltp - open_p) / open_p) * 100 if open_p > 0 else 0
-        report += f"CRUDEOIL={ltp} , COP%={change:+.2f}% , TOI: {oi/1000:.0f}K\n\n"
+        crude_ltp, open_p, oi = crude_d["last_price"], crude_d["ohlc"]["open"], crude_d.get("oi", 0)
+        change = ((crude_ltp - open_p) / open_p) * 100 if open_p > 0 else 0
+        report += f"CRUDEOIL={crude_ltp} , COP%={change:+.2f}% , TOI: {oi/1000:.0f}K\n\n"
 
     report += "📊 BANK MOVEMENT (FUTURES)\n\n"
     
@@ -178,14 +174,14 @@ def calculate_heatmap(kite):
     all_option_tokens = []
     underlying_option_map = {} # {name: df_of_options}
     
-    # Gather tokens for all banks + Bank Nifty
-    for name in BANK_NAMES + ["BANKNIFTY"]:
-        # Find LTP for this underlying
+    # Gather tokens for all banks + Bank Nifty + Crude Oil
+    for name in BANK_NAMES + ["BANKNIFTY", "CRUDEOIL"]:
         underlying_ltp = 0
         if name == "BANKNIFTY":
             underlying_ltp = data.get(INDEX_SYMBOL, {}).get("last_price", 0)
+        elif name == "CRUDEOIL":
+            underlying_ltp = crude_ltp
         else:
-            # Find the future symbol for this bank in our data
             for s in fut_symbols:
                 if name in s:
                     underlying_ltp = data.get(s, {}).get("last_price", 0)
@@ -197,17 +193,21 @@ def calculate_heatmap(kite):
                 underlying_option_map[name] = (relevant_options_df, underlying_ltp)
                 all_option_tokens.extend(relevant_options_df['instrument_token'].tolist())
 
-    # FETCH ALL OPTION DATA IN ONE GO (CRITICAL FOR PERFORMANCE)
+    # FETCH ALL OPTION DATA IN ONE GO
     option_quotes = {}
     if all_option_tokens:
         try:
-            # Kite Connect quote allows up to 500 tokens. We likely have ~120 here.
-            option_quotes = kite.quote(all_option_tokens)
+            # Chunking because kite.quote has a limit (usually 500)
+            for i in range(0, len(all_option_tokens), 400):
+                batch = all_option_tokens[i:i+400]
+                option_quotes.update(kite.quote(batch))
         except Exception as e:
             print(f"Bulk Option Quote Error: {e}")
 
-    itm_alerts_list = []
-    short_names = {"HDFCBANK": "HDBFU", "ICICIBANK": "ICIBFU", "SBIN": "SBINFU", "AXISBANK": "AXISFU", "KOTAKBANK": "KOTFU", "BANKNIFTY": "BANKNIFTY"}
+    bn_alerts = []
+    stock_alerts = []
+    crude_alerts = []
+    short_names = {"HDFCBANK": "HDBFU", "ICICIBANK": "ICIBFU", "SBIN": "SBINFU", "AXISBANK": "AXISFU", "KOTAKBANK": "KOTFU", "BANKNIFTY": "BANKNIFTY", "CRUDEOIL": "CRUDEOIL"}
 
     # Process Banks
     for s in fut_symbols:
@@ -225,68 +225,10 @@ def calculate_heatmap(kite):
             oi_increase_lots = int((oi - last_oi_store[name]) / LOT_SIZES.get(name, 1))
         last_oi_store[name] = oi
 
-        # CALCULATE PCR AND ALERTS FROM PRE-FETCHED DATA
+        # Process PCR and Options for Banks
         pcr = 1.0
         if name in underlying_option_map:
-            opt_df, u_ltp = underlying_option_map[name]
-            total_call_oi = total_put_oi = 0
-            lot_size = LOT_SIZES.get(name, 1)
-            now = datetime.now()
-            
-            for _, row in opt_df.iterrows():
-                t_str = str(int(row['instrument_token']))
-                if t_str not in option_quotes: continue
-                
-                q = option_quotes[t_str]
-                curr_oi = q.get('oi', 0)
-                curr_price = q.get('last_price', 0)
-                
-                # Update PCR
-                if row['instrument_type'] == 'CE': total_call_oi += curr_oi
-                else: total_put_oi += curr_oi
-                
-                # OPTION ALERT LOGIC
-                t_int = int(t_str)
-                if t_int not in option_history: option_history[t_int] = []
-                history = option_history[t_int]
-                history.append({'time': now, 'oi': curr_oi, 'price': curr_price})
-                history[:] = [p for p in history if (now - p['time']).total_seconds() < 3600]
-
-                if len(history) >= 2:
-                    # One-Hour Health & Spike Check
-                    prev = history[-2]
-                    price_change = curr_price - prev['price']
-                    oi_change = curr_oi - prev['oi']
-                    oi_change_lots = int(oi_change / lot_size)
-                    abs_lots = abs(oi_change_lots)
-                    
-                    action = classify_action(row['tradingsymbol'], oi_change, price_change)
-                    
-                    # Threshold logic
-                    should_alert = False
-                    if "WRITER" in action or "SHORT COVERING" in action:
-                        if abs_lots >= 100: should_alert = True
-                    else: # BUYER or LONG UNWINDING
-                        if abs_lots >= 300: should_alert = True
-                    
-                    if should_alert:
-                        strength = get_strength_label(abs_lots)
-                        price_icon = "▲" if price_change >= 0 else "▼"
-                        itm_alerts_list.append(
-                            f"{strength}\n"
-                            f"🚨 {action}\n"
-                            f"Symbol: {row['tradingsymbol']}\n"
-                            f"---------------------------------\n"
-                            f"LOTS: {abs_lots}\n"
-                            f"PRICE: {curr_price:.2f} ({price_icon})\n"
-                            f"FUTURE PRICE: {u_ltp:.2f}\n"
-                            f"---------------------------------\n"
-                            f"EXISTING OI: {prev['oi']:,}\n"
-                            f"OI CHANGE : {oi_change:+,}\n"
-                            f"NEW OI    : {curr_oi:,}\n"
-                        )
-
-            pcr = total_put_oi / total_call_oi if total_call_oi > 0 else 1.0
+            pcr = process_option_logic(name, underlying_option_map[name], option_quotes, stock_alerts)
 
         oi_str = f"{oi/1000000:.1f}M" if oi >= 1000000 else f"{oi/1000:.0f}K"
         oi_icon = "⬆️" if oi_increase_lots >= 0 else "⬇️"
@@ -297,39 +239,96 @@ def calculate_heatmap(kite):
         idx_d = data[INDEX_SYMBOL]
         ltp, open_p, oi = idx_d["last_price"], idx_d["ohlc"]["open"], idx_d.get("oi", 0)
         change = ((ltp - open_p) / open_p) * 100 if open_p > 0 else 0
-        
-        idx_oi_increase_lots = 0
-        if "BANKNIFTY" in last_oi_store:
-            idx_oi_increase_lots = int((oi - last_oi_store["BANKNIFTY"]) / LOT_SIZES["BANKNIFTY"])
+        idx_oi_increase_lots = int((oi - last_oi_store.get("BANKNIFTY", oi)) / LOT_SIZES["BANKNIFTY"])
         last_oi_store["BANKNIFTY"] = oi
-        
-        # Calculate Bank Nifty PCR
-        pcr = 1.0
-        if "BANKNIFTY" in underlying_option_map:
-            opt_df, u_ltp = underlying_option_map["BANKNIFTY"]
-            total_call_oi = total_put_oi = 0
-            for _, row in opt_df.iterrows():
-                t_str = str(int(row['instrument_token']))
-                if t_str in option_quotes:
-                    curr_oi = option_quotes[t_str].get('oi', 0)
-                    if row['instrument_type'] == 'CE': total_call_oi += curr_oi
-                    else: total_put_oi += curr_oi
-            pcr = total_put_oi / total_call_oi if total_call_oi > 0 else 1.0
-
+        pcr = process_option_logic("BANKNIFTY", underlying_option_map.get("BANKNIFTY", (pd.DataFrame(), ltp)), option_quotes, bn_alerts)
         oi_str = f"{oi/1000000:.1f}M" if oi >= 1000000 else f"{oi/1000:.0f}K"
         oi_icon = "⬆️" if idx_oi_increase_lots >= 0 else "⬇️"
         report += f"BANKNIFTY={ltp} , COP%={change:+.2f}% , TOI: {oi_str},OI{oi_icon}={abs(idx_oi_increase_lots)}LOT,PCR-{pcr:.2f}\n\n"
 
+    # Process Crude Oil Options
+    if "CRUDEOIL" in underlying_option_map:
+        process_option_logic("CRUDEOIL", underlying_option_map["CRUDEOIL"], option_quotes, crude_alerts)
+
     report += f"⚖️ SENTIMENT SCORE: {score:.2f}\n"
-    
-    if score > 30: suggestion = "🚀 STRONG BUY"
-    elif score > 15: suggestion = "✅ BUY"
-    elif score < -30: suggestion = "🔥 STRONG SELL"
-    elif score < -15: suggestion = "❌ SELL"
-    else: suggestion = "⚖️ NEUTRAL"
+    suggestion = "🚀 STRONG BUY" if score > 30 else "✅ BUY" if score > 15 else "🔥 STRONG SELL" if score < -30 else "❌ SELL" if score < -15 else "⚖️ NEUTRAL"
     report += f"💡 SUGGESTION: *{suggestion}*\n"
     
-    if itm_alerts_list:
-        report += "\n---\n" + "\n".join(itm_alerts_list[:5]) # Show top 5 alerts
+    # CRUDE OIL alerts stay in the general report as per your request
+    if crude_alerts:
+        report += "\n--- CRUDE ALERTS ---\n" + "\n".join(crude_alerts[:3])
 
-    return score, report
+    return score, report, bn_alerts, stock_alerts
+
+def process_option_logic(name, underlying_data, option_quotes, itm_alerts_list):
+    """Handles PCR and GDFL-style 100-lot Burst Alert Logic."""
+    opt_df, u_ltp = underlying_data
+    if opt_df.empty: return 1.0
+    
+    total_call_oi = total_put_oi = 0
+    lot_size = LOT_SIZES.get(name, 1)
+    now = datetime.now()
+    
+    for _, row in opt_df.iterrows():
+        t_int = int(row['instrument_token'])
+        t_str = str(t_int)
+        if t_str not in option_quotes: continue
+        
+        q = option_quotes[t_str]
+        curr_oi, curr_price = q.get('oi', 0), q.get('last_price', 0)
+        
+        # PCR Tracking
+        if row['instrument_type'] == 'CE': total_call_oi += curr_oi
+        else: total_put_oi += curr_oi
+        
+        # GDFL-STYLE BURST LOGIC (100-Lot Trigger)
+        if t_int not in option_history:
+            option_history[t_int] = []
+        
+        history = option_history[t_int]
+        prev_oi = history[-1]['oi'] if history else 0
+        prev_price = history[-1]['price'] if history else 0
+        
+        # 1. Detect 100-Lot Burst to start a "Watch"
+        if prev_oi > 0:
+            tick_lots = int(abs(curr_oi - prev_oi) / lot_size)
+            if tick_lots >= 100 and t_int not in active_watches:
+                active_watches[t_int] = {
+                    "start_oi": prev_oi,
+                    "start_price": prev_price,
+                    "end_time": now + timedelta(minutes=2),
+                    "symbol": row['tradingsymbol'],
+                    "underlying": name
+                }
+
+        # 2. Check Active Watches for Confirmation
+        if t_int in active_watches:
+            watch = active_watches[t_int]
+            if now >= watch["end_time"]:
+                final_oi_chg = curr_oi - watch["start_oi"]
+                final_price_chg = curr_price - watch["start_price"]
+                final_lots = int(abs(final_oi_chg) / lot_size)
+                
+                if final_lots >= 100:
+                    strength = get_strength_label(final_lots)
+                    action = classify_action(watch['symbol'], final_oi_chg, final_price_chg)
+                    price_icon = "▲" if final_price_chg >= 0 else "▼"
+                    itm_alerts_list.append(
+                        f"{strength}\n"
+                        f"🚨 {action}\n"
+                        f"Symbol: {watch['symbol']}\n"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"LOTS: {final_lots}\n"
+                        f"PRICE: {curr_price:.2f} ({price_icon})\n"
+                        f"FUTURE: {u_ltp:.2f}\n"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"OI CHANGE: {final_oi_chg:+,}\n"
+                        f"NEW OI: {curr_oi:,}\n"
+                    )
+                del active_watches[t_int] # Clear watch
+
+        # Update History
+        history.append({'time': now, 'oi': curr_oi, 'price': curr_price})
+        if len(history) > 20: history.pop(0) # Keep small window
+
+    return total_put_oi / total_call_oi if total_call_oi > 0 else 1.0
