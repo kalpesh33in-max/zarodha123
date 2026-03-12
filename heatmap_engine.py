@@ -99,12 +99,33 @@ def get_relevant_options(underlying_name, ltp):
     
     return current_expiry_options[current_expiry_options['strike'].isin(relevant_strikes)]
 
-def classify_action(price_change, oi_change):
-    if price_change >= 0 and oi_change >= 0: return "BUYER (Long Build-up) 📈"
-    if price_change < 0 and oi_change >= 0: return "WRITER (Short Build-up) 📉"
-    if price_change >= 0 and oi_change < 0: return "SHORT COVERING 🚀"
-    if price_change < 0 and oi_change < 0: return "LONG UNWINDING 💨"
-    return "UNKNOWN"
+def get_strength_label(lots):
+    if lots >= 400: return "🚀 BLAST 🚀"
+    elif lots >= 300: return "☀️ AWESOME"
+    elif lots >= 200: return "✅ VERY GOOD"
+    elif lots >= 100: return "⚡ GOOD"
+    else: return ""
+
+def classify_action(symbol, oi_change, price_change):
+    # Futures logic
+    if symbol.endswith("-FUT") or "FUT" in symbol:
+        if oi_change > 0:
+            return "FUTURE BUY (LONG) 📈" if price_change >= 0 else "FUTURE SELL (SHORT) 📉"
+        else:
+            return "SHORT COVERING ↗️" if price_change >= 0 else "LONG UNWINDING ↘️"
+    
+    # Options logic
+    is_call = symbol.endswith("CE")
+    if oi_change > 0:
+        if price_change >= 0:
+            return "CALL BUY 🔵" if is_call else "PUT BUY 🔴"
+        else:
+            return "CALL WRITER ✍️" if is_call else "PUT WRITER ✍️"
+    else:
+        if price_change >= 0:
+            return "SHORT COVERING (CE) ⤴️" if is_call else "SHORT COVERING (PE) ⤴️"
+        else:
+            return "LONG UNWINDING (CE) ⤵️" if is_call else "LONG UNWINDING (PE) ⤵️"
 
 def calculate_heatmap(kite):
     fut_symbols = get_bank_futures(kite)
@@ -212,12 +233,36 @@ def calculate_heatmap(kite):
                 if len(history) >= 2:
                     # One-Hour Health & Spike Check
                     prev = history[-2]
+                    price_change = curr_price - prev['price']
                     oi_change = curr_oi - prev['oi']
                     oi_change_lots = int(oi_change / lot_size)
+                    abs_lots = abs(oi_change_lots)
                     
-                    if oi_change_lots >= 300:
-                        action = classify_action(curr_price - prev['price'], oi_change)
-                        itm_alerts_list.append(f"🚨 *ITM {action}*\nUNDERLYING: {name}\nSTRIKE: {row['strike']} {row['instrument_type']}\nLOTS: {oi_change_lots}\n")
+                    action = classify_action(row['tradingsymbol'], oi_change, price_change)
+                    
+                    # Threshold logic
+                    should_alert = False
+                    if "WRITER" in action or "SHORT COVERING" in action:
+                        if abs_lots >= 100: should_alert = True
+                    else: # BUYER or LONG UNWINDING
+                        if abs_lots >= 300: should_alert = True
+                    
+                    if should_alert:
+                        strength = get_strength_label(abs_lots)
+                        price_icon = "▲" if price_change >= 0 else "▼"
+                        itm_alerts_list.append(
+                            f"{strength}\n"
+                            f"🚨 {action}\n"
+                            f"Symbol: {row['tradingsymbol']}\n"
+                            f"---------------------------------\n"
+                            f"LOTS: {abs_lots}\n"
+                            f"PRICE: {curr_price:.2f} ({price_icon})\n"
+                            f"FUTURE PRICE: {u_ltp:.2f}\n"
+                            f"---------------------------------\n"
+                            f"EXISTING OI: {prev['oi']:,}\n"
+                            f"OI CHANGE : {oi_change:+,}\n"
+                            f"NEW OI    : {curr_oi:,}\n"
+                        )
 
             pcr = total_put_oi / total_call_oi if total_call_oi > 0 else 1.0
 
