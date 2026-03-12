@@ -58,6 +58,9 @@ def get_active_future(name, segment, exchange):
     if df is None or df.empty: return None
     futures = df[(df['name'] == name) & (df['segment'] == segment)]
     if futures.empty: return None
+    # For Monthly, we pick the furthest expiry that is still within the current near-month period
+    # Usually the nearest available future IS the monthly future in NFO.
+    # To be safe, we pick the minimum expiry which is the near-month monthly contract.
     nearest_expiry = futures['expiry'].min()
     active_contract = futures[futures['expiry'] == nearest_expiry]
     if not active_contract.empty:
@@ -78,14 +81,33 @@ def get_bank_futures(kite):
     return symbols
 
 def get_relevant_options(underlying_name, ltp):
-    """Finds ITM/ATM/OTM strikes from instruments.csv for a given underlying."""
+    """Finds ITM/ATM/OTM strikes from instruments.csv for a given underlying monthly expiry."""
     df = load_options_data()
     if df is None or df.empty: return pd.DataFrame()
     options = df[df['name'] == underlying_name]
     if options.empty: return pd.DataFrame()
     
-    nearest_expiry = options['expiry'].min()
-    current_expiry_options = options[options['expiry'] == nearest_expiry]
+    # Logic for Monthly Expiry:
+    # 1. Get all unique expiries
+    expiries = sorted(options['expiry'].unique())
+    # 2. Monthly expiries in NSE are usually the last Thursday. 
+    # Stock options ONLY have monthly. Index (BANKNIFTY) has weekly.
+    # If it's BANKNIFTY, we must find the monthly one.
+    
+    if underlying_name == "BANKNIFTY":
+        # Strategy: The monthly expiry is the one that has the most strikes or is the last one of the month
+        # A reliable way: Monthly expiry is the same as the Future's expiry
+        fut_df = load_futures_data()
+        bn_fut = fut_df[fut_df['name'] == "BANKNIFTY"]
+        if not bn_fut.empty:
+            monthly_expiry = bn_fut['expiry'].min()
+        else:
+            monthly_expiry = expiries[0] # Fallback
+    else:
+        # Stocks only have monthly, so nearest is monthly
+        monthly_expiry = expiries[0]
+
+    current_expiry_options = options[options['expiry'] == monthly_expiry]
     
     strikes = sorted(current_expiry_options['strike'].unique())
     if not strikes: return pd.DataFrame()
