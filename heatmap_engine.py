@@ -156,7 +156,7 @@ def calculate_heatmap(kite):
     try:
         data = kite.quote(all_symbols)
     except Exception as e:
-        return 0, f"Error: {e}"
+        return 0, f"Error: {e}", [], []
 
     score = 0
     report = "📊 *COMMODITY TEST (CRUDE OIL)* 🛢\n"
