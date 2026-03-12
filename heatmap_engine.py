@@ -37,7 +37,7 @@ def load_options_data():
         try:
             df = pd.read_csv("instruments.csv")
             _options_df = df[df['segment'] == 'NFO-OPT'].copy()
-            _options_df['expiry'] = pd.to_datetime(_options_df['expiry'])
+            _options_df['expiry'] = pd.to_datetime(_options_df['expiry'], dayfirst=True)
         except Exception as e:
             print(f"Error loading NFO-OPT from instruments.csv: {e}")
     return _options_df
@@ -48,7 +48,7 @@ def load_futures_data():
         try:
             df = pd.read_csv("instruments.csv")
             _futures_df = df[df['segment'].str.contains('-FUT', na=False)].copy()
-            _futures_df['expiry'] = pd.to_datetime(_futures_df['expiry'])
+            _futures_df['expiry'] = pd.to_datetime(_futures_df['expiry'], dayfirst=True)
         except Exception as e:
             print(f"Error loading futures from instruments.csv: {e}")
     return _futures_df
