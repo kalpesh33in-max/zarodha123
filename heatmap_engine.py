@@ -277,23 +277,24 @@ def calculate_heatmap(kite):
     return score, report, bn_alerts, stock_alerts
 
 def process_future_burst(symbol, name, ltp, oi, alerts_list):
-    """Detects 100-lot Bursts for Futures using the 2-minute Watch logic."""
+    """Detects Bursts for Futures using the 2-minute Watch logic."""
     lot_size = LOT_SIZES.get(name, 1)
+    # CRUDEOIL uses 10-lot trigger, others use 100
+    threshold = 10 if name == "CRUDEOIL" else 100
     now = datetime.now()
-    
-    # We use instrument tokens or symbols as keys for history
+
     key = f"FUT_{symbol}"
     if key not in option_history:
         option_history[key] = []
-    
+
     history = option_history[key]
     prev_oi = history[-1]['oi'] if history else 0
     prev_price = history[-1]['price'] if history else 0
 
-    # 1. Trigger Watch (100+ Lots)
+    # 1. Trigger Watch
     if prev_oi > 0:
         tick_lots = int(abs(oi - prev_oi) / lot_size)
-        if tick_lots >= 100 and key not in active_watches:
+        if tick_lots >= threshold and key not in active_watches:
             active_watches[key] = {
                 "start_oi": prev_oi,
                 "start_price": prev_price,
@@ -309,9 +310,16 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list):
             final_oi_chg = oi - watch["start_oi"]
             final_price_chg = ltp - watch["start_price"]
             final_lots = int(abs(final_oi_chg) / lot_size)
-            
-            if final_lots >= 100:
+
+            if final_lots >= threshold:
                 strength = get_strength_label(final_lots)
+                # Strength adjustment for Crude (since 10 is the base)
+                if name == "CRUDEOIL":
+                    if final_lots >= 50: strength = "🚀 BLAST 🚀"
+                    elif final_lots >= 30: strength = "☀️ AWESOME"
+                    elif final_lots >= 20: strength = "✅ VERY GOOD"
+                    else: strength = "⚡ GOOD"
+
                 action = classify_action(watch['symbol'], final_oi_chg, final_price_chg)
                 price_icon = "▲" if final_price_chg >= 0 else "▼"
                 alerts_list.append(
@@ -331,38 +339,40 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list):
     if len(history) > 20: history.pop(0)
 
 def process_option_logic(name, underlying_data, option_quotes, itm_alerts_list):
-    """Handles PCR and GDFL-style 100-lot Burst Alert Logic."""
+    """Handles PCR and GDFL-style Burst Alert Logic."""
     opt_df, u_ltp = underlying_data
     if opt_df.empty: return 1.0
-    
+
     total_call_oi = total_put_oi = 0
     lot_size = LOT_SIZES.get(name, 1)
+    # CRUDEOIL uses 10-lot trigger, others use 100
+    threshold = 10 if name == "CRUDEOIL" else 100
     now = datetime.now()
-    
+
     for _, row in opt_df.iterrows():
         t_int = int(row['instrument_token'])
         t_str = str(t_int)
         if t_str not in option_quotes: continue
-        
+
         q = option_quotes[t_str]
         curr_oi, curr_price = q.get('oi', 0), q.get('last_price', 0)
-        
+
         # PCR Tracking
         if row['instrument_type'] == 'CE': total_call_oi += curr_oi
         else: total_put_oi += curr_oi
-        
-        # GDFL-STYLE BURST LOGIC (100-Lot Trigger)
+
+        # GDFL-STYLE BURST LOGIC
         if t_int not in option_history:
             option_history[t_int] = []
-        
+
         history = option_history[t_int]
         prev_oi = history[-1]['oi'] if history else 0
         prev_price = history[-1]['price'] if history else 0
-        
-        # 1. Detect 100-Lot Burst to start a "Watch"
+
+        # 1. Detect Burst to start a "Watch"
         if prev_oi > 0:
             tick_lots = int(abs(curr_oi - prev_oi) / lot_size)
-            if tick_lots >= 100 and t_int not in active_watches:
+            if tick_lots >= threshold and t_int not in active_watches:
                 active_watches[t_int] = {
                     "start_oi": prev_oi,
                     "start_price": prev_price,
@@ -378,9 +388,16 @@ def process_option_logic(name, underlying_data, option_quotes, itm_alerts_list):
                 final_oi_chg = curr_oi - watch["start_oi"]
                 final_price_chg = curr_price - watch["start_price"]
                 final_lots = int(abs(final_oi_chg) / lot_size)
-                
-                if final_lots >= 100:
+
+                if final_lots >= threshold:
                     strength = get_strength_label(final_lots)
+                    # Strength adjustment for Crude
+                    if name == "CRUDEOIL":
+                        if final_lots >= 50: strength = "🚀 BLAST 🚀"
+                        elif final_lots >= 30: strength = "☀️ AWESOME"
+                        elif final_lots >= 20: strength = "✅ VERY GOOD"
+                        else: strength = "⚡ GOOD"
+
                     action = classify_action(watch['symbol'], final_oi_chg, final_price_chg)
                     price_icon = "▲" if final_price_chg >= 0 else "▼"
                     itm_alerts_list.append(
@@ -395,7 +412,8 @@ def process_option_logic(name, underlying_data, option_quotes, itm_alerts_list):
                         f"OI CHANGE: {final_oi_chg:+,}\n"
                         f"NEW OI: {curr_oi:,}\n"
                     )
-                del active_watches[t_int] # Clear watch
+                del active_watches[t_int]
+ # Clear watch
 
         # Update History
         history.append({'time': now, 'oi': curr_oi, 'price': curr_price})
