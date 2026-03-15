@@ -387,15 +387,15 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list):
                 action = classify_action(watch['symbol'], final_oi_chg, final_price_chg)
                 price_icon = "▲" if final_price_chg >= 0 else "▼"
                 alerts_list.append(
-                    f"{strength}\n"
-                    f"🚨 {action}\n"
-                    f"Symbol: {watch['symbol']}\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"LOTS: {final_lots}\n"
-                    f"PRICE: {ltp:.2f} ({price_icon})\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"OI CHANGE: {final_oi_chg:+,}\n"
-                    f"NEW OI: {oi:,}\n"
+                    f"> {strength}\n"
+                    f"> 🚨 {action}\n"
+                    f"> Symbol: {watch['symbol']}\n"
+                    f"> ━━━━━━━━━━━━━━━\n"
+                    f"> LOTS: {final_lots}\n"
+                    f"> PRICE: {ltp:.2f} ({price_icon})\n"
+                    f"> ━━━━━━━━━━━━━━━\n"
+                    f"> OI CHANGE: {final_oi_chg:+,}\n"
+                    f"> NEW OI: {oi:,}"
                 )
             del active_watches[key]
 
@@ -458,16 +458,16 @@ def process_option_logic(name, underlying_data, option_quotes, itm_alerts_list):
                     action = classify_action(watch['symbol'], final_oi_chg, final_price_chg)
                     price_icon = "▲" if final_price_chg >= 0 else "▼"
                     itm_alerts_list.append(
-                        f"{strength}\n"
-                        f"🚨 {action}\n"
-                        f"Symbol: {watch['symbol']}\n"
-                        f"━━━━━━━━━━━━━━━\n"
-                        f"LOTS: {final_lots}\n"
-                        f"PRICE: {curr_price:.2f} ({price_icon})\n"
-                        f"FUTURE: {u_ltp:.2f}\n"
-                        f"━━━━━━━━━━━━━━━\n"
-                        f"OI CHANGE: {final_oi_chg:+,}\n"
-                        f"NEW OI: {curr_oi:,}\n"
+                        f"> {strength}\n"
+                        f"> 🚨 {action}\n"
+                        f"> Symbol: {watch['symbol']}\n"
+                        f"> ━━━━━━━━━━━━━━━\n"
+                        f"> LOTS: {final_lots}\n"
+                        f"> PRICE: {curr_price:.2f} ({price_icon})\n"
+                        f"> FUTURE: {u_ltp:.2f}\n"
+                        f"> ━━━━━━━━━━━━━━━\n"
+                        f"> OI CHANGE: {final_oi_chg:+,}\n"
+                        f"> NEW OI: {curr_oi:,}"
                     )
                 del active_watches[t_int]
  # Clear watch
