@@ -160,6 +160,40 @@ def classify_action(symbol, oi_change, price_change):
 # Store 10-minute history for accumulation checks (20 cycles of 30s)
 accum_history = {} # {symbol: {'data': [(oi, price)], 'watching_breakout': None, 'high': 0, 'low': 0}}
 
+def process_quiet_accumulation(name, ltp, oi, alerts_list):
+    """Refined 10-minute Whale Accumulation & Breakout logic."""
+    if name not in accum_history: 
+        accum_history[name] = {'data': [], 'watching_breakout': False, 'high': 0, 'low': 0}
+    
+    state = accum_history[name]
+    state['data'].append((oi, ltp))
+    if len(state['data']) > 20: state['data'].pop(0) # Keep 10 mins (20 * 30s)
+    
+    # 1. Detect Accumulation Phase
+    if len(state['data']) == 20:
+        oi_start, p_start = state['data'][0]
+        oi_change_10m = oi - oi_start
+        prices_10m = [x[1] for x in state['data']]
+        p_high, p_low = max(prices_10m), min(prices_10m)
+        p_range_10m = ((p_high - p_low) / p_low * 100) if p_low > 0 else 0
+        
+        # If OI increased significantly (>500 lots) but price range is very tight (<0.15%)
+        if oi_change_10m > (500 * LOT_SIZES.get(name, 1)) and p_range_10m < 0.15:
+            if not state['watching_breakout']:
+                state['watching_breakout'] = True
+                state['high'] = p_high
+                state['low'] = p_low
+                alerts_list.append(f"🤫 {name} Whale Entering...")
+
+    # 2. Detect Breakout from Accumulation
+    if state['watching_breakout']:
+        if ltp > state['high'] * 1.0005: # 0.05% breakout buffer
+            alerts_list.append(f"🚀 *WHALE BREAKOUT (UP):* {name} - **BUY CALL**")
+            state['watching_breakout'] = False # Reset
+        elif ltp < state['low'] * 0.9995:
+            alerts_list.append(f"📉 *WHALE BREAKOUT (DOWN):* {name} - **BUY PUT**")
+            state['watching_breakout'] = False # Reset
+
 def calculate_heatmap(kite):
     fut_symbols = get_bank_futures(kite)
     
@@ -225,38 +259,8 @@ def calculate_heatmap(kite):
         # Track for 3-Star (Basic Trend)
         bank_signals[name] = "BUY" if change > 0.3 else "SELL" if change < -0.3 else "NEUTRAL"
 
-        # ADVANCED: Quiet Accumulation & Breakout Logic
-        if name not in accum_history: 
-            accum_history[name] = {'data': [], 'watching_breakout': False, 'high': 0, 'low': 0}
-        
-        state = accum_history[name]
-        state['data'].append((oi, ltp))
-        if len(state['data']) > 20: state['data'].pop(0) # Keep 10 mins (20 * 30s)
-        
-        # 1. Detect Accumulation Phase
-        if len(state['data']) == 20:
-            oi_start, p_start = state['data'][0]
-            oi_change_10m = oi - oi_start
-            prices_10m = [x[1] for x in state['data']]
-            p_high, p_low = max(prices_10m), min(prices_10m)
-            p_range_10m = ((p_high - p_low) / p_low * 100) if p_low > 0 else 0
-            
-            # If OI increased significantly (>500 lots) but price range is very tight (<0.15%)
-            if oi_change_10m > (500 * LOT_SIZES.get(name, 1)) and p_range_10m < 0.15:
-                if not state['watching_breakout']:
-                    state['watching_breakout'] = True
-                    state['high'] = p_high
-                    state['low'] = p_low
-                    accumulation_alerts.append(f"🤫 {short_names.get(name, name)} Whale Entering...")
-
-        # 2. Detect Breakout from Accumulation
-        if state['watching_breakout']:
-            if ltp > state['high'] * 1.0005: # 0.05% breakout buffer
-                accumulation_alerts.append(f"🚀 *WHALE BREAKOUT (UP):* {short_names.get(name, name)} - **BUY CALL**")
-                state['watching_breakout'] = False # Reset
-            elif ltp < state['low'] * 0.9995:
-                accumulation_alerts.append(f"📉 *WHALE BREAKOUT (DOWN):* {short_names.get(name, name)} - **BUY PUT**")
-                state['watching_breakout'] = False # Reset
+        # ADVANCED: Quiet Accumulation & Breakout Logic (Stocks)
+        process_quiet_accumulation(short_names.get(name, name), ltp, oi, accumulation_alerts)
 
         process_future_burst(s, name, ltp, oi, stock_alerts)
 
@@ -283,6 +287,8 @@ def calculate_heatmap(kite):
         bn_fut_sym = get_active_future("BANKNIFTY", "NFO-FUT", "NFO")
         if bn_fut_sym in data:
             f_d = data[bn_fut_sym]
+            # ADVANCED: Quiet Accumulation & Breakout Logic (Bank Nifty Index)
+            process_quiet_accumulation("BANKNIFTY", f_d["last_price"], f_d.get("oi", 0), accumulation_alerts)
             process_future_burst(bn_fut_sym, "BANKNIFTY", f_d["last_price"], f_d.get("oi", 0), bn_alerts)
 
         idx_oi_increase_lots = int((oi - last_oi_store.get("BANKNIFTY", oi)) / LOT_SIZES["BANKNIFTY"])
@@ -322,7 +328,7 @@ def calculate_heatmap(kite):
     else:
         report += "\n✅ *INDEX SYNC:* Top Banks Aligned"
 
-    # 2. Quiet Accumulation & Breakout
+    # 2. Quiet Accumulation & Breakout (Index + Stocks)
     if accumulation_alerts:
         report += "\n" + "\n".join(accumulation_alerts[:2])
     
