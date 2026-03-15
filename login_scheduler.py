@@ -11,16 +11,24 @@ from scanner import run_scanner
 
 # Track if scanner is already running
 scanner_thread = None
+stop_event = threading.Event()
 
 def start_scanner_if_needed():
-    global scanner_thread
+    global scanner_thread, stop_event
+    
+    # Only run Monday to Friday
+    day_of_week = datetime.now().weekday()
+    if day_of_week > 4: 
+        print("Today is weekend. Skipping scanner start.")
+        return
+
     if scanner_thread and scanner_thread.is_alive():
         print("Scanner already running.")
         return
 
     # Check for existing access token
     if not os.path.exists("access_token.txt"):
-        print("No access token found. Cannot start scanner.")
+        print("No access token found. Waiting for automated login.")
         return
 
     try:
@@ -30,30 +38,33 @@ def start_scanner_if_needed():
         kite = KiteConnect(api_key=API_KEY)
         kite.set_access_token(access_token)
         
-        # Start the scanner in a background thread
-        scanner_thread = threading.Thread(target=run_scanner, args=(kite,))
+        # Reset stop event and start the scanner in a background thread
+        stop_event.clear()
+        scanner_thread = threading.Thread(target=run_scanner, args=(kite, stop_event))
         scanner_thread.daemon = True
         scanner_thread.start()
-        print("Scanner started in background.")
-        send_telegram_message("✅ *Market Scanner Started* - Monthly Expiry Mode Active.")
+        print("Scanner thread launched successfully.")
     except Exception as e:
         print(f"Error starting scanner: {e}")
         send_telegram_message(f"❌ *Failed to start scanner:* {e}")
 
-def daily_job():
+def stop_scanner():
+    global stop_event
+    print("Stopping scanner due to end of trading hours...")
+    stop_event.set()
+
+def morning_login():
     # Only run Monday to Friday (0 = Monday, 4 = Friday)
     day_of_week = datetime.now().weekday()
     if day_of_week > 4: 
-        print("Today is weekend. Skipping Zerodha login.")
         return
 
-    print("Starting Morning Workflow at 07:00 AM...")
+    print("Starting Morning Workflow at 08:30 AM...")
     
     # 1. Send Link for Mobile Login (Backup/Mobile preference)
     login_url = f"https://kite.zerodha.com/connect/login?api_key={API_KEY}&v=3"
     msg = (f"🌅 *Good Morning!* 🌅\n"
            f"Starting Zerodha Auto-Login Workflow.\n\n"
-           f"📲 *Mobile Login Link (Backup):*\n{login_url}\n\n"
            f"⏳ *Status:* Fully Automated Login starting now...")
     send_telegram_message(msg)
 
@@ -61,25 +72,28 @@ def daily_job():
     try:
         access_token = get_automated_token()
         if access_token:
-            send_telegram_message(f"✅ *Zerodha Login Successful!*\nAccess Token generated. Scanner starting now...")
+            # login success leads to starting scanner immediately (which will be silent if before 9am)
             start_scanner_if_needed()
         else:
             send_telegram_message(f"❌ *Auto-Login Failed.* Please use the mobile link above.")
     except Exception as e:
         send_telegram_message(f"❌ *Auto-Login Error:* {str(e)}\nPlease use the mobile link above.")
 
-# On script startup, check if we already have a valid token from today
+# On script startup, check if we should start now (any time)
 start_scanner_if_needed()
 
-# Schedule for 07:00 AM
-schedule.every().day.at("07:00").do(daily_job)
+# Schedule for Morning Login (08:30 AM) - This will trigger the scanner start
+schedule.every().monday.to().friday.at("08:30").do(morning_login)
 
-print("Zerodha Automated Scheduler & Scanner Starter active.")
+# Schedule for Scanner Stop (03:30 PM)
+schedule.every().monday.to().friday.at("15:30").do(stop_scanner)
+
+print("Zerodha Automated Scheduler active (Mon-Fri). Reporting: 09:00 - 15:30.")
 
 while True:
     try:
         schedule.run_pending()
-        time.sleep(60)
+        time.sleep(1)
     except Exception as e:
         print(f"Scheduler Error: {e}. Restarting...")
         time.sleep(10)
