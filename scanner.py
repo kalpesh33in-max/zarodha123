@@ -40,15 +40,14 @@ def run_scanner(kite, stop_event=None):
                 # 2. Send Bank Nifty Option Alerts to BN Bot
                 if bn_alerts:
                     print(f"Sending {len(bn_alerts)} Bank Nifty Alerts...")
-                    bn_msg = "🏛 *BANK NIFTY OPTION ALERTS*\n" + "\n---\n".join(bn_alerts)
+                    bn_msg = "\n---\n".join(bn_alerts)
                     send_telegram_message(bn_msg, chat_id=TELE_CHAT_ID_BN, token=TELE_TOKEN_BN)
 
                 # 3. Send Bank Stock Option Alerts to Stocks Bot
                 if stock_alerts:
                     print(f"Sending {len(stock_alerts)} Bank Stock Alerts...")
-                    stock_msg = "🏦 *BANK STOCK OPTION ALERTS*\n" + "\n---\n".join(stock_alerts)
+                    stock_msg = "\n---\n".join(stock_alerts)
                     send_telegram_message(stock_msg, chat_id=TELE_CHAT_ID_STOCKS, token=TELE_TOKEN_STOCKS)
-
             except Exception as e:
                 print(f"Error in scanner loop: {e}")
                 send_telegram_message(f"Scanner Error: {e}")
