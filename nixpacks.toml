@@ -3,6 +3,3 @@ nixPkgs = ["python311", "google-chrome", "chromedriver"]
 
 [phases.install]
 cmds = ["pip install -r requirements.txt"]
-
-[start]
-cmd = "bash start.sh"
