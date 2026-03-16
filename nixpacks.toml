@@ -5,4 +5,4 @@ nixPkgs = ["python311", "google-chrome", "chromedriver"]
 cmds = ["pip install -r requirements.txt"]
 
 [start]
-cmd = "python run_all.py"
+cmd = "bash -c 'gunicorn token_server:app --bind 0.0.0.0:$PORT'"
