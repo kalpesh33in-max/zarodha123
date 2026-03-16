@@ -7,4 +7,3 @@ requests
 pyotp
 selenium
 webdriver-manager
-gunicorn
