@@ -1,2 +1,2 @@
-web: gunicorn token_server:app -b 0.0.0.0:8080
+web: python token_server.py
 worker: python login_scheduler.py
