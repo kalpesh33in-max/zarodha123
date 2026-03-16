@@ -1,2 +1,2 @@
-web: python token_server.py
+web: gunicorn token_server:app
 worker: python login_scheduler.py
