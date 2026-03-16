@@ -131,10 +131,9 @@ def get_relevant_options(underlying_name, ltp):
 
 def get_strength_label(lots):
     if lots >= 400: return "🚀 BLAST 🚀"
-    elif lots >= 300: return "☀️ AWESOME"
+    elif lots >= 300: return "🌟 AWESOME"
     elif lots >= 200: return "✅ VERY GOOD"
-    elif lots >= 100: return "⚡ GOOD"
-    else: return ""
+    else: return "⚡ GOOD" # Label for 100-199 lots
 
 def classify_action(symbol, oi_change, price_change):
     # Futures logic (Detects -FUT, -I for GDFL style, or MCX Futures)
@@ -389,17 +388,12 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list):
                 strength = get_strength_label(final_lots)
                 action = classify_action(watch['symbol'], final_oi_chg, final_price_chg)
                 price_icon = "▲" if final_price_chg >= 0 else "▼"
-                # Removed '>' from the alert message
+                
+                # Match gfdl_scanner.py format exactly
                 alerts_list.append(
-                    f"{strength}\n"
-                    f"🚨 {action}\n"
-                    f"Symbol: {watch['symbol']}\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"LOTS: {final_lots}\n"
-                    f"PRICE: {ltp:.2f} ({price_icon})\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"OI CHANGE: {final_oi_chg:+,}\n"
-                    f"NEW OI: {oi:,}"
+                    f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n━━━━━━━━━━━━━━━\nLOTS: {final_lots}\n"
+                    f"PRICE: {ltp:.2f} ({price_icon})\nFUTURE PRICE: {ltp:.2f}\n"
+                    f"━━━━━━━━━━━━━━━\nEXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {final_oi_chg:+,d}\nNEW OI     : {oi:,}\nTIME: {now.strftime('%H:%M:%S')}"
                 )
             del active_watches[key]
 
@@ -456,18 +450,12 @@ def process_option_logic(name, underlying_data, option_quotes, itm_alerts_list):
                     strength = get_strength_label(final_lots)
                     action = classify_action(watch['symbol'], final_oi_chg, final_price_chg)
                     price_icon = "▲" if final_price_chg >= 0 else "▼"
-                    # Removed '>' from the alert message
+                    
+                    # Match gfdl_scanner.py format exactly
                     itm_alerts_list.append(
-                        f"{strength}\n"
-                        f"🚨 {action}\n"
-                        f"Symbol: {watch['symbol']}\n"
-                        f"━━━━━━━━━━━━━━━\n"
-                        f"LOTS: {final_lots}\n"
-                        f"PRICE: {curr_price:.2f} ({price_icon})\n"
-                        f"FUTURE: {u_ltp:.2f}\n"
-                        f"━━━━━━━━━━━━━━━\n"
-                        f"OI CHANGE: {final_oi_chg:+,}\n"
-                        f"NEW OI: {curr_oi:,}"
+                        f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n━━━━━━━━━━━━━━━\nLOTS: {final_lots}\n"
+                        f"PRICE: {curr_price:.2f} ({price_icon})\nFUTURE PRICE: {u_ltp:.2f}\n"
+                        f"━━━━━━━━━━━━━━━\nEXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {final_oi_chg:+,d}\nNEW OI     : {curr_oi:,}\nTIME: {now.strftime('%H:%M:%S')}"
                     )
                 del active_watches[t_int]
 
