@@ -2,7 +2,7 @@ import pandas as pd
 import time
 from heatmap_engine import calculate_heatmap
 from telegram_utils import send_telegram_message
-from env_config import TELE_CHAT_ID_BN, TELE_CHAT_ID_STOCKS, TELE_TOKEN_BN, TELE_TOKEN_STOCKS
+from env_config import TELE_CHAT_ID_BN, TELE_CHAT_ID_STOCKS, TELE_TOKEN_BN, TELE_TOKEN_STOCKS, TELE_TOKEN_VELOCITY, TELE_CHAT_ID_VELOCITY
 
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -27,7 +27,7 @@ def run_scanner(kite, stop_event=None):
         if start_time <= now_time <= end_time and now.weekday() <= 4:
 
             try:
-                score, report, bn_alerts, stock_alerts = calculate_heatmap(kite)
+                score, report, bn_alerts, stock_alerts, velocity_alerts = calculate_heatmap(kite)
 
                 final_message = report + f"\n⚖️ *SENTIMENT SCORE*: {score:.2f}\n"
 
@@ -50,6 +50,11 @@ def run_scanner(kite, stop_event=None):
                     print(f"Sending {len(stock_alerts)} Bank Stock Alerts...")
                     for alert in stock_alerts:
                         send_telegram_message(alert, chat_id=TELE_CHAT_ID_STOCKS, token=TELE_TOKEN_STOCKS)
+
+                if velocity_alerts:
+                    print(f"Sending {len(velocity_alerts)} Velocity Burst Alerts...")
+                    for alert in velocity_alerts:
+                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_VELOCITY, token=TELE_TOKEN_VELOCITY)
 
             except Exception as e:
                 print(f"Error in scanner loop: {e}")
