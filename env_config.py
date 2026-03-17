@@ -16,7 +16,7 @@ TELE_TOKEN_STOCKS = os.getenv("TELE_TOKEN_STOCKS")
 TELE_TOKEN_VELOCITY = os.getenv("TELE_TOKEN_VELOCITY")
 
 # ================= TELEGRAM CHAT IDS =================
-TELE_CHAT_ID = os.getenv("CHAT_ID")
+TELE_CHAT_ID = os.getenv("CHAT_ID") or "YOUR_CHAT_ID"
 
 TELE_CHAT_ID_BN = os.getenv("CHAT_ID_BN")
 TELE_CHAT_ID_STOCKS = os.getenv("CHAT_ID_STOCKS")
