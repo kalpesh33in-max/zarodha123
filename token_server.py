@@ -47,7 +47,9 @@ def login():
     except Exception as e:
         return f"<h1>Error</h1><p>Login failed: {str(e)}</p>"
 
+# Automatically try to start scanner on load
+start_scanner_if_token_exists()
+
 if __name__ == "__main__":
-    start_scanner_if_token_exists()
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
