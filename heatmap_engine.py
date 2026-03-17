@@ -44,6 +44,7 @@ last_oi_store = {}
 # Specifically for ITM/ATM Option alerts
 option_history = {} # {token: [list of (time, oi, price)]}
 active_watches = {} # {token: {start_oi, start_price, end_time}}
+price_velocity_store = {} # {symbol: [(time, price)]}
 
 # Cache options and futures data
 _options_df = None
@@ -193,6 +194,29 @@ def process_quiet_accumulation(name, ltp, oi, alerts_list):
             alerts_list.append(f"📉 *WHALE BREAKOUT (DOWN):* {name} - **BUY PUT**")
             state['watching_breakout'] = False # Reset
 
+def detect_v_recovery(symbol, ltp, alerts_list):
+    """Detects 0.15% move in 60s to front-run the 3-minute OI delay."""
+    now = datetime.now()
+    if symbol not in price_velocity_store:
+        price_velocity_store[symbol] = []
+    
+    history = price_velocity_store[symbol]
+    history.append((now, ltp))
+    
+    # Keep only 2 minutes of price history
+    if len(history) > 10: history.pop(0)
+    
+    # Find price from ~60s ago
+    for past_time, past_price in history:
+        time_diff = (now - past_time).total_seconds()
+        if 45 <= time_diff <= 90:
+            change = ((ltp - past_price) / past_price) * 100
+            if change > 0.15:
+                alerts_list.append(f"⚡ **VELOCITY BURST (UP):** {symbol} Reversing! Possible Short Covering starting...")
+            elif change < -0.15:
+                alerts_list.append(f"📉 **VELOCITY BURST (DOWN):** {symbol} Cracking! Possible Long Unwinding starting...")
+            break
+
 def calculate_heatmap(kite):
     fut_symbols = get_bank_futures(kite)
     
@@ -239,6 +263,7 @@ def calculate_heatmap(kite):
 
     bn_alerts = []
     stock_alerts = []
+    velocity_alerts = []
     short_names = {"HDFCBANK": "HDBFU", "ICICIBANK": "ICIBFU", "SBIN": "SBINFU", "AXISBANK": "AXISFU", "KOTAKBANK": "KOTFU", "BANKNIFTY": "BANKNIFTY"}
     
     bank_signals = {} # To track Buy/Sell for 3-Star logic
@@ -260,6 +285,7 @@ def calculate_heatmap(kite):
 
         # ADVANCED: Quiet Accumulation & Breakout Logic (Stocks)
         process_quiet_accumulation(short_names.get(name, name), ltp, oi, accumulation_alerts)
+        detect_v_recovery(short_names.get(name, name), ltp, velocity_alerts)
 
         process_future_burst(s, name, ltp, oi, stock_alerts)
 
@@ -288,6 +314,7 @@ def calculate_heatmap(kite):
             f_d = data[bn_fut_sym]
             # ADVANCED: Quiet Accumulation & Breakout Logic (Bank Nifty Index)
             process_quiet_accumulation("BANKNIFTY", f_d["last_price"], f_d.get("oi", 0), accumulation_alerts)
+            detect_v_recovery("BANKNIFTY", f_d["last_price"], velocity_alerts)
             process_future_burst(bn_fut_sym, "BANKNIFTY", f_d["last_price"], f_d.get("oi", 0), bn_alerts)
 
         idx_oi_increase_lots = int((oi - last_oi_store.get("BANKNIFTY", oi)) / LOT_SIZES["BANKNIFTY"])
@@ -350,7 +377,7 @@ def calculate_heatmap(kite):
     else:
         report += f"\n💡 SUGGESTION: *{suggestion}*"
     
-    return score, report, bn_alerts, stock_alerts
+    return score, report, bn_alerts, stock_alerts, velocity_alerts
 
 def process_future_burst(symbol, name, ltp, oi, alerts_list):
     """Detects Bursts for Futures using the 2-minute Watch logic."""
