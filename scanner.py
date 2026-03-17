@@ -17,7 +17,6 @@ def run_scanner(kite, stop_event=None):
 
     while stop_event is None or not stop_event.is_set():
 
-        # Use IST timezone
         now = datetime.now(IST)
         now_time = now.time()
 
@@ -41,27 +40,36 @@ def run_scanner(kite, stop_event=None):
                 print("Sending General Report...")
                 send_telegram_message(final_message)
 
-                if bn_alerts:
-                    print(f"Sending {len(bn_alerts)} Bank Nifty Alerts...")
-                    for alert in bn_alerts:
-                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_BN, token=TELE_TOKEN_BN)
+                # ================= FUTURE ALERTS → VELOCITY BOT =================
+                all_future_alerts = []
+                all_future_alerts.extend(bn_alerts)
+                all_future_alerts.extend(stock_alerts)
 
-                if stock_alerts:
-                    print(f"Sending {len(stock_alerts)} Bank Stock Alerts...")
-                    for alert in stock_alerts:
-                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_STOCKS, token=TELE_TOKEN_STOCKS)
+                if all_future_alerts:
+                    print(f"Sending {len(all_future_alerts)} Future Alerts to Velocity Bot...")
+                    for alert in all_future_alerts:
+                        send_telegram_message(
+                            alert,
+                            chat_id=TELE_CHAT_ID_VELOCITY,
+                            token=TELE_TOKEN_VELOCITY
+                        )
 
+                # ================= KEEP VELOCITY ALERTS =================
                 if velocity_alerts:
-                    print(f"Sending {len(velocity_alerts)} Velocity Burst Alerts...")
+                    print(f"Sending {len(velocity_alerts)} Velocity Alerts...")
                     for alert in velocity_alerts:
-                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_VELOCITY, token=TELE_TOKEN_VELOCITY)
+                        send_telegram_message(
+                            alert,
+                            chat_id=TELE_CHAT_ID_VELOCITY,
+                            token=TELE_TOKEN_VELOCITY
+                        )
 
             except Exception as e:
                 print(f"Error in scanner loop: {e}")
                 send_telegram_message(f"Scanner Error: {e}")
 
         else:
-            print(f"[{now.strftime('%H:%M:%S')}] Outside market hours. Scanner is silent.")
+            print(f"[{now.strftime('%H:%M:%S')}] Outside market hours.")
 
         if stop_event:
             if stop_event.wait(30):
