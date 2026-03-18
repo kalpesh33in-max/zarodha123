@@ -1,4 +1,4 @@
-mport pandas as pd
+import pandas as pd
 from datetime import datetime, timedelta
 
 BANK_WEIGHTS = {
