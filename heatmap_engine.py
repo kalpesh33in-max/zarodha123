@@ -231,8 +231,9 @@ def calculate_heatmap(kite):
     all_option_tokens = []
     underlying_option_map = {} # {name: df_of_options}
     
-    # Gather tokens for all banks + Bank Nifty
-    for name in BANK_NAMES + ["BANKNIFTY"]:
+    # Gather tokens for TOP 6 Banks + Bank Nifty ONLY
+    TOP_SIX = BANK_NAMES[:6]
+    for name in TOP_SIX + ["BANKNIFTY"]:
         underlying_ltp = 0
         if name == "BANKNIFTY":
             underlying_ltp = data.get(INDEX_SYMBOL, {}).get("last_price", 0)
@@ -343,7 +344,7 @@ def calculate_heatmap(kite):
             gamma_wall_msg = f"🌊 *PUT SQUEEZE:* Level {max_put_strike} Broken!"
 
         pcr = process_option_logic("BANKNIFTY", (opt_df, ltp), option_quotes, bn_alerts)
-        report += f"\nBANKNIFTY={ltp} , COP%={change:+.2f}% , OI{oi_icon}={abs(idx_oi_increase_lots)}LOT, PCR-{pcr:.2f}\n"
+        report += f"\nBANKNIFTY={ltp} , COP%={change:+.2f}% , OI{oi_icon}={abs(idx_oi_increase_lots)}LOT, PCR-{pcr:.22}\n"
 
     # --- ADVANCED INSIGHTS SECTION ---
     report += "\n🧠 *ADVANCED INSIGHTS*"
