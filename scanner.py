@@ -48,6 +48,7 @@ def run_scanner(kite, stop_event=None):
                     last_report_time = current_timestamp
 
                 # Alerts are checked and sent every 5 seconds (current loop speed)
+                # ALL Alerts now go to the BANK NIFTY channel as requested
                 if bn_alerts:
                     print(f"Sending {len(bn_alerts)} Bank Nifty Alerts...")
                     for alert in bn_alerts:
@@ -56,12 +57,12 @@ def run_scanner(kite, stop_event=None):
                 if stock_alerts:
                     print(f"Sending {len(stock_alerts)} Bank Stock Alerts...")
                     for alert in stock_alerts:
-                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_STOCKS, token=TELE_TOKEN_STOCKS)
+                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_BN, token=TELE_TOKEN_BN)
 
                 if velocity_alerts:
                     print(f"Sending {len(velocity_alerts)} Velocity Burst Alerts...")
                     for alert in velocity_alerts:
-                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_VELOCITY, token=TELE_TOKEN_VELOCITY)
+                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_BN, token=TELE_TOKEN_BN)
 
             except Exception as e:
                 print(f"Error in scanner loop: {e}")
