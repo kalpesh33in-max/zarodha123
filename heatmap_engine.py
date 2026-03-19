@@ -231,9 +231,9 @@ def calculate_heatmap(kite):
     all_option_tokens = []
     underlying_option_map = {} # {name: df_of_options}
     
-    # Gather tokens for TOP 6 Banks + Bank Nifty ONLY
-    TOP_SIX = BANK_NAMES[:6]
-    for name in TOP_SIX + ["BANKNIFTY"]:
+    # Gather tokens for TOP 4 Banks + Bank Nifty ONLY
+    TOP_FOUR = BANK_NAMES[:4]
+    for name in TOP_FOUR + ["BANKNIFTY"]:
         underlying_ltp = 0
         if name == "BANKNIFTY":
             underlying_ltp = data.get(INDEX_SYMBOL, {}).get("last_price", 0)
@@ -268,7 +268,7 @@ def calculate_heatmap(kite):
     accumulation_alerts = []
 
     # Process Banks
-    TOP_SIX = BANK_NAMES[:6]  # HDFC, ICICI, SBI, AXIS, KOTAK, FEDERAL
+    TOP_FOUR = BANK_NAMES[:4]  # HDFC, ICICI, SBI, AXIS
     for s in fut_symbols:
         if s not in data: continue
         d = data[s]
@@ -286,8 +286,9 @@ def calculate_heatmap(kite):
         process_quiet_accumulation(short_names.get(name, name), ltp, oi, accumulation_alerts)
         detect_v_recovery(short_names.get(name, name), ltp, [])
 
-        # Future Bursts > 300 go to VELOCITY BURST channel
-        process_future_burst(s, name, ltp, oi, velocity_alerts, threshold=300)
+        # Future Bursts now use same logic as options (100 lot threshold)
+        if name in TOP_FOUR:
+            process_future_burst(s, name, ltp, oi, stock_alerts, threshold=100)
 
         oi_increase_lots = 0
         if name in last_oi_store:
@@ -296,8 +297,8 @@ def calculate_heatmap(kite):
 
         pcr = 1.0
         if name in underlying_option_map:
-            # Option alerts only for TOP 6 BANKS
-            alert_list = stock_alerts if name in TOP_SIX else []
+            # Option alerts only for TOP 4 BANKS
+            alert_list = stock_alerts if name in TOP_FOUR else []
             pcr = process_option_logic(name, underlying_option_map[name], option_quotes, alert_list)
 
         oi_str = f"{oi/1000000:.1f}M" if oi >= 1000000 else f"{oi/1000:.0f}K"
@@ -317,8 +318,8 @@ def calculate_heatmap(kite):
             # ADVANCED: Quiet Accumulation & Breakout Logic (Bank Nifty Index)
             process_quiet_accumulation("BANKNIFTY", f_d["last_price"], f_d.get("oi", 0), accumulation_alerts)
             detect_v_recovery("BANKNIFTY", f_d["last_price"], [])
-            # BN Future bursts > 300 also go to VELOCITY channel
-            process_future_burst(bn_fut_sym, "BANKNIFTY", f_d["last_price"], f_d.get("oi", 0), velocity_alerts, threshold=300)
+            # BN Future bursts also go to BN channel
+            process_future_burst(bn_fut_sym, "BANKNIFTY", f_d["last_price"], f_d.get("oi", 0), bn_alerts, threshold=100)
 
         idx_oi_increase_lots = int((oi - last_oi_store.get("BANKNIFTY", oi)) / LOT_SIZES["BANKNIFTY"])
         last_oi_store["BANKNIFTY"] = oi
@@ -383,7 +384,7 @@ def calculate_heatmap(kite):
     return score, report, bn_alerts, stock_alerts, velocity_alerts
 
 def process_future_burst(symbol, name, ltp, oi, alerts_list, threshold=100):
-    """Detects Bursts for Futures using the 2-minute Watch logic."""
+    """Detects Bursts for Futures using a 1-minute window logic."""
     lot_size = LOT_SIZES.get(name, 1)
     now = datetime.now()
 
@@ -436,6 +437,7 @@ def process_option_logic(name, underlying_data, option_quotes, itm_alerts_list):
 
     total_call_oi = total_put_oi = 0
     lot_size = LOT_SIZES.get(name, 1)
+    
     threshold = 100
     now = datetime.now()
 
