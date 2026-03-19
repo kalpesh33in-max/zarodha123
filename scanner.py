@@ -15,11 +15,14 @@ def run_scanner(kite, stop_event=None):
     print("Scanner session initialized. Sending status to Telegram...")
     send_telegram_message("✅ *Kite Scanner Login Successful!* Waiting for market hours (09:00 AM) to send reports...")
 
+    last_report_time = 0  # Track when the last general report was sent
+
     while stop_event is None or not stop_event.is_set():
 
         # Use IST timezone
         now = datetime.now(IST)
         now_time = now.time()
+        current_timestamp = time.time()
 
         start_time = datetime.strptime("09:00", "%H:%M").time()
         end_time = datetime.strptime("15:30", "%H:%M").time()
@@ -29,18 +32,22 @@ def run_scanner(kite, stop_event=None):
             try:
                 score, report, bn_alerts, stock_alerts, velocity_alerts = calculate_heatmap(kite)
 
-                final_message = report + f"\n⚖️ *SENTIMENT SCORE*: {score:.2f}\n"
+                # Send General Report only every 3 minutes (180 seconds)
+                if current_timestamp - last_report_time >= 180:
+                    final_message = report + f"\n⚖️ *SENTIMENT SCORE*: {score:.2f}\n"
 
-                if score > 30:
-                    final_message += "🚀 *STATUS: STRONG BULLISH*"
-                elif score < -30:
-                    final_message += "📉 *STATUS: STRONG BEARISH*"
-                else:
-                    final_message += "⚖️ *STATUS: SIDEWAYS*"
+                    if score > 30:
+                        final_message += "🚀 *STATUS: STRONG BULLISH*"
+                    elif score < -30:
+                        final_message += "📉 *STATUS: STRONG BEARISH*"
+                    else:
+                        final_message += "⚖️ *STATUS: SIDEWAYS*"
 
-                print("Sending General Report...")
-                send_telegram_message(final_message)
+                    print("Sending General Report...")
+                    send_telegram_message(final_message)
+                    last_report_time = current_timestamp
 
+                # Alerts are checked and sent every 5 seconds (current loop speed)
                 if bn_alerts:
                     print(f"Sending {len(bn_alerts)} Bank Nifty Alerts...")
                     for alert in bn_alerts:
@@ -64,10 +71,10 @@ def run_scanner(kite, stop_event=None):
             print(f"[{now.strftime('%H:%M:%S')}] Outside market hours. Scanner is silent.")
 
         if stop_event:
-            if stop_event.wait(30):
+            if stop_event.wait(5):
                 break
         else:
-            time.sleep(30)
+            time.sleep(5)
 
     print("Scanner loop stopped.")
     send_telegram_message("🛑 *Market Scanner Process Ended.*")
