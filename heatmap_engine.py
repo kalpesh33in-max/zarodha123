@@ -217,7 +217,12 @@ def detect_v_recovery(symbol, ltp, alerts_list):
 def calculate_heatmap(kite):
     fut_symbols = get_bank_futures(kite)
     
+    # NEW: Explicitly add Bank Nifty Future to the monitoring list
+    bn_fut_sym = get_active_future("BANKNIFTY", "NFO-FUT", "NFO")
+    
     all_symbols = fut_symbols + [INDEX_SYMBOL]
+    if bn_fut_sym:
+        all_symbols.append(bn_fut_sym)
     
     try:
         data = kite.quote(all_symbols)
