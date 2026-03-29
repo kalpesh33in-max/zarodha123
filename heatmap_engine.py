@@ -41,6 +41,10 @@ INDEX_SYMBOL = "NSE:NIFTY BANK"
 
 # Store previous OI to calculate OI INCREASE
 last_oi_store = {}
+# Store morning opening OI for day total calculation
+morning_oi_store = {}
+option_morning_oi = {}
+
 # Specifically for ITM/ATM Option alerts
 option_history = {} # {token: [list of (time, oi, price)]}
 active_watches = {} # {token: {start_oi, start_price, end_time}}
@@ -76,46 +80,50 @@ def load_futures_data():
 def get_active_future(name, segment, exchange):
     df = load_futures_data()
     if df is None or df.empty: return None
-    futures = df[(df['name'] == name) & (df['segment'] == segment)]
+    
+    # NEW: Filter for expiries that are TODAY or in the FUTURE only
+    today = datetime.now().date()
+    futures = df[(df['name'] == name) & (df['segment'] == segment) & (df['expiry'].dt.date >= today)]
+    
     if futures.empty: return None
-    nearest_expiry = futures['expiry'].min()
-    active_contract = futures[futures['expiry'] == nearest_expiry]
-    if not active_contract.empty:
-        return f"{exchange}:" + active_contract.iloc[0]['tradingsymbol']
-    return None
-
-def get_bank_futures(kite):
-    symbols = []
-    for name in BANK_NAMES:
-        sym = get_active_future(name, 'NFO-FUT', 'NFO')
-        if sym:
-            symbols.append(sym)
-        else:
-            now = datetime.now()
-            month_str = now.strftime("%b").upper()
-            year_str = now.strftime("%y")
-            symbols.append(f"NFO:{name}{year_str}{month_str}FUT")
-    return symbols
+    
+    # Sort and pick the nearest one (which will be April if March is today or tomorrow)
+    futures = futures.sort_values('expiry')
+    
+    # ROLLOVER LOGIC: If today is within 2 days of March expiry, prioritize April
+    march_expiry = futures.iloc[0]['expiry']
+    if march_expiry.month == 3 and len(futures) > 1:
+        # If today is March 29, and first expiry is March 30, pick the 2nd one (April)
+        active_contract = futures.iloc[1]
+    else:
+        active_contract = futures.iloc[0]
+        
+    return f"{exchange}:" + active_contract['tradingsymbol']
 
 def get_relevant_options(underlying_name, ltp):
-    """Finds ITM/ATM/OTM strikes from instruments.csv for a given underlying monthly expiry."""
+    """Finds ITM/ATM/OTM strikes for the April expiry, ignoring March."""
     df = load_options_data()
     if df is None or df.empty: return pd.DataFrame()
-    options = df[df['name'] == underlying_name]
+    
+    today = datetime.now().date()
+    # Filter only for future expiries
+    options = df[(df['name'] == underlying_name) & (df['expiry'].dt.date >= today)]
     if options.empty: return pd.DataFrame()
     
-    # Logic for Monthly Expiry:
     expiries = sorted(options['expiry'].unique())
     
-    if underlying_name == "BANKNIFTY":
-        fut_df = load_futures_data()
-        bn_fut = fut_df[fut_df['name'] == "BANKNIFTY"]
-        monthly_expiry = bn_fut['expiry'].min() if not bn_fut.empty else expiries[0]
-    else:
-        # Stocks only have monthly
-        monthly_expiry = expiries[0]
+    # ROLLOVER LOGIC: Skip the nearest if it's March
+    target_expiry = expiries[0]
+    for exp in expiries:
+        exp_dt = pd.Timestamp(exp)
+        if exp_dt.month == 4: # Found April
+            target_expiry = exp
+            break
+        elif exp_dt.month > 4: # No April found, take next available
+            target_expiry = exp
+            break
 
-    current_expiry_options = options[options['expiry'] == monthly_expiry]
+    current_expiry_options = options[options['expiry'] == target_expiry]
     
     strikes = sorted(current_expiry_options['strike'].unique())
     if not strikes: return pd.DataFrame()
@@ -123,7 +131,6 @@ def get_relevant_options(underlying_name, ltp):
     atm_strike = min(strikes, key=lambda x: abs(x - ltp))
     idx = strikes.index(atm_strike)
     
-    # NEW: Dynamic ranges (±15 for BANKNIFTY, ±10 for others)
     range_size = 15 if underlying_name == "BANKNIFTY" else 10
     min_idx, max_idx = max(0, idx - range_size), min(len(strikes) - 1, idx + range_size)
     relevant_strikes = strikes[min_idx : max_idx+1]
@@ -156,6 +163,14 @@ def classify_action(symbol, oi_change, price_change):
             return "SHORT COVERING (CE) ⤴️" if is_call else "SHORT COVERING (PE) ⤴️"
         else:
             return "LONG UNWINDING (CE) ⤵️" if is_call else "LONG UNWINDING (PE) ⤵️"
+
+def get_bank_futures(kite):
+    symbols = []
+    for name in BANK_NAMES:
+        sym = get_active_future(name, 'NFO-FUT', 'NFO')
+        if sym:
+            symbols.append(sym)
+    return symbols
 
 # Store 10-minute history for accumulation checks (20 cycles of 30s)
 accum_history = {} # {symbol: {'data': [(oi, price)], 'watching_breakout': None, 'high': 0, 'low': 0}}
@@ -287,6 +302,11 @@ def calculate_heatmap(kite):
         # Track for 3-Star (Basic Trend)
         bank_signals[name] = "BUY" if change > 0.3 else "SELL" if change < -0.3 else "NEUTRAL"
 
+        # CUMULATIVE DAY FUTURE OI CHANGE
+        if name not in morning_oi_store:
+            morning_oi_store[name] = oi
+        day_oi_chg_lots = int((oi - morning_oi_store[name]) / LOT_SIZES.get(name, 1))
+
         # ADVANCED: Quiet Accumulation & Breakout Logic (Stocks)
         process_quiet_accumulation(short_names.get(name, name), ltp, oi, accumulation_alerts)
         detect_v_recovery(short_names.get(name, name), ltp, [])
@@ -301,56 +321,109 @@ def calculate_heatmap(kite):
         last_oi_store[name] = oi
 
         pcr = 1.0
+        max_c_strike = max_p_strike = 0
+        max_c_chg_strike = max_p_chg_strike = 0
         if name in underlying_option_map:
+            # Calculate Max OI Strikes and Max Change Strikes for Banks
+            opt_df, _ = underlying_option_map[name]
+            m_c_oi = m_p_oi = 0
+            m_c_chg = m_p_chg = -float('inf')
+            
+            for _, row in opt_df.iterrows():
+                t_int = int(row['instrument_token'])
+                t_str = str(t_int)
+                if t_str in option_quotes:
+                    curr_oi = option_quotes[t_str].get('oi', 0)
+                    
+                    # Absolute Max OI
+                    if row['instrument_type'] == 'CE' and curr_oi > m_c_oi:
+                        m_c_oi, max_c_strike = curr_oi, row['strike']
+                    elif row['instrument_type'] == 'PE' and curr_oi > m_p_oi:
+                        m_p_oi, max_p_strike = curr_oi, row['strike']
+                    
+                    # Day Max Change
+                    if t_int not in option_morning_oi:
+                        option_morning_oi[t_int] = curr_oi
+                    
+                    curr_chg = curr_oi - option_morning_oi[t_int]
+                    if row['instrument_type'] == 'CE' and curr_chg > m_c_chg:
+                        m_c_chg, max_c_chg_strike = curr_chg, row['strike']
+                    elif row['instrument_type'] == 'PE' and curr_chg > m_p_chg:
+                        m_p_chg, max_p_chg_strike = curr_chg, row['strike']
+
             # Option alerts only for TOP 4 BANKS
             alert_list = stock_alerts if name in TOP_FOUR else []
             pcr = process_option_logic(name, underlying_option_map[name], option_quotes, alert_list)
 
-        oi_str = f"{oi/1000000:.1f}M" if oi >= 1000000 else f"{oi/1000:.0f}K"
-        oi_icon = "⬆️" if oi_increase_lots >= 0 else "⬇️"
-        report += f"{short_names.get(name, name)}={ltp} , COP%={change:+.2f}% , TOI: {oi_str},OI{oi_icon}={abs(oi_increase_lots)}LOT,PCR-{pcr:.1f}\n"
+        # Calculate price direction arrow
+        price_arrow = "⬆️" if change >= 0 else "⬇️"
+        
+        report += f"{short_names.get(name, name)}={ltp}{price_arrow} , PCR-{pcr:.1f}\n"
+        report += f"   - MAX_OI: {max_p_strike}P/{max_c_strike}C | CHG_OI: {max_p_chg_strike}P/{max_c_chg_strike}C\n"
 
     # Process Bank Nifty Index & Advanced Insights
     gamma_wall_msg = ""
     if INDEX_SYMBOL in data:
         idx_d = data[INDEX_SYMBOL]
-        ltp, open_p, oi = idx_d["last_price"], idx_d["ohlc"]["open"], idx_d.get("oi", 0)
-        change = ((ltp - open_p) / open_p) * 100 if open_p > 0 else 0
+        spot_ltp = idx_d["last_price"]
         
         bn_fut_sym = get_active_future("BANKNIFTY", "NFO-FUT", "NFO")
         if bn_fut_sym in data:
             f_d = data[bn_fut_sym]
+            f_ltp, f_open, f_oi = f_d["last_price"], f_d["ohlc"]["open"], f_d.get("oi", 0)
+            f_change = ((f_ltp - f_open) / f_open) * 100 if f_open > 0 else 0
+            
+            # Calculate OI Increase for BN Future
+            idx_oi_increase_lots = int((f_oi - last_oi_store.get("BN_FUT", f_oi)) / LOT_SIZES["BANKNIFTY"])
+            last_oi_store["BN_FUT"] = f_oi
+            oi_icon = "⬆️" if idx_oi_increase_lots >= 0 else "⬇️"
+
             # ADVANCED: Quiet Accumulation & Breakout Logic (Bank Nifty Index)
-            process_quiet_accumulation("BANKNIFTY", f_d["last_price"], f_d.get("oi", 0), accumulation_alerts)
-            detect_v_recovery("BANKNIFTY", f_d["last_price"], [])
-            # BN Future bursts also go to BN channel
-            process_future_burst(bn_fut_sym, "BANKNIFTY", f_d["last_price"], f_d.get("oi", 0), bn_alerts, threshold=100)
+            process_quiet_accumulation("BANKNIFTY", f_ltp, f_oi, accumulation_alerts)
+            detect_v_recovery("BANKNIFTY", f_ltp, [])
+            process_future_burst(bn_fut_sym, "BANKNIFTY", f_ltp, f_oi, bn_alerts, threshold=100)
 
-        idx_oi_increase_lots = int((oi - last_oi_store.get("BANKNIFTY", oi)) / LOT_SIZES["BANKNIFTY"])
-        last_oi_store["BANKNIFTY"] = oi
-        
-        # ADVANCED: Gamma Wall Logic for Bank Nifty
-        opt_df, _ = underlying_option_map.get("BANKNIFTY", (pd.DataFrame(), ltp))
-        max_call_oi = max_put_oi = 0
-        max_call_strike = max_put_strike = 0
-        
-        for _, row in opt_df.iterrows():
-            t_str = str(int(row['instrument_token']))
-            if t_str in option_quotes:
-                curr_oi = option_quotes[t_str].get('oi', 0)
-                if row['instrument_type'] == 'CE' and curr_oi > max_call_oi:
-                    max_call_oi, max_call_strike = curr_oi, row['strike']
-                elif row['instrument_type'] == 'PE' and curr_oi > max_put_oi:
-                    max_put_oi, max_put_strike = curr_oi, row['strike']
-        
-        # Detect Short Squeeze (Price crosses Max Call OI + Call OI falling)
-        if max_call_strike > 0 and ltp > max_call_strike:
-            gamma_wall_msg = f"🌊 *GAMMA SQUEEZE:* Level {max_call_strike} Broken!"
-        elif max_put_strike > 0 and ltp < max_put_strike:
-            gamma_wall_msg = f"🌊 *PUT SQUEEZE:* Level {max_put_strike} Broken!"
+            # CUMULATIVE DAY FUTURE OI CHANGE (BN)
+            if "BN_FUT_START" not in morning_oi_store:
+                morning_oi_store["BN_FUT_START"] = f_oi
+            day_f_oi_chg = int((f_oi - morning_oi_store["BN_FUT_START"]) / LOT_SIZES["BANKNIFTY"])
+            doi_icon_bn = "+" if day_f_oi_chg >= 0 else ""
 
-        pcr = process_option_logic("BANKNIFTY", (opt_df, ltp), option_quotes, bn_alerts)
-        report += f"\nBANKNIFTY={ltp} , COP%={change:+.2f}% , OI{oi_icon}={abs(idx_oi_increase_lots)}LOT, PCR-{pcr:.22}\n"
+            # ADVANCED: Gamma Wall Logic for Bank Nifty
+            opt_df, _ = underlying_option_map.get("BANKNIFTY", (pd.DataFrame(), spot_ltp))
+            max_call_oi = max_put_oi = 0
+            max_call_strike = max_put_strike = 0
+            max_c_chg = max_p_chg = -float('inf')
+            max_c_chg_strike = max_p_chg_strike = 0
+            
+            for _, row in opt_df.iterrows():
+                t_int = int(row['instrument_token'])
+                t_str = str(t_int)
+                if t_str in option_quotes:
+                    curr_oi = option_quotes[t_str].get('oi', 0)
+                    if row['instrument_type'] == 'CE' and curr_oi > max_call_oi:
+                        max_call_oi, max_call_strike = curr_oi, row['strike']
+                    elif row['instrument_type'] == 'PE' and curr_oi > max_put_oi:
+                        max_put_oi, max_put_strike = curr_oi, row['strike']
+                    
+                    # Day Max Change (BN)
+                    if t_int not in option_morning_oi:
+                        option_morning_oi[t_int] = curr_oi
+                    curr_chg = curr_oi - option_morning_oi[t_int]
+                    if row['instrument_type'] == 'CE' and curr_chg > max_c_chg:
+                        max_c_chg, max_c_chg_strike = curr_chg, row['strike']
+                    elif row['instrument_type'] == 'PE' and curr_chg > max_p_chg:
+                        max_p_chg, max_p_chg_strike = curr_chg, row['strike']
+            
+            if max_call_strike > 0 and spot_ltp > max_call_strike:
+                gamma_wall_msg = f"🌊 *GAMMA SQUEEZE:* Level {max_call_strike} Broken!"
+            elif max_put_strike > 0 and spot_ltp < max_put_strike:
+                gamma_wall_msg = f"🌊 *PUT SQUEEZE:* Level {max_put_strike} Broken!"
+
+            pcr = process_option_logic("BANKNIFTY", (opt_df, spot_ltp), option_quotes, bn_alerts)
+            price_arrow_bn = "⬆️" if f_change >= 0 else "⬇️"
+            report += f"\nBANKNIFTY={f_ltp}{price_arrow_bn} , PCR-{pcr:.2f}\n"
+            report += f"   - MAX_OI: {max_put_strike}P/{max_call_strike}C | CHG_OI: {max_p_chg_strike}P/{max_c_chg_strike}C\n"
 
     # --- ADVANCED INSIGHTS SECTION ---
     report += "\n🧠 *ADVANCED INSIGHTS*"
