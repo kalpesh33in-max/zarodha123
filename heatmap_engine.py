@@ -50,6 +50,9 @@ option_history = {} # {token: [list of (time, oi, price)]}
 active_watches = {} # {token: {start_oi, start_price, end_time}}
 price_velocity_store = {} # {symbol: [(time, price)]}
 
+# Global to track OI Shifts
+oi_strike_history = {} # {name: {max_c, max_p, chg_c, chg_p}}
+
 # Cache options and futures data
 _options_df = None
 _futures_df = None
@@ -307,13 +310,16 @@ def calculate_heatmap(kite):
             morning_oi_store[name] = oi
         day_oi_chg_lots = int((oi - morning_oi_store[name]) / LOT_SIZES.get(name, 1))
 
+        # Only process alerts/report details for TOP 4 BANKS
+        if name not in TOP_FOUR:
+            continue
+
         # ADVANCED: Quiet Accumulation & Breakout Logic (Stocks)
         process_quiet_accumulation(short_names.get(name, name), ltp, oi, accumulation_alerts)
         detect_v_recovery(short_names.get(name, name), ltp, [])
 
-        # Future Bursts now use same logic as options (100 lot threshold)
-        if name in TOP_FOUR:
-            process_future_burst(s, name, ltp, oi, stock_alerts, threshold=100)
+        # Future Bursts
+        process_future_burst(s, name, ltp, oi, stock_alerts, threshold=100)
 
         oi_increase_lots = 0
         if name in last_oi_store:
@@ -351,14 +357,35 @@ def calculate_heatmap(kite):
                     elif row['instrument_type'] == 'PE' and curr_chg > m_p_chg:
                         m_p_chg, max_p_chg_strike = curr_chg, row['strike']
 
-            # Option alerts only for TOP 4 BANKS
-            alert_list = stock_alerts if name in TOP_FOUR else []
-            pcr = process_option_logic(name, underlying_option_map[name], option_quotes, alert_list)
+            # OI SHIFT LOGIC (Banks)
+            if name not in oi_strike_history:
+                oi_strike_history[name] = {'max_c': max_c_strike, 'max_p': max_p_strike, 'chg_c': max_c_chg_strike, 'chg_p': max_p_chg_strike}
+            else:
+                hist = oi_strike_history[name]
+                if max_c_strike != hist['max_c']:
+                    stock_alerts.append(f"🔄 *{name} MAX CE SHIFT:* {hist['max_c']} → {max_c_strike} 🧱")
+                    hist['max_c'] = max_c_strike
+                if max_p_strike != hist['max_p']:
+                    stock_alerts.append(f"🔄 *{name} MAX PE SHIFT:* {hist['max_p']} → {max_p_strike} 🛡️")
+                    hist['max_p'] = max_p_strike
+                if max_c_chg_strike != hist['chg_c']:
+                    stock_alerts.append(f"🔥 *{name} CHG CE SHIFT:* {hist['chg_c']} → {max_c_chg_strike}")
+                    hist['chg_c'] = max_c_chg_strike
+                if max_p_chg_strike != hist['chg_p']:
+                    stock_alerts.append(f"🔥 *{name} CHG PE SHIFT:* {hist['chg_p']} → {max_p_chg_strike}")
+                    hist['chg_p'] = max_p_chg_strike
 
-        # Calculate price direction arrow
+            # Option alerts
+            pcr = process_option_logic(name, underlying_option_map[name], option_quotes, stock_alerts)
+
+        # Calculate price direction arrow and proximity highlights
         price_arrow = "⬆️" if change >= 0 else "⬇️"
         
-        report += f"{short_names.get(name, name)}={ltp}{price_arrow} , PCR-{pcr:.1f}\n"
+        # Proximity logic (within 0.3%)
+        near_res = "🧱" if max_c_strike > 0 and abs(ltp - max_c_strike) / max_c_strike < 0.003 else ""
+        near_sup = "🛡️" if max_p_strike > 0 and abs(ltp - max_p_strike) / max_p_strike < 0.003 else ""
+        
+        report += f"{short_names.get(name, name)}={ltp}{price_arrow}{near_res}{near_sup} , PCR-{pcr:.1f}\n"
         report += f"   - MAX_OI: {max_p_strike}P/{max_c_strike}C | CHG_OI: {max_p_chg_strike}P/{max_c_chg_strike}C\n"
 
     # Process Bank Nifty Index & Advanced Insights
@@ -422,7 +449,12 @@ def calculate_heatmap(kite):
 
             pcr = process_option_logic("BANKNIFTY", (opt_df, spot_ltp), option_quotes, bn_alerts)
             price_arrow_bn = "⬆️" if f_change >= 0 else "⬇️"
-            report += f"\nBANKNIFTY={f_ltp}{price_arrow_bn} , PCR-{pcr:.2f}\n"
+            
+            # Proximity highlights for BN (within 0.3% ~150 pts)
+            near_res_bn = "🧱" if max_call_strike > 0 and abs(f_ltp - max_call_strike) / max_call_strike < 0.003 else ""
+            near_sup_bn = "🛡️" if max_put_strike > 0 and abs(f_ltp - max_put_strike) / max_put_strike < 0.003 else ""
+
+            report += f"\nBANKNIFTY={f_ltp}{price_arrow_bn}{near_res_bn}{near_sup_bn} , PCR-{pcr:.2f}\n"
             report += f"   - MAX_OI: {max_put_strike}P/{max_call_strike}C | CHG_OI: {max_p_chg_strike}P/{max_c_chg_strike}C\n"
 
     # --- ADVANCED INSIGHTS SECTION ---
