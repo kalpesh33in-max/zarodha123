@@ -34,17 +34,8 @@ def run_scanner(kite, stop_event=None):
 
                 # Send General Report only every 3 minutes (180 seconds)
                 if current_timestamp - last_report_time >= 180:
-                    final_message = report + f"\n⚖️ *SENTIMENT SCORE*: {score:.2f}\n"
-
-                    if score > 30:
-                        final_message += "🚀 *STATUS: STRONG BULLISH*"
-                    elif score < -30:
-                        final_message += "📉 *STATUS: STRONG BEARISH*"
-                    else:
-                        final_message += "⚖️ *STATUS: SIDEWAYS*"
-
                     print("Sending General Report...")
-                    send_telegram_message(final_message)
+                    send_telegram_message(report)
                     last_report_time = current_timestamp
 
                 # Alerts are checked and sent every 5 seconds (current loop speed)
