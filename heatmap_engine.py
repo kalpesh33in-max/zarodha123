@@ -1,21 +1,14 @@
 import pandas as pd
 from datetime import datetime, timedelta
 
+# ================= CONFIG =================
+
 BANK_WEIGHTS = {
     "HDFCBANK": 19.7,
     "ICICIBANK": 16.1,
     "SBIN": 10.7,
     "AXISBANK": 9.9,
     "KOTAKBANK": 9.2,
-    "FEDERALBNK": 5.6,
-    "INDUSINDBK": 4.7,
-    "BANKBARODA": 4.5,
-    "AUBANK": 4.0,
-    "CANBK": 3.9,
-    "PNB": 3.5,
-    "IDFCFIRSTB": 3.2,
-    "YESBANK": 2.5,
-    "UNIONBANK": 2.5
 }
 
 LOT_SIZES = {
@@ -24,478 +17,287 @@ LOT_SIZES = {
     "SBIN": 750,
     "AXISBANK": 625,
     "KOTAKBANK": 2000,
-    "FEDERALBNK": 5000,
-    "INDUSINDBK": 500,
-    "BANKBARODA": 4850,
-    "AUBANK": 1000,
-    "CANBK": 2250,
-    "PNB": 4000,
-    "IDFCFIRSTB": 7500,
-    "YESBANK": 8000,
-    "UNIONBANK": 5000,
     "BANKNIFTY": 30
 }
 
 BANK_NAMES = list(BANK_WEIGHTS.keys())
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 
-# Store previous OI to calculate OI INCREASE
 last_oi_store = {}
-# Specifically for ITM/ATM Option alerts
-option_history = {} # {token: [list of (time, oi, price)]}
-active_watches = {} # {token: {start_oi, start_price, end_time}}
-price_velocity_store = {} # {symbol: [(time, price)]}
+option_history = {}
+accum_history = {}
 
-# Cache options and futures data
 _options_df = None
 _futures_df = None
+
+
+# ================= LOAD DATA =================
 
 def load_options_data():
     global _options_df
     if _options_df is None:
-        try:
-            df = pd.read_csv("instruments.csv")
-            # Include only NFO (Stocks/Index)
-            _options_df = df[df['segment'].isin(['NFO-OPT'])].copy()
-            _options_df['expiry'] = pd.to_datetime(_options_df['expiry'], dayfirst=True)
-        except Exception as e:
-            print(f"Error loading Options from instruments.csv: {e}")
+        df = pd.read_csv("instruments.csv")
+        _options_df = df[df['segment'].isin(['NFO-OPT'])].copy()
+        _options_df['expiry'] = pd.to_datetime(_options_df['expiry'], dayfirst=True)
     return _options_df
+
 
 def load_futures_data():
     global _futures_df
     if _futures_df is None:
-        try:
-            df = pd.read_csv("instruments.csv")
-            _futures_df = df[df['segment'].str.contains('-FUT', na=False)].copy()
-            _futures_df['expiry'] = pd.to_datetime(_futures_df['expiry'], dayfirst=True)
-        except Exception as e:
-            print(f"Error loading futures from instruments.csv: {e}")
+        df = pd.read_csv("instruments.csv")
+        _futures_df = df[df['segment'].str.contains('-FUT', na=False)].copy()
+        _futures_df['expiry'] = pd.to_datetime(_futures_df['expiry'], dayfirst=True)
     return _futures_df
 
-def get_active_future(name, segment, exchange):
+
+# ================= FUTURES =================
+
+def get_active_future(name):
     df = load_futures_data()
-    if df is None or df.empty: return None
-    futures = df[(df['name'] == name) & (df['segment'] == segment)]
-    if futures.empty: return None
+    futures = df[df['name'] == name]
     nearest_expiry = futures['expiry'].min()
-    active_contract = futures[futures['expiry'] == nearest_expiry]
-    if not active_contract.empty:
-        return f"{exchange}:" + active_contract.iloc[0]['tradingsymbol']
-    return None
+    return "NFO:" + futures[futures['expiry'] == nearest_expiry].iloc[0]['tradingsymbol']
+
 
 def get_bank_futures(kite):
-    symbols = []
-    for name in BANK_NAMES:
-        sym = get_active_future(name, 'NFO-FUT', 'NFO')
-        if sym:
-            symbols.append(sym)
-        else:
-            now = datetime.now()
-            month_str = now.strftime("%b").upper()
-            year_str = now.strftime("%y")
-            symbols.append(f"NFO:{name}{year_str}{month_str}FUT")
-    return symbols
+    return [get_active_future(name) for name in BANK_NAMES]
 
-def get_relevant_options(underlying_name, ltp):
-    """Finds ITM/ATM/OTM strikes from instruments.csv for a given underlying monthly expiry."""
+
+# ================= OPTIONS =================
+
+def get_relevant_options(name, ltp):
     df = load_options_data()
-    if df is None or df.empty: return pd.DataFrame()
-    options = df[df['name'] == underlying_name]
-    if options.empty: return pd.DataFrame()
-    
-    # Logic for Monthly Expiry:
-    expiries = sorted(options['expiry'].unique())
-    
-    if underlying_name == "BANKNIFTY":
-        fut_df = load_futures_data()
-        bn_fut = fut_df[fut_df['name'] == "BANKNIFTY"]
-        monthly_expiry = bn_fut['expiry'].min() if not bn_fut.empty else expiries[0]
-    else:
-        # Stocks only have monthly
-        monthly_expiry = expiries[0]
+    options = df[df['name'] == name]
 
-    current_expiry_options = options[options['expiry'] == monthly_expiry]
-    
-    strikes = sorted(current_expiry_options['strike'].unique())
-    if not strikes: return pd.DataFrame()
-    
-    atm_strike = min(strikes, key=lambda x: abs(x - ltp))
-    idx = strikes.index(atm_strike)
-    
-    # NEW: Dynamic ranges (±15 for BANKNIFTY, ±10 for others)
-    range_size = 15 if underlying_name == "BANKNIFTY" else 10
-    min_idx, max_idx = max(0, idx - range_size), min(len(strikes) - 1, idx + range_size)
-    relevant_strikes = strikes[min_idx : max_idx+1]
-    
-    return current_expiry_options[current_expiry_options['strike'].isin(relevant_strikes)]
+    expiry = sorted(options['expiry'].unique())[0]
+    options = options[options['expiry'] == expiry]
 
-def get_strength_label(lots):
-    if lots >= 400: return "🚀 BLAST 🚀"
-    elif lots >= 300: return "🌟 AWESOME"
-    elif lots >= 200: return "✅ VERY GOOD"
-    else: return "⚡ GOOD" # Label for 100-199 lots
+    strikes = sorted(options['strike'].unique())
+    atm = min(strikes, key=lambda x: abs(x - ltp))
 
-def classify_action(symbol, oi_change, price_change):
-    # Futures logic (Detects -FUT, -I for GDFL style, or MCX Futures)
-    if any(x in symbol for x in ["-FUT", "FUT", "-I"]):
-        if oi_change > 0:
-            return "FUTURE BUY (LONG) 📈" if price_change >= 0 else "FUTURE SELL (SHORT) 📉"
-        else:
-            return "SHORT COVERING ↗️" if price_change >= 0 else "LONG UNWINDING ↘️"
-    
-    # Options logic (Checks for CE/PE at the end of the symbol)
-    is_call = symbol.endswith("CE")
-    if oi_change > 0:
-        if price_change >= 0:
-            return "CALL BUY 🔵" if is_call else "PUT BUY 🔴"
-        else:
-            return "CALL WRITER ✍️" if is_call else "PUT WRITER ✍️"
-    else:
-        if price_change >= 0:
-            return "SHORT COVERING (CE) ⤴️" if is_call else "SHORT COVERING (PE) ⤴️"
-        else:
-            return "LONG UNWINDING (CE) ⤵️" if is_call else "LONG UNWINDING (PE) ⤵️"
+    idx = strikes.index(atm)
+    rng = 15 if name == "BANKNIFTY" else 10
 
-# Store 10-minute history for accumulation checks (20 cycles of 30s)
-accum_history = {} # {symbol: {'data': [(oi, price)], 'watching_breakout': None, 'high': 0, 'low': 0}}
+    selected = strikes[max(0, idx - rng): idx + rng]
 
-def process_quiet_accumulation(name, ltp, oi, alerts_list):
-    """Refined 10-minute Whale Accumulation & Breakout logic."""
-    if name not in accum_history: 
-        accum_history[name] = {'data': [], 'watching_breakout': False, 'high': 0, 'low': 0}
-    
-    state = accum_history[name]
-    state['data'].append((oi, ltp))
-    if len(state['data']) > 20: state['data'].pop(0) # Keep 10 mins (20 * 30s)
-    
-    # 1. Detect Accumulation Phase
-    if len(state['data']) == 20:
-        oi_start, p_start = state['data'][0]
-        oi_change_10m = oi - oi_start
-        prices_10m = [x[1] for x in state['data']]
-        p_high, p_low = max(prices_10m), min(prices_10m)
-        p_range_10m = ((p_high - p_low) / p_low * 100) if p_low > 0 else 0
-        
-        # If OI increased significantly (>500 lots) but price range is very tight (<0.15%)
-        if oi_change_10m > (500 * LOT_SIZES.get(name, 1)) and p_range_10m < 0.15:
-            if not state['watching_breakout']:
-                state['watching_breakout'] = True
-                state['high'] = p_high
-                state['low'] = p_low
-                alerts_list.append(f"🤫 {name} Whale Entering...")
+    return options[options['strike'].isin(selected)]
 
-    # 2. Detect Breakout from Accumulation
-    if state['watching_breakout']:
-        if ltp > state['high'] * 1.0005: # 0.05% breakout buffer
-            alerts_list.append(f"🚀 *WHALE BREAKOUT (UP):* {name} - **BUY CALL**")
-            state['watching_breakout'] = False # Reset
-        elif ltp < state['low'] * 0.9995:
-            alerts_list.append(f"📉 *WHALE BREAKOUT (DOWN):* {name} - **BUY PUT**")
-            state['watching_breakout'] = False # Reset
 
-def detect_v_recovery(symbol, ltp, alerts_list):
-    """Detects 0.15% move in 60s to front-run the 3-minute OI delay."""
-    now = datetime.now()
-    if symbol not in price_velocity_store:
-        price_velocity_store[symbol] = []
-    
-    history = price_velocity_store[symbol]
-    history.append((now, ltp))
-    
-    # Keep only 2 minutes of price history
-    if len(history) > 10: history.pop(0)
-    
-    # Find price from ~60s ago
-    for past_time, past_price in history:
-        time_diff = (now - past_time).total_seconds()
-        if 45 <= time_diff <= 90:
-            change = ((ltp - past_price) / past_price) * 100
-            # Velocity alerts disabled as per user request
-            break
+# ================= ACCUMULATION =================
+
+def process_quiet_accumulation(name, ltp, oi, alerts):
+    if name not in accum_history:
+        accum_history[name] = []
+
+    history = accum_history[name]
+    history.append((ltp, oi))
+
+    if len(history) > 20:
+        history.pop(0)
+
+    if len(history) == 20:
+        oi_change = oi - history[0][1]
+        prices = [x[0] for x in history]
+
+        if oi_change > 5000 and max(prices) - min(prices) < 0.2:
+            alerts.append(f"🤫 {name} Whale Entering...")
+
+
+# ================= MAIN =================
 
 def calculate_heatmap(kite):
+
     fut_symbols = get_bank_futures(kite)
-    
-    # NEW: Explicitly add Bank Nifty Future to the monitoring list
-    bn_fut_sym = get_active_future("BANKNIFTY", "NFO-FUT", "NFO")
-    
-    all_symbols = fut_symbols + [INDEX_SYMBOL]
-    if bn_fut_sym:
-        all_symbols.append(bn_fut_sym)
-    
-    try:
-        data = kite.quote(all_symbols)
-    except Exception as e:
-        return 0, f"Error: {e}", [], []
+    symbols = fut_symbols + [INDEX_SYMBOL]
+
+    data = kite.quote(symbols)
 
     score = 0
     report = "📊 *BANK MOVEMENT (FUTURES)*\n\n"
-    
-    # Pre-calculate what options we need for EVERYTHING
-    all_option_tokens = []
-    underlying_option_map = {} # {name: df_of_options}
-    
-    # Gather tokens for TOP 4 Banks + Bank Nifty ONLY
-    TOP_FOUR = BANK_NAMES[:4]
-    for name in TOP_FOUR + ["BANKNIFTY"]:
-        underlying_ltp = 0
-        if name == "BANKNIFTY":
-            underlying_ltp = data.get(INDEX_SYMBOL, {}).get("last_price", 0)
-        else:
-            for s in fut_symbols:
-                if name in s:
-                    underlying_ltp = data.get(s, {}).get("last_price", 0)
-                    break
-        
-        if underlying_ltp > 0:
-            relevant_options_df = get_relevant_options(name, underlying_ltp)
-            if not relevant_options_df.empty:
-                underlying_option_map[name] = (relevant_options_df, underlying_ltp)
-                all_option_tokens.extend(relevant_options_df['instrument_token'].tolist())
 
-    # FETCH ALL OPTION DATA IN ONE GO
-    option_quotes = {}
-    if all_option_tokens:
-        try:
-            for i in range(0, len(all_option_tokens), 400):
-                batch = all_option_tokens[i:i+400]
-                option_quotes.update(kite.quote(batch))
-        except Exception as e:
-            print(f"Bulk Option Quote Error: {e}")
+    short = {
+        "HDFCBANK": "HDBFU",
+        "ICICIBANK": "ICIBFU",
+        "SBIN": "SBINFU",
+        "AXISBANK": "AXISFU",
+        "BANKNIFTY": "BANKNIFTY"
+    }
 
     bn_alerts = []
     stock_alerts = []
     velocity_alerts = []
-    short_names = {"HDFCBANK": "HDBFU", "ICICIBANK": "ICIBFU", "SBIN": "SBINFU", "AXISBANK": "AXISFU", "KOTAKBANK": "KOTFU", "BANKNIFTY": "BANKNIFTY"}
-    
-    bank_signals = {} # To track Buy/Sell for 3-Star logic
     accumulation_alerts = []
 
-    # Process Banks
-    TOP_FOUR = BANK_NAMES[:4]  # HDFC, ICICI, SBI, AXIS
-    for s in fut_symbols:
-        if s not in data: continue
-        d = data[s]
-        ltp, open_p, oi = d["last_price"], d["ohlc"]["open"], d.get("oi", 0)
-        change = ((ltp - open_p) / open_p) * 100 if open_p > 0 else 0
-        name = next((n for n in BANK_NAMES if n in s), "UNKNOWN")
-        
-        weighted = (change / 100) * BANK_WEIGHTS.get(name, 0)
-        score += weighted * 100
-        
-        # Track for 3-Star (Basic Trend)
+    bank_signals = {}
+
+    # ================= BANK LOOP =================
+
+    for sym in fut_symbols:
+
+        d = data[sym]
+        ltp = d["last_price"]
+        open_p = d["ohlc"]["open"]
+        oi = d.get("oi", 0)
+
+        change = ((ltp - open_p) / open_p) * 100
+        name = next(n for n in BANK_NAMES if n in sym)
+
+        score += change * BANK_WEIGHTS[name]
+
         bank_signals[name] = "BUY" if change > 0.3 else "SELL" if change < -0.3 else "NEUTRAL"
 
-        # ADVANCED: Quiet Accumulation & Breakout Logic (Stocks)
-        process_quiet_accumulation(short_names.get(name, name), ltp, oi, accumulation_alerts)
-        detect_v_recovery(short_names.get(name, name), ltp, [])
+        process_quiet_accumulation(short[name], ltp, oi, accumulation_alerts)
 
-        # Future Bursts now use same logic as options (100 lot threshold)
-        if name in TOP_FOUR:
-            process_future_burst(s, name, ltp, oi, stock_alerts, threshold=100)
+        opt_df = get_relevant_options(name, ltp)
+        tokens = opt_df['instrument_token'].tolist()
 
-        oi_increase_lots = 0
-        if name in last_oi_store:
-            oi_increase_lots = int((oi - last_oi_store[name]) / LOT_SIZES.get(name, 1))
-        last_oi_store[name] = oi
+        option_quotes = kite.quote(tokens)
 
-        pcr = 1.0
-        if name in underlying_option_map:
-            # Option alerts only for TOP 4 BANKS
-            alert_list = stock_alerts if name in TOP_FOUR else []
-            pcr = process_option_logic(name, underlying_option_map[name], option_quotes, alert_list)
-
-        oi_str = f"{oi/1000000:.1f}M" if oi >= 1000000 else f"{oi/1000:.0f}K"
-        oi_icon = "⬆️" if oi_increase_lots >= 0 else "⬇️"
-        report += f"{short_names.get(name, name)}={ltp} , COP%={change:+.2f}% , TOI: {oi_str},OI{oi_icon}={abs(oi_increase_lots)}LOT,PCR-{pcr:.1f}\n"
-
-    # Process Bank Nifty Index & Advanced Insights
-    gamma_wall_msg = ""
-    if INDEX_SYMBOL in data:
-        idx_d = data[INDEX_SYMBOL]
-        ltp, open_p, oi = idx_d["last_price"], idx_d["ohlc"]["open"], idx_d.get("oi", 0)
-        change = ((ltp - open_p) / open_p) * 100 if open_p > 0 else 0
-        
-        bn_fut_sym = get_active_future("BANKNIFTY", "NFO-FUT", "NFO")
-        if bn_fut_sym in data:
-            f_d = data[bn_fut_sym]
-            # ADVANCED: Quiet Accumulation & Breakout Logic (Bank Nifty Index)
-            process_quiet_accumulation("BANKNIFTY", f_d["last_price"], f_d.get("oi", 0), accumulation_alerts)
-            detect_v_recovery("BANKNIFTY", f_d["last_price"], [])
-            # BN Future bursts also go to BN channel
-            process_future_burst(bn_fut_sym, "BANKNIFTY", f_d["last_price"], f_d.get("oi", 0), bn_alerts, threshold=100)
-
-        idx_oi_increase_lots = int((oi - last_oi_store.get("BANKNIFTY", oi)) / LOT_SIZES["BANKNIFTY"])
-        last_oi_store["BANKNIFTY"] = oi
-        
-        # ADVANCED: Gamma Wall Logic for Bank Nifty
-        opt_df, _ = underlying_option_map.get("BANKNIFTY", (pd.DataFrame(), ltp))
+        total_call = total_put = 0
         max_call_oi = max_put_oi = 0
-        max_call_strike = max_put_strike = 0
-        
+        chg_call_oi = chg_put_oi = 0
+
+        max_call = max_put = chg_call = chg_put = 0
+
         for _, row in opt_df.iterrows():
-            t_str = str(int(row['instrument_token']))
-            if t_str in option_quotes:
-                curr_oi = option_quotes[t_str].get('oi', 0)
-                if row['instrument_type'] == 'CE' and curr_oi > max_call_oi:
-                    max_call_oi, max_call_strike = curr_oi, row['strike']
-                elif row['instrument_type'] == 'PE' and curr_oi > max_put_oi:
-                    max_put_oi, max_put_strike = curr_oi, row['strike']
-        
-        # Detect Short Squeeze (Price crosses Max Call OI + Call OI falling)
-        if max_call_strike > 0 and ltp > max_call_strike:
-            gamma_wall_msg = f"🌊 *GAMMA SQUEEZE:* Level {max_call_strike} Broken!"
-        elif max_put_strike > 0 and ltp < max_put_strike:
-            gamma_wall_msg = f"🌊 *PUT SQUEEZE:* Level {max_put_strike} Broken!"
 
-        pcr = process_option_logic("BANKNIFTY", (opt_df, ltp), option_quotes, bn_alerts)
-        report += f"\nBANKNIFTY={ltp} , COP%={change:+.2f}% , OI{oi_icon}={abs(idx_oi_increase_lots)}LOT, PCR-{pcr:.22}\n"
+            t = str(int(row['instrument_token']))
+            if t not in option_quotes:
+                continue
 
-    # --- ADVANCED INSIGHTS SECTION ---
-    report += "\n🧠 *ADVANCED INSIGHTS*"
-    
-    # 1. Tug-of-War (HDFC vs ICICI)
-    hdfc_c = bank_signals.get("HDFCBANK", "NEUTRAL")
-    icici_c = bank_signals.get("ICICIBANK", "NEUTRAL")
-    if hdfc_c != icici_c and hdfc_c != "NEUTRAL" and icici_c != "NEUTRAL":
-        report += f"\n⚠️ *TUG-OF-WAR:* HDFC({hdfc_c}) vs ICICI({icici_c})"
-    else:
-        report += "\n✅ *INDEX SYNC:* Top Banks Aligned"
+            curr_oi = option_quotes[t].get("oi", 0)
 
-    # 2. Quiet Accumulation & Breakout (Index + Stocks)
-    if accumulation_alerts:
-        report += "\n" + "\n".join(accumulation_alerts[:2])
-    
-    # 3. Gamma Wall
-    if gamma_wall_msg:
-        report += f"\n{gamma_wall_msg}"
+            prev = option_history.get(t, 0)
+            change_oi = curr_oi - prev
+            option_history[t] = curr_oi
 
-    # 4. Sentiment & 3-Star Logic
-    report += f"\n\n⚖️ *SENTIMENT SCORE: {score:.2f}*"
-    
-    # 3-Star Condition: High score + Top 2 Banks same direction + BN PCR strong
-    is_3_star = False
-    if abs(score) > 30 and hdfc_c == icici_c and hdfc_c != "NEUTRAL":
-        if (score > 30 and pcr > 1.2) or (score < -30 and pcr < 0.8):
-            is_3_star = True
+            if row['instrument_type'] == "CE":
+                total_call += curr_oi
 
-    suggestion = "🚀 STRONG BUY" if score > 30 else "✅ BUY" if score > 15 else "🔥 STRONG SELL" if score < -30 else "❌ SELL" if score < -15 else "⚖️ NEUTRAL"
-    if is_3_star:
-        report += f"\n🌟🌟🌟 *3-STAR {suggestion} CONFIRMED* 🌟🌟🌟"
-    else:
-        report += f"\n💡 SUGGESTION: *{suggestion}*"
-    
-    return score, report, bn_alerts, stock_alerts, velocity_alerts
+                if curr_oi > max_call_oi:
+                    max_call_oi = curr_oi
+                    max_call = row['strike']
 
-def process_future_burst(symbol, name, ltp, oi, alerts_list, threshold=100):
-    """Detects Bursts for Futures using a 1-minute window logic."""
-    lot_size = LOT_SIZES.get(name, 1)
-    now = datetime.now()
+                if change_oi > chg_call_oi:
+                    chg_call_oi = change_oi
+                    chg_call = row['strike']
 
-    key = f"FUT_{symbol}"
-    if key not in option_history:
-        option_history[key] = []
+            else:
+                total_put += curr_oi
 
-    history = option_history[key]
-    prev_oi = history[-1]['oi'] if history else 0
-    prev_price = history[-1]['price'] if history else 0
+                if curr_oi > max_put_oi:
+                    max_put_oi = curr_oi
+                    max_put = row['strike']
 
-    if prev_oi > 0:
-        tick_lots = int(abs(oi - prev_oi) / lot_size)
-        if tick_lots >= threshold and key not in active_watches:
-            active_watches[key] = {
-                "start_oi": prev_oi,
-                "start_price": prev_price,
-                "end_time": now + timedelta(minutes=1),
-                "symbol": symbol,
-                "name": name
-            }
+                if change_oi > chg_put_oi:
+                    chg_put_oi = change_oi
+                    chg_put = row['strike']
 
-    if key in active_watches:
-        watch = active_watches[key]
-        if now >= watch["end_time"]:
-            final_oi_chg = oi - watch["start_oi"]
-            final_price_chg = ltp - watch["start_price"]
-            final_lots = int(abs(final_oi_chg) / lot_size)
+        pcr = total_put / total_call if total_call else 1
 
-            if final_lots >= threshold:
-                strength = get_strength_label(final_lots)
-                action = classify_action(watch['symbol'], final_oi_chg, final_price_chg)
-                price_icon = "▲" if final_price_chg >= 0 else "▼"
-                
-                # Match gfdl_scanner.py format exactly
-                alerts_list.append(
-                    f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n━━━━━━━━━━━━━━━\nLOTS: {final_lots}\n"
-                    f"PRICE: {ltp:.2f} ({price_icon})\nFUTURE PRICE: {ltp:.2f}\n"
-                    f"━━━━━━━━━━━━━━━\nEXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {final_oi_chg:+,d}\nNEW OI     : {oi:,}\nTIME: {now.strftime('%H:%M:%S')}"
-                )
-            del active_watches[key]
+        arrow = "⬆️" if change > 0 else "⬇️"
 
-    history.append({'time': now, 'oi': oi, 'price': ltp})
-    if len(history) > 20: history.pop(0)
+        icon = ""
+        if pcr > 1.3:
+            icon = "🛡️"
+        elif pcr < 0.7:
+            icon = "🧱"
 
-def process_option_logic(name, underlying_data, option_quotes, itm_alerts_list):
-    """Handles PCR and GDFL-style Burst Alert Logic."""
-    opt_df, u_ltp = underlying_data
-    if opt_df.empty: return 1.0
+        report += f"{short[name]}={ltp:.1f}{arrow}{icon} , PCR-{pcr:.1f}\n"
+        report += f"    - MAX_OI: {max_put}P/{max_call}C | CHG_OI: {chg_put}P/{chg_call}C\n\n"
 
-    total_call_oi = total_put_oi = 0
-    lot_size = LOT_SIZES.get(name, 1)
-    
-    threshold = 100
-    now = datetime.now()
+    # ================= BANKNIFTY =================
+
+    bn = data[INDEX_SYMBOL]
+    ltp = bn["last_price"]
+    open_p = bn["ohlc"]["open"]
+
+    change = ((ltp - open_p) / open_p) * 100
+
+    opt_df = get_relevant_options("BANKNIFTY", ltp)
+    tokens = opt_df['instrument_token'].tolist()
+    option_quotes = kite.quote(tokens)
+
+    total_call = total_put = 0
+    max_call_oi = max_put_oi = 0
+    chg_call_oi = chg_put_oi = 0
+
+    max_call = max_put = chg_call = chg_put = 0
 
     for _, row in opt_df.iterrows():
-        t_int = int(row['instrument_token'])
-        t_str = str(t_int)
-        if t_str not in option_quotes: continue
 
-        q = option_quotes[t_str]
-        curr_oi, curr_price = q.get('oi', 0), q.get('last_price', 0)
+        t = str(int(row['instrument_token']))
+        if t not in option_quotes:
+            continue
 
-        if row['instrument_type'] == 'CE': total_call_oi += curr_oi
-        else: total_put_oi += curr_oi
+        curr_oi = option_quotes[t].get("oi", 0)
 
-        if t_int not in option_history:
-            option_history[t_int] = []
+        prev = option_history.get(t, 0)
+        change_oi = curr_oi - prev
+        option_history[t] = curr_oi
 
-        history = option_history[t_int]
-        prev_oi = history[-1]['oi'] if history else 0
-        prev_price = history[-1]['price'] if history else 0
+        if row['instrument_type'] == "CE":
+            total_call += curr_oi
+            if curr_oi > max_call_oi:
+                max_call = row['strike']
+                max_call_oi = curr_oi
+            if change_oi > chg_call_oi:
+                chg_call = row['strike']
+                chg_call_oi = change_oi
+        else:
+            total_put += curr_oi
+            if curr_oi > max_put_oi:
+                max_put = row['strike']
+                max_put_oi = curr_oi
+            if change_oi > chg_put_oi:
+                chg_put = row['strike']
+                chg_put_oi = change_oi
 
-        if prev_oi > 0:
-            tick_lots = int(abs(curr_oi - prev_oi) / lot_size)
-            if tick_lots >= threshold and t_int not in active_watches:
-                active_watches[t_int] = {
-                    "start_oi": prev_oi,
-                    "start_price": prev_price,
-                    "end_time": now + timedelta(minutes=1),
-                    "symbol": row['tradingsymbol'],
-                    "underlying": name
-                }
+    pcr = total_put / total_call if total_call else 1
 
-        if t_int in active_watches:
-            watch = active_watches[t_int]
-            if now >= watch["end_time"]:
-                final_oi_chg = curr_oi - watch["start_oi"]
-                final_price_chg = curr_price - watch["start_price"]
-                final_lots = int(abs(final_oi_chg) / lot_size)
+    arrow = "⬆️" if change > 0 else "⬇️"
 
-                if final_lots >= threshold:
-                    strength = get_strength_label(final_lots)
-                    action = classify_action(watch['symbol'], final_oi_chg, final_price_chg)
-                    price_icon = "▲" if final_price_chg >= 0 else "▼"
-                    
-                    # Match gfdl_scanner.py format exactly
-                    itm_alerts_list.append(
-                        f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n━━━━━━━━━━━━━━━\nLOTS: {final_lots}\n"
-                        f"PRICE: {curr_price:.2f} ({price_icon})\nFUTURE PRICE: {u_ltp:.2f}\n"
-                        f"━━━━━━━━━━━━━━━\nEXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {final_oi_chg:+,d}\nNEW OI     : {curr_oi:,}\nTIME: {now.strftime('%H:%M:%S')}"
-                    )
-                del active_watches[t_int]
+    icon = ""
+    if pcr > 1.3:
+        icon = "🛡️"
+    elif pcr < 0.7:
+        icon = "🧱"
 
-        history.append({'time': now, 'oi': curr_oi, 'price': curr_price})
-        if len(history) > 20: history.pop(0)
+    report += f"BANKNIFTY={ltp:.1f}{arrow}{icon} , PCR-{pcr:.2f}\n"
+    report += f"    - MAX_OI: {max_put}P/{max_call}C | CHG_OI: {chg_put}P/{chg_call}C\n\n"
 
-    return total_put_oi / total_call_oi if total_call_oi > 0 else 1.0
+    # ================= ADVANCED =================
+
+    report += "\n🧠 *ADVANCED INSIGHTS*"
+
+    hdfc = bank_signals.get("HDFCBANK")
+    icici = bank_signals.get("ICICIBANK")
+
+    if hdfc == icici:
+        report += "\n✅ *INDEX SYNC:* Top Banks Aligned"
+    else:
+        report += f"\n⚠️ *TUG-OF-WAR:* HDFC({hdfc}) vs ICICI({icici})"
+
+    if accumulation_alerts:
+        report += "\n" + "\n".join(accumulation_alerts)
+
+    report += f"\n\n⚖️ *SENTIMENT SCORE: {score:.2f}*"
+
+    if abs(score) > 30 and hdfc == icici:
+        report += "\n🌟🌟🌟 *3-STAR SIGNAL ACTIVE* 🌟🌟🌟"
+    else:
+        report += "\n💡 *NORMAL CONDITIONS*"
+
+    # ================= ALERTS =================
+
+    report += "\n\n🔔 *LATEST ALERTS:*"
+
+    combined = bn_alerts + stock_alerts + velocity_alerts
+
+    for alert in combined[:5]:
+        lines = alert.split("\n")
+        if len(lines) > 1:
+            report += f"\n• {lines[1]}"
+
+    return score, report, bn_alerts, stock_alerts, velocity_alerts
