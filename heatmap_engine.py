@@ -1,6 +1,6 @@
 # ================= IMPORTS =================
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # ================= CONFIG =================
 BANK_WEIGHTS = {
@@ -21,13 +21,11 @@ LOT_SIZES = {
 BANK_NAMES = list(BANK_WEIGHTS.keys())
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 
-last_oi_store = {}
 option_history = {}
-active_watches = {}
-accum_history = {}
 
 _options_df = None
 _futures_df = None
+
 
 # ================= LOAD =================
 def load_options_data():
@@ -38,6 +36,7 @@ def load_options_data():
         _options_df = df[df['segment'] == "NFO-OPT"]
     return _options_df
 
+
 def load_futures_data():
     global _futures_df
     if _futures_df is None:
@@ -46,10 +45,21 @@ def load_futures_data():
         _futures_df = df[df['segment'].str.contains("FUT")]
     return _futures_df
 
-# ================= MONTHLY ONLY =================
-def get_monthly_expiry(df):
-    return sorted(df['expiry'].unique())[0]
 
+# ================= FIXED MONTHLY =================
+def get_monthly_expiry(df):
+    today = pd.Timestamp.now().normalize()
+    expiries = sorted(df['expiry'].unique())
+
+    future_expiries = [e for e in expiries if e >= today]
+
+    if future_expiries:
+        return future_expiries[0]
+    else:
+        return expiries[-1]
+
+
+# ================= OPTIONS =================
 def get_relevant_options(name, ltp):
     df = load_options_data()
     options = df[df['name'] == name]
@@ -63,24 +73,41 @@ def get_relevant_options(name, ltp):
     idx = strikes.index(atm)
     rng = 15 if name == "BANKNIFTY" else 10
 
-    return options.iloc[max(0, idx-rng): idx+rng]
+    selected = strikes[max(0, idx-rng): idx+rng]
+
+    return options[options['strike'].isin(selected)]
+
 
 # ================= FUTURES =================
 def get_active_future(name):
     df = load_futures_data()
     fut = df[df['name'] == name]
+
     expiry = get_monthly_expiry(fut)
-    return "NFO:" + fut[fut['expiry']==expiry].iloc[0]['tradingsymbol']
+    filtered = fut[fut['expiry'] == expiry]
+
+    if filtered.empty:
+        return None
+
+    return "NFO:" + filtered.iloc[0]['tradingsymbol']
+
 
 def get_bank_futures():
-    return [get_active_future(n) for n in BANK_NAMES]
+    futures = []
+    for n in BANK_NAMES:
+        sym = get_active_future(n)
+        if sym:
+            futures.append(sym)
+    return futures
+
 
 # ================= BURST =================
-def process_option_logic(name, underlying_data, option_quotes, alerts):
-    opt_df, u_ltp = underlying_data
+def process_option_logic(name, opt_df, option_quotes, alerts):
+
     lot_size = LOT_SIZES[name]
 
     for _, row in opt_df.iterrows():
+
         token = str(int(row['instrument_token']))
         if token not in option_quotes:
             continue
@@ -95,12 +122,13 @@ def process_option_logic(name, underlying_data, option_quotes, alerts):
         lots = int(abs(change) / lot_size)
 
         if lots >= 100:
+
             action = "CALL BUY 🔵" if row['instrument_type']=="CE" else "PUT BUY 🔴"
+
             alerts.append(
                 f"🚀 BLAST 🚀\n🚨 {action}\nSymbol: {row['tradingsymbol']}\nLOTS: {lots}"
             )
 
-    return 1.0
 
 # ================= MAIN =================
 def calculate_heatmap(kite):
@@ -113,6 +141,8 @@ def calculate_heatmap(kite):
     report = "📊 *BANK MOVEMENT (FUTURES)*\n\n"
     score = 0
 
+    stock_alerts = []
+
     short = {
         "HDFCBANK":"HDBFU",
         "ICICIBANK":"ICIBFU",
@@ -121,10 +151,13 @@ def calculate_heatmap(kite):
         "BANKNIFTY":"BANKNIFTY"
     }
 
-    stock_alerts = []
-
     for sym in fut_symbols:
+
+        if sym not in data:
+            continue
+
         d = data[sym]
+
         ltp = d["last_price"]
         open_p = d["ohlc"]["open"]
 
@@ -137,43 +170,57 @@ def calculate_heatmap(kite):
         tokens = opt_df['instrument_token'].tolist()
         option_quotes = kite.quote(tokens)
 
-        process_option_logic(name,(opt_df,ltp),option_quotes,stock_alerts)
+        # ALERT LOGIC (UNCHANGED)
+        process_option_logic(name, opt_df, option_quotes, stock_alerts)
 
-        # ===== MAX OI =====
+        # MAX OI
         max_call=max_put=chg_call=chg_put=0
         max_call_oi=max_put_oi=chg_call_oi=chg_put_oi=0
         total_call=total_put=0
 
         for _,row in opt_df.iterrows():
+
             t=str(int(row['instrument_token']))
-            if t not in option_quotes: continue
+            if t not in option_quotes:
+                continue
 
             oi=option_quotes[t].get("oi",0)
+
             prev=option_history.get(t,0)
             diff=oi-prev
 
             if row['instrument_type']=="CE":
                 total_call+=oi
-                if oi>max_call_oi: max_call, max_call_oi=row['strike'],oi
-                if diff>chg_call_oi: chg_call, chg_call_oi=row['strike'],diff
+                if oi>max_call_oi:
+                    max_call=row['strike']; max_call_oi=oi
+                if diff>chg_call_oi:
+                    chg_call=row['strike']; chg_call_oi=diff
             else:
                 total_put+=oi
-                if oi>max_put_oi: max_put, max_put_oi=row['strike'],oi
-                if diff>chg_put_oi: chg_put, chg_put_oi=row['strike'],diff
+                if oi>max_put_oi:
+                    max_put=row['strike']; max_put_oi=oi
+                if diff>chg_put_oi:
+                    chg_put=row['strike']; chg_put_oi=diff
 
         pcr = total_put/total_call if total_call else 1
 
         arrow="⬆️" if change>0 else "⬇️"
         icon="🛡️" if pcr>1.3 else "🧱" if pcr<0.7 else ""
 
-        report+=f"{short[name]}={ltp:.1f}{arrow}{icon} , PCR-{pcr:.1f}\n"
-        report+=f"    - MAX_OI: {max_put}P/{max_call}C | CHG_OI: {chg_put}P/{chg_call}C\n\n"
+        report += f"{short[name]}={ltp:.1f}{arrow}{icon} , PCR-{pcr:.1f}\n"
+        report += f"    - MAX_OI: {max_put}P/{max_call}C | CHG_OI: {chg_put}P/{chg_call}C\n\n"
 
-    report+=f"⚖️ *SENTIMENT SCORE: {score:.2f}*\n"
-    report+= "🚀 STRONG BUY" if score>30 else "📉 STRONG SELL" if score<-30 else "⚖️ SIDEWAYS"
+    report += f"⚖️ *SENTIMENT SCORE: {score:.2f}*\n"
 
-    report+="\n\n🔔 *LATEST ALERTS:*"
+    if score > 30:
+        report += "🚀 STRONG BULLISH"
+    elif score < -30:
+        report += "📉 STRONG BEARISH"
+    else:
+        report += "⚖️ SIDEWAYS"
+
+    report += "\n\n🔔 *LATEST ALERTS:*"
     for a in stock_alerts[:5]:
-        report+=f"\n• {a.splitlines()[1]}"
+        report += f"\n• {a.splitlines()[1]}"
 
     return score, report, [], stock_alerts, []
