@@ -4,6 +4,7 @@ from scanner import run_scanner
 from env_config import API_KEY, API_SECRET
 import threading
 import os
+import sys
 
 app = Flask(__name__)
 kite = KiteConnect(api_key=API_KEY)
@@ -13,43 +14,36 @@ def start_scanner_if_token_exists():
         try:
             with open("access_token.txt", "r") as f:
                 token = f.read().strip()
-            
             if token:
-                print(f"Found saved token. Starting scanner automatically...")
+                print("Found token. Starting scanner background thread...", flush=True)
                 kite.set_access_token(token)
-                
                 t = threading.Thread(target=run_scanner, args=(kite,))
                 t.daemon = True
                 t.start()
-                return True
         except Exception as e:
-            print(f"Failed to auto-start scanner: {e}")
-    return False
+            print(f"Auto-start failed: {e}", flush=True)
 
 @app.route("/")
 def home():
-    return "Server is Live. Scanner is running."
+    return "Kite Scanner is running on Railway."
 
 @app.route("/login")
 def login():
     request_token = request.args.get("request_token")
     if not request_token:
         login_url = f"https://kite.zerodha.com/connect/login?api_key={API_KEY}&v=3"
-        return f"<h3>Action Required</h3><p><a href='{login_url}'>Log into Zerodha Kite</a></p>"
-
+        return f"<a href='{login_url}'>Click here to Login</a>"
+    
     try:
         data = kite.generate_session(request_token, API_SECRET)
-        access_token = data["access_token"]
         with open("access_token.txt", "w") as f:
-            f.write(access_token)
+            f.write(data["access_token"])
         start_scanner_if_token_exists()
-        return "<h1>Success!</h1><p>Scanner is now running.</p>"
+        return "Success! Scanner Started."
     except Exception as e:
-        return f"<h1>Error</h1><p>Login failed: {str(e)}</p>"
-
-# Automatically try to start scanner on load
-start_scanner_if_token_exists()
+        return f"Error: {e}"
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8080))
+    start_scanner_if_token_exists()
+    port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
