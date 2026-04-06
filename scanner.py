@@ -1,4 +1,4 @@
-import pandas as pd
+import pd
 import time
 from heatmap_engine import calculate_heatmap
 from telegram_utils import send_telegram_message
