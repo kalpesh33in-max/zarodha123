@@ -11,47 +11,39 @@ from env_config import (
 
 IST = ZoneInfo("Asia/Kolkata")
 
-def log(msg):
-    print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] {msg}")
-    sys.stdout.flush()
-
 def run_scanner(kite, stop_event=None):
-    log("🚀 Scanner Initialized. Market Hours: 09:00 - 15:30 IST.")
-    send_telegram_message("✅ *Kite Scanner Online!*")
+    print("Scanner session initialized. Waiting for market hours...", flush=True)
+    send_telegram_message("✅ *Scanner Online!* Monitoring starts at 09:15 AM IST.")
 
     last_report_time = 0
 
     while stop_event is None or not stop_event.is_set():
         now = datetime.now(IST)
-        if 9 <= now.hour < 15 or (now.hour == 15 and now.minute <= 30):
-            if now.weekday() <= 4:
-                try:
-                    # FIXED: Unpacking 5 values from heatmap_engine
-                    score, report, bn_alerts, stock_alerts, velocity_alerts = calculate_heatmap(kite)
+        # Market Hours: 09:15 to 15:30
+        if (9 <= now.hour <= 15) and now.weekday() <= 4:
+            try:
+                # Unpacking fixed to match heatmap_engine
+                score, report, bn_al, st_al, vel_al = calculate_heatmap(kite)
 
-                    curr_ts = time.time()
-                    if curr_ts - last_report_time >= 180:
-                        status = "STRONG BULLISH" if score > 30 else "STRONG BEARISH" if score < -30 else "SIDEWAYS"
-                        final_msg = f"{report}\n\n⚖️ *SCORE*: {score:.2f}\n📢 *STATUS*: {status}"
-                        send_telegram_message(final_msg)
-                        last_report_time = curr_ts
-                        log("Sent General Report.")
+                curr_ts = time.time()
+                if curr_ts - last_report_time >= 180:
+                    status = "BULLISH" if score > 30 else "BEARISH" if score < -30 else "SIDEWAYS"
+                    msg = f"{report}\n⚖️ *SCORE*: {score:.2f}\n📢 *STATUS*: {status}"
+                    send_telegram_message(msg)
+                    last_report_time = curr_ts
+                    print(f"[{now.strftime('%H:%M:%S')}] General Report Sent.", flush=True)
 
-                    for alert in bn_alerts:
-                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_BN, token=TELE_TOKEN_BN)
-                    for alert in stock_alerts:
-                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_STOCKS, token=TELE_TOKEN_STOCKS)
-                    for alert in velocity_alerts:
-                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_VELOCITY, token=TELE_TOKEN_VELOCITY)
+                # Send individual alerts
+                for a in bn_al: send_telegram_message(a, TELE_CHAT_ID_BN, TELE_TOKEN_BN)
+                for a in st_al: send_telegram_message(a, TELE_CHAT_ID_STOCKS, TELE_TOKEN_STOCKS)
+                for a in vel_al: send_telegram_message(a, TELE_CHAT_ID_VELOCITY, TELE_TOKEN_VELOCITY)
 
-                except Exception as e:
-                    log(f"CRITICAL ERROR: {e}")
-                    time.sleep(10)
-            else:
-                log("Weekend. Scanner sleeping...")
-                time.sleep(3600)
+            except Exception as e:
+                print(f"Scanner Loop Error: {e}", flush=True)
+                time.sleep(10)
         else:
-            log("Outside market hours.")
+            if now.minute % 30 == 0: # Log status every 30 mins outside hours
+                print(f"[{now.strftime('%H:%M:%S')}] Outside market hours.", flush=True)
             time.sleep(60)
         
         time.sleep(5)
