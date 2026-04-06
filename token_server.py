@@ -4,28 +4,24 @@ from scanner import run_scanner
 from env_config import API_KEY, API_SECRET
 import threading
 import os
-import sys
 
 app = Flask(__name__)
 kite = KiteConnect(api_key=API_KEY)
 
-def start_scanner_if_token_exists():
+def start_scanner_thread():
     if os.path.exists("access_token.txt"):
-        try:
-            with open("access_token.txt", "r") as f:
-                token = f.read().strip()
-            if token:
-                print("Found token. Starting scanner background thread...", flush=True)
-                kite.set_access_token(token)
-                t = threading.Thread(target=run_scanner, args=(kite,))
-                t.daemon = True
-                t.start()
-        except Exception as e:
-            print(f"Auto-start failed: {e}", flush=True)
+        with open("access_token.txt", "r") as f:
+            token = f.read().strip()
+        if token:
+            print("Access token found. Starting scanner thread...", flush=True)
+            kite.set_access_token(token)
+            t = threading.Thread(target=run_scanner, args=(kite,))
+            t.daemon = True
+            t.start()
 
 @app.route("/")
 def home():
-    return "Kite Scanner is running on Railway."
+    return "<h3>Kite Scanner: Server is Live</h3>"
 
 @app.route("/login")
 def login():
@@ -35,15 +31,18 @@ def login():
         return f"<a href='{login_url}'>Click here to Login</a>"
     
     try:
+        # If this fails with 'Invalid Session', the token was used or expired
         data = kite.generate_session(request_token, API_SECRET)
         with open("access_token.txt", "w") as f:
             f.write(data["access_token"])
-        start_scanner_if_token_exists()
-        return "Success! Scanner Started."
+        start_scanner_thread()
+        return "<h1>Success!</h1><p>Scanner has been started.</p>"
     except Exception as e:
-        return f"Error: {e}"
+        print(f"Login Failure: {e}", flush=True)
+        return f"<h1>Error</h1><p>{str(e)}</p>"
 
 if __name__ == "__main__":
-    start_scanner_if_token_exists()
+    start_scanner_thread()
+    # Bind to 0.0.0.0 and dynamic Railway PORT
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
