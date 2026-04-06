@@ -1,8 +1,6 @@
-# ================= IMPORTS =================
 import pandas as pd
 from datetime import datetime
 
-# ================= CONFIG =================
 BANK_WEIGHTS = {
     "HDFCBANK": 19.7,
     "ICICIBANK": 16.1,
@@ -46,17 +44,13 @@ def load_futures_data():
     return _futures_df
 
 
-# ================= FIXED MONTHLY =================
+# ================= EXPIRY FIX =================
 def get_monthly_expiry(df):
     today = pd.Timestamp.now().normalize()
     expiries = sorted(df['expiry'].unique())
-
     future_expiries = [e for e in expiries if e >= today]
 
-    if future_expiries:
-        return future_expiries[0]
-    else:
-        return expiries[-1]
+    return future_expiries[0] if future_expiries else expiries[-1]
 
 
 # ================= OPTIONS =================
@@ -73,9 +67,7 @@ def get_relevant_options(name, ltp):
     idx = strikes.index(atm)
     rng = 15 if name == "BANKNIFTY" else 10
 
-    selected = strikes[max(0, idx-rng): idx+rng]
-
-    return options[options['strike'].isin(selected)]
+    return options.iloc[max(0, idx-rng): idx+rng]
 
 
 # ================= FUTURES =================
@@ -93,16 +85,11 @@ def get_active_future(name):
 
 
 def get_bank_futures():
-    futures = []
-    for n in BANK_NAMES:
-        sym = get_active_future(n)
-        if sym:
-            futures.append(sym)
-    return futures
+    return [get_active_future(n) for n in BANK_NAMES if get_active_future(n)]
 
 
-# ================= BURST =================
-def process_option_logic(name, opt_df, option_quotes, alerts):
+# ================= ALERT LOGIC =================
+def process_option_logic(name, opt_df, option_quotes, alerts, fut_price):
 
     lot_size = LOT_SIZES[name]
 
@@ -112,8 +99,10 @@ def process_option_logic(name, opt_df, option_quotes, alerts):
         if token not in option_quotes:
             continue
 
-        curr_oi = option_quotes[token].get('oi', 0)
-        price = option_quotes[token].get('last_price', 0)
+        q = option_quotes[token]
+
+        curr_oi = q.get('oi', 0)
+        price = q.get('last_price', 0)
 
         prev = option_history.get(token, 0)
         change = curr_oi - prev
@@ -121,13 +110,31 @@ def process_option_logic(name, opt_df, option_quotes, alerts):
 
         lots = int(abs(change) / lot_size)
 
-        if lots >= 100:
+        # FILTER
+        if lots < 300:
+            continue
 
-            action = "CALL BUY 🔵" if row['instrument_type']=="CE" else "PUT BUY 🔴"
+        if row['instrument_type'] == "CE":
+            action = "CALL BUY 🔵" if change > 0 else "CALL WRITER ✍️"
+        else:
+            action = "PUT BUY 🔴" if change > 0 else "PUT WRITER ✍️"
 
-            alerts.append(
-                f"🚀 BLAST 🚀\n🚨 {action}\nSymbol: {row['tradingsymbol']}\nLOTS: {lots}"
-            )
+        arrow = "▲" if price >= q.get("ohlc", {}).get("open", price) else "▼"
+
+        alert = f"""🚀 BLAST 🚀
+🚨 {action}
+Symbol: {row['tradingsymbol']}
+━━━━━━━━━━━━━━━
+LOTS: {lots}
+PRICE: {price:.2f} ({arrow})
+FUTURE PRICE: {fut_price:.2f}
+━━━━━━━━━━━━━━━
+EXISTING OI: {prev:,}
+OI CHANGE  : {change:+,}
+NEW OI     : {curr_oi:,}
+TIME: {datetime.now().strftime('%H:%M:%S')}
+"""
+        alerts.append(alert)
 
 
 # ================= MAIN =================
@@ -138,10 +145,9 @@ def calculate_heatmap(kite):
 
     data = kite.quote(symbols)
 
-    report = "📊 *BANK MOVEMENT (FUTURES)*\n\n"
+    report = "📊 BANK MOVEMENT (FUTURES)\n\n"
     score = 0
-
-    stock_alerts = []
+    alerts = []
 
     short = {
         "HDFCBANK":"HDBFU",
@@ -170,8 +176,7 @@ def calculate_heatmap(kite):
         tokens = opt_df['instrument_token'].tolist()
         option_quotes = kite.quote(tokens)
 
-        # ALERT LOGIC (UNCHANGED)
-        process_option_logic(name, opt_df, option_quotes, stock_alerts)
+        process_option_logic(name, opt_df, option_quotes, alerts, ltp)
 
         # MAX OI
         max_call=max_put=chg_call=chg_put=0
@@ -185,7 +190,6 @@ def calculate_heatmap(kite):
                 continue
 
             oi=option_quotes[t].get("oi",0)
-
             prev=option_history.get(t,0)
             diff=oi-prev
 
@@ -208,19 +212,13 @@ def calculate_heatmap(kite):
         icon="🛡️" if pcr>1.3 else "🧱" if pcr<0.7 else ""
 
         report += f"{short[name]}={ltp:.1f}{arrow}{icon} , PCR-{pcr:.1f}\n"
-        report += f"    - MAX_OI: {max_put}P/{max_call}C | CHG_OI: {chg_put}P/{chg_call}C\n\n"
+        report += f"   - MAX_OI: {max_put}P/{max_call}C | CHG_OI: {chg_put}P/{chg_call}C\n\n"
 
-    report += f"⚖️ *SENTIMENT SCORE: {score:.2f}*\n"
+    report += f"⚖️ SENTIMENT SCORE: {score:.2f}\n"
+    report += "🚀 STRONG BULLISH" if score>30 else "📉 STRONG BEARISH" if score<-30 else "⚖️ SIDEWAYS"
 
-    if score > 30:
-        report += "🚀 STRONG BULLISH"
-    elif score < -30:
-        report += "📉 STRONG BEARISH"
-    else:
-        report += "⚖️ SIDEWAYS"
+    report += "\n\n🔔 LATEST ALERTS:\n"
+    for a in alerts[:5]:
+        report += f"• {a.splitlines()[1]}\n"
 
-    report += "\n\n🔔 *LATEST ALERTS:*"
-    for a in stock_alerts[:5]:
-        report += f"\n• {a.splitlines()[1]}"
-
-    return score, report, [], stock_alerts, []
+    return score, report, [], alerts, []
