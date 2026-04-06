@@ -44,10 +44,7 @@ def load_futures():
 
 def get_expiry(df):
     today = pd.Timestamp.now()
-
-    # 👉 FORCE CURRENT MONTH (APR)
     df = df[df['expiry'].dt.month == today.month]
-
     exps = sorted(df['expiry'].unique())
     return exps[0]
 
@@ -89,18 +86,12 @@ def format_alert(symbol, lots, price, fut, prev, change, curr, inst, opt_type):
 
     if inst == "BUY":
         action = "CALL BUY 🔵" if opt_type == "CE" else "PUT BUY 🔴"
-
     elif inst == "WRITER":
         action = "CALL WRITER ✍️" if opt_type == "CE" else "PUT WRITER ✍️"
-
     elif inst == "SC":
         action = f"SHORT COVERING ({opt_type}) 🔥"
-
-    elif inst == "UW":
-        action = f"LONG UNWINDING ({opt_type}) ⚠️"
-
     else:
-        action = "UNKNOWN"
+        action = f"LONG UNWINDING ({opt_type}) ⚠️"
 
     arrow = "▲" if change >= 0 else "▼"
 
@@ -175,7 +166,6 @@ def process_options(name, opt_df, quotes, alerts, fut_price):
         accumulator[key]["oi"] += change
         accumulator[key]["end"] = price
 
-        # ⏱ 60 sec logic
         if now - timer_store[key] < 60:
             continue
 
@@ -184,7 +174,6 @@ def process_options(name, opt_df, quotes, alerts, fut_price):
         lot = LOT_SIZES["BANKNIFTY"] if "BANKNIFTY" in key else LOT_SIZES[name]
         lots = int(abs(data["oi"]) / lot)
 
-        # 🔥 BANKNIFTY lower threshold
         min_lots = 50 if "BANKNIFTY" in key else 100
 
         if lots < min_lots:
@@ -254,3 +243,8 @@ def run_scanner(kite):
         process_future(name, fut, data, alerts)
 
     return alerts
+
+
+# 🔥 BACKWARD COMPATIBILITY (CRASH FIX)
+def calculate_heatmap(kite):
+    return run_scanner(kite)
