@@ -1,21 +1,13 @@
+# ================= IMPORTS =================
 import pandas as pd
 from datetime import datetime, timedelta
 
+# ================= CONFIG =================
 BANK_WEIGHTS = {
     "HDFCBANK": 19.7,
     "ICICIBANK": 16.1,
     "SBIN": 10.7,
     "AXISBANK": 9.9,
-    "KOTAKBANK": 9.2,
-    "FEDERALBNK": 5.6,
-    "INDUSINDBK": 4.7,
-    "BANKBARODA": 4.5,
-    "AUBANK": 4.0,
-    "CANBK": 3.9,
-    "PNB": 3.5,
-    "IDFCFIRSTB": 3.2,
-    "YESBANK": 2.5,
-    "UNIONBANK": 2.5
 }
 
 LOT_SIZES = {
@@ -23,16 +15,6 @@ LOT_SIZES = {
     "ICICIBANK": 700,
     "SBIN": 750,
     "AXISBANK": 625,
-    "KOTAKBANK": 2000,
-    "FEDERALBNK": 5000,
-    "INDUSINDBK": 500,
-    "BANKBARODA": 4850,
-    "AUBANK": 1000,
-    "CANBK": 2250,
-    "PNB": 4000,
-    "IDFCFIRSTB": 7500,
-    "YESBANK": 8000,
-    "UNIONBANK": 5000,
     "BANKNIFTY": 30
 }
 
@@ -42,167 +24,156 @@ INDEX_SYMBOL = "NSE:NIFTY BANK"
 last_oi_store = {}
 option_history = {}
 active_watches = {}
-price_velocity_store = {}
+accum_history = {}
 
 _options_df = None
 _futures_df = None
 
-
-# -------------------------------
-# LOAD DATA (SAFE DATE FIX)
-# -------------------------------
+# ================= LOAD =================
 def load_options_data():
     global _options_df
     if _options_df is None:
         df = pd.read_csv("instruments.csv")
-        _options_df = df[df['segment'] == 'NFO-OPT'].copy()
-        _options_df['expiry'] = pd.to_datetime(
-            _options_df['expiry'],
-            dayfirst=True,
-            errors='coerce'
-        )
-        _options_df = _options_df.dropna(subset=['expiry'])
+        df['expiry'] = pd.to_datetime(df['expiry'], dayfirst=True)
+        _options_df = df[df['segment'] == "NFO-OPT"]
     return _options_df
-
 
 def load_futures_data():
     global _futures_df
     if _futures_df is None:
         df = pd.read_csv("instruments.csv")
-        _futures_df = df[df['segment'].str.contains('-FUT', na=False)].copy()
-        _futures_df['expiry'] = pd.to_datetime(
-            _futures_df['expiry'],
-            dayfirst=True,
-            errors='coerce'
-        )
-        _futures_df = _futures_df.dropna(subset=['expiry'])
+        df['expiry'] = pd.to_datetime(df['expiry'], dayfirst=True)
+        _futures_df = df[df['segment'].str.contains("FUT")]
     return _futures_df
 
+# ================= MONTHLY ONLY =================
+def get_monthly_expiry(df):
+    return sorted(df['expiry'].unique())[0]
 
-# -------------------------------
-# 🔥 FIXED: MONTHLY EXPIRY ONLY
-# -------------------------------
-def get_relevant_options(underlying_name, ltp):
-
+def get_relevant_options(name, ltp):
     df = load_options_data()
-    if df is None or df.empty:
-        return pd.DataFrame()
+    options = df[df['name'] == name]
 
-    options = df[df['name'] == underlying_name]
-    if options.empty:
-        return pd.DataFrame()
-
-    expiries = sorted(options['expiry'].unique())
-
-    # ✅ FIX: ALWAYS MONTHLY (LAST EXPIRY)
-    monthly_expiry = expiries[-1]
-
-    options = options[options['expiry'] == monthly_expiry]
+    expiry = get_monthly_expiry(options)
+    options = options[options['expiry'] == expiry]
 
     strikes = sorted(options['strike'].unique())
-    if not strikes:
-        return pd.DataFrame()
-
     atm = min(strikes, key=lambda x: abs(x - ltp))
+
     idx = strikes.index(atm)
+    rng = 15 if name == "BANKNIFTY" else 10
 
-    range_size = 15 if underlying_name == "BANKNIFTY" else 10
-    strikes = strikes[max(0, idx-range_size):idx+range_size]
+    return options.iloc[max(0, idx-rng): idx+rng]
 
-    return options[options['strike'].isin(strikes)]
+# ================= FUTURES =================
+def get_active_future(name):
+    df = load_futures_data()
+    fut = df[df['name'] == name]
+    expiry = get_monthly_expiry(fut)
+    return "NFO:" + fut[fut['expiry']==expiry].iloc[0]['tradingsymbol']
 
+def get_bank_futures():
+    return [get_active_future(n) for n in BANK_NAMES]
 
-# -------------------------------
-# REMAINING LOGIC SAME (NO CHANGE)
-# -------------------------------
-def get_strength_label(lots):
-    if lots >= 400: return "🚀 BLAST 🚀"
-    elif lots >= 300: return "🌟 AWESOME"
-    elif lots >= 200: return "✅ VERY GOOD"
-    else: return "⚡ GOOD"
+# ================= BURST =================
+def process_option_logic(name, underlying_data, option_quotes, alerts):
+    opt_df, u_ltp = underlying_data
+    lot_size = LOT_SIZES[name]
 
+    for _, row in opt_df.iterrows():
+        token = str(int(row['instrument_token']))
+        if token not in option_quotes:
+            continue
 
-def classify_action(symbol, oi_change, price_change):
-    if any(x in symbol for x in ["-FUT", "FUT"]):
-        if oi_change > 0:
-            return "FUTURE BUY 📈" if price_change >= 0 else "FUTURE SELL 📉"
-        else:
-            return "SHORT COVERING ⤴️" if price_change >= 0 else "LONG UNWINDING ⤵️"
+        curr_oi = option_quotes[token].get('oi', 0)
+        price = option_quotes[token].get('last_price', 0)
 
-    is_call = symbol.endswith("CE")
-    if oi_change > 0:
-        if price_change >= 0:
-            return "CALL BUY 🔵" if is_call else "PUT BUY 🔴"
-        else:
-            return "CALL WRITER ✍️" if is_call else "PUT WRITER ✍️"
-    else:
-        if price_change >= 0:
-            return "SHORT COVERING (CE)" if is_call else "SHORT COVERING (PE)"
-        else:
-            return "LONG UNWINDING (CE)" if is_call else "LONG UNWINDING (PE)"
+        prev = option_history.get(token, 0)
+        change = curr_oi - prev
+        option_history[token] = curr_oi
 
+        lots = int(abs(change) / lot_size)
 
-# -------------------------------
-# MAIN ENGINE
-# -------------------------------
+        if lots >= 100:
+            action = "CALL BUY 🔵" if row['instrument_type']=="CE" else "PUT BUY 🔴"
+            alerts.append(
+                f"🚀 BLAST 🚀\n🚨 {action}\nSymbol: {row['tradingsymbol']}\nLOTS: {lots}"
+            )
+
+    return 1.0
+
+# ================= MAIN =================
 def calculate_heatmap(kite):
 
-    try:
-        data = kite.quote([INDEX_SYMBOL])
-        bn_price = data[INDEX_SYMBOL]["last_price"]
+    fut_symbols = get_bank_futures()
+    symbols = fut_symbols + [INDEX_SYMBOL]
 
-        report = f"📊 BANKNIFTY={bn_price}\n"
+    data = kite.quote(symbols)
 
-        bn_alerts = []
+    report = "📊 *BANK MOVEMENT (FUTURES)*\n\n"
+    score = 0
 
-        opt_df = get_relevant_options("BANKNIFTY", bn_price)
+    short = {
+        "HDFCBANK":"HDBFU",
+        "ICICIBANK":"ICIBFU",
+        "SBIN":"SBINFU",
+        "AXISBANK":"AXISFU",
+        "BANKNIFTY":"BANKNIFTY"
+    }
 
+    stock_alerts = []
+
+    for sym in fut_symbols:
+        d = data[sym]
+        ltp = d["last_price"]
+        open_p = d["ohlc"]["open"]
+
+        change = ((ltp-open_p)/open_p)*100
+        name = next(n for n in BANK_NAMES if n in sym)
+
+        score += change * BANK_WEIGHTS[name]
+
+        opt_df = get_relevant_options(name, ltp)
         tokens = opt_df['instrument_token'].tolist()
-        quotes = kite.quote(tokens)
+        option_quotes = kite.quote(tokens)
 
-        for _, row in opt_df.iterrows():
+        process_option_logic(name,(opt_df,ltp),option_quotes,stock_alerts)
 
-            token = str(int(row['instrument_token']))
+        # ===== MAX OI =====
+        max_call=max_put=chg_call=chg_put=0
+        max_call_oi=max_put_oi=chg_call_oi=chg_put_oi=0
+        total_call=total_put=0
 
-            if token not in quotes:
-                continue
+        for _,row in opt_df.iterrows():
+            t=str(int(row['instrument_token']))
+            if t not in option_quotes: continue
 
-            q = quotes[token]
+            oi=option_quotes[t].get("oi",0)
+            prev=option_history.get(t,0)
+            diff=oi-prev
 
-            oi = q.get("oi", 0)
-            price = q.get("last_price", 0)
+            if row['instrument_type']=="CE":
+                total_call+=oi
+                if oi>max_call_oi: max_call, max_call_oi=row['strike'],oi
+                if diff>chg_call_oi: chg_call, chg_call_oi=row['strike'],diff
+            else:
+                total_put+=oi
+                if oi>max_put_oi: max_put, max_put_oi=row['strike'],oi
+                if diff>chg_put_oi: chg_put, chg_put_oi=row['strike'],diff
 
-            prev = option_history.get(token, {"oi": oi, "price": price})
+        pcr = total_put/total_call if total_call else 1
 
-            oi_chg = oi - prev["oi"]
-            price_chg = price - prev["price"]
+        arrow="⬆️" if change>0 else "⬇️"
+        icon="🛡️" if pcr>1.3 else "🧱" if pcr<0.7 else ""
 
-            option_history[token] = {"oi": oi, "price": price}
+        report+=f"{short[name]}={ltp:.1f}{arrow}{icon} , PCR-{pcr:.1f}\n"
+        report+=f"    - MAX_OI: {max_put}P/{max_call}C | CHG_OI: {chg_put}P/{chg_call}C\n\n"
 
-            lots = int(abs(oi_chg) / LOT_SIZES["BANKNIFTY"])
+    report+=f"⚖️ *SENTIMENT SCORE: {score:.2f}*\n"
+    report+= "🚀 STRONG BUY" if score>30 else "📉 STRONG SELL" if score<-30 else "⚖️ SIDEWAYS"
 
-            if lots >= 100:
+    report+="\n\n🔔 *LATEST ALERTS:*"
+    for a in stock_alerts[:5]:
+        report+=f"\n• {a.splitlines()[1]}"
 
-                symbol = row['tradingsymbol']
-                action = classify_action(symbol, oi_chg, price_chg)
-                price_icon = "▲" if price_chg >= 0 else "▼"
-
-                bn_alerts.append(
-                    f"{get_strength_label(lots)}\n"
-                    f"🚨 {action}\n"
-                    f"Symbol: {symbol}\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"LOTS: {lots}\n"
-                    f"PRICE: {price:.2f} ({price_icon})\n"
-                    f"FUTURE PRICE: {bn_price:.2f}\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"EXISTING OI: {prev['oi']:,}\n"
-                    f"OI CHANGE  : {oi_chg:+,}\n"
-                    f"NEW OI     : {oi:,}\n"
-                    f"TIME: {datetime.now().strftime('%H:%M:%S')}"
-                )
-
-        return 0, report, bn_alerts, [], []
-
-    except Exception as e:
-        return 0, f"Error: {e}", [], [], []
+    return score, report, [], stock_alerts, []
