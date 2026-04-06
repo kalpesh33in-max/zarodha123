@@ -1,85 +1,75 @@
 import pandas as pd
 from datetime import datetime, timedelta
+import os
 
 BANK_WEIGHTS = {
-    "HDFCBANK": 19.7,
-    "ICICIBANK": 16.1,
-    "SBIN": 10.7,
-    "AXISBANK": 9.9,
-    "KOTAKBANK": 9.2,
-    "FEDERALBNK": 5.6,
-    "INDUSINDBK": 4.7,
-    "BANKBARODA": 4.5,
-    "AUBANK": 4.0,
-    "CANBK": 3.9,
-    "PNB": 3.5,
-    "IDFCFIRSTB": 3.2,
-    "YESBANK": 2.5,
-    "UNIONBANK": 2.5
+    "HDFCBANK": 19.7, "ICICIBANK": 16.1, "SBIN": 10.7, "AXISBANK": 9.9,
+    "KOTAKBANK": 9.2, "FEDERALBNK": 5.6, "INDUSINDBK": 4.7, "BANKBARODA": 4.5,
+    "AUBANK": 4.0, "CANBK": 3.9, "PNB": 3.5, "IDFCFIRSTB": 3.2, "YESBANK": 2.5, "UNIONBANK": 2.5
 }
 
 LOT_SIZES = {
-    "HDFCBANK": 550,
-    "ICICIBANK": 700,
-    "SBIN": 750,
-    "AXISBANK": 625,
-    "KOTAKBANK": 2000,
-    "FEDERALBNK": 5000,
-    "INDUSINDBK": 500,
-    "BANKBARODA": 4850,
-    "AUBANK": 1000,
-    "CANBK": 2250,
-    "PNB": 4000,
-    "IDFCFIRSTB": 7500,
-    "YESBANK": 8000,
-    "UNIONBANK": 5000,
-    "BANKNIFTY": 30
+    "HDFCBANK": 550, "ICICIBANK": 700, "SBIN": 750, "AXISBANK": 625,
+    "KOTAKBANK": 2000, "FEDERALBNK": 5000, "INDUSINDBK": 500, "BANKBARODA": 4850,
+    "AUBANK": 1000, "CANBK": 2250, "PNB": 4000, "IDFCFIRSTB": 7500, "YESBANK": 8000,
+    "UNIONBANK": 5000, "BANKNIFTY": 30
 }
 
 BANK_NAMES = list(BANK_WEIGHTS.keys())
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 
-# Store previous OI to calculate OI INCREASE
 last_oi_store = {}
-# Specifically for ITM/ATM Option alerts
-option_history = {} # {token: [list of (time, oi, price)]}
-active_watches = {} # {token: {start_oi, start_price, end_time}}
-price_velocity_store = {} # {symbol: [(time, price)]}
+option_history = {} 
+active_watches = {} 
+price_velocity_store = {} 
 
-# Cache options and futures data
 _options_df = None
 _futures_df = None
 
-def load_options_data():
+def load_options_data(kite=None):
     global _options_df
     if _options_df is None:
+        if not os.path.exists("instruments.csv") and kite:
+            print("Downloading instruments...")
+            inst = kite.instruments("NFO")
+            pd.DataFrame(inst).to_csv("instruments.csv", index=False)
+        
         try:
             df = pd.read_csv("instruments.csv")
-            # Include only NFO (Stocks/Index)
             _options_df = df[df['segment'].isin(['NFO-OPT'])].copy()
-            _options_df['expiry'] = pd.to_datetime(_options_df['expiry'], dayfirst=True)
+            # Dynamic date parsing to handle multiple formats
+            _options_df['expiry'] = pd.to_datetime(_options_df['expiry'])
         except Exception as e:
-            print(f"Error loading Options from instruments.csv: {e}")
+            print(f"Error loading Options: {e}")
     return _options_df
 
-def load_futures_data():
+def load_futures_data(kite=None):
     global _futures_df
     if _futures_df is None:
         try:
             df = pd.read_csv("instruments.csv")
             _futures_df = df[df['segment'].str.contains('-FUT', na=False)].copy()
-            _futures_df['expiry'] = pd.to_datetime(_futures_df['expiry'], dayfirst=True)
+            _futures_df['expiry'] = pd.to_datetime(_futures_df['expiry'])
         except Exception as e:
-            print(f"Error loading futures from instruments.csv: {e}")
+            print(f"Error loading futures: {e}")
     return _futures_df
 
 def get_active_future(name, segment, exchange):
+    """Automatically detects the nearest unexpired future contract."""
     df = load_futures_data()
     if df is None or df.empty: return None
-    futures = df[(df['name'] == name) & (df['segment'] == segment)]
+    
+    # Filter for the specific symbol and ensure expiry is today or in the future
+    now = datetime.now().date()
+    futures = df[(df['name'] == name) & (df['segment'] == segment)].copy()
+    futures = futures[futures['expiry'].dt.date >= now]
+    
     if futures.empty: return None
+    
+    # Sort by expiry to get the closest one (Current Month)
     nearest_expiry = futures['expiry'].min()
     active_contract = futures[futures['expiry'] == nearest_expiry]
+    
     if not active_contract.empty:
         return f"{exchange}:" + active_contract.iloc[0]['tradingsymbol']
     return None
@@ -91,6 +81,7 @@ def get_bank_futures(kite):
         if sym:
             symbols.append(sym)
         else:
+            # Fallback manual string generation if CSV is outdated
             now = datetime.now()
             month_str = now.strftime("%b").upper()
             year_str = now.strftime("%y")
@@ -98,24 +89,30 @@ def get_bank_futures(kite):
     return symbols
 
 def get_relevant_options(underlying_name, ltp):
-    """Finds ITM/ATM/OTM strikes from instruments.csv for a given underlying monthly expiry."""
+    """Detects active monthly expiry and filters relevant strikes."""
     df = load_options_data()
     if df is None or df.empty: return pd.DataFrame()
-    options = df[df['name'] == underlying_name]
+    
+    options = df[df['name'] == underlying_name].copy()
     if options.empty: return pd.DataFrame()
     
-    # Logic for Monthly Expiry:
-    expiries = sorted(options['expiry'].unique())
+    # Filter for expiries that have not passed yet
+    now = datetime.now().date()
+    valid_options = options[options['expiry'].dt.date >= now]
     
+    expiries = sorted(valid_options['expiry'].unique())
+    if not expiries: return pd.DataFrame()
+
+    # For BankNifty, ensure we align with the nearest monthly future expiry
     if underlying_name == "BANKNIFTY":
         fut_df = load_futures_data()
-        bn_fut = fut_df[fut_df['name'] == "BANKNIFTY"]
-        monthly_expiry = bn_fut['expiry'].min() if not bn_fut.empty else expiries[0]
+        bn_fut = fut_df[(fut_df['name'] == "BANKNIFTY") & (fut_df['expiry'].dt.date >= now)]
+        active_expiry = bn_fut['expiry'].min() if not bn_fut.empty else expiries[0]
     else:
-        # Stocks only have monthly
-        monthly_expiry = expiries[0]
+        # Stocks usually only have one active monthly expiry
+        active_expiry = expiries[0]
 
-    current_expiry_options = options[options['expiry'] == monthly_expiry]
+    current_expiry_options = valid_options[valid_options['expiry'] == active_expiry]
     
     strikes = sorted(current_expiry_options['strike'].unique())
     if not strikes: return pd.DataFrame()
@@ -123,7 +120,7 @@ def get_relevant_options(underlying_name, ltp):
     atm_strike = min(strikes, key=lambda x: abs(x - ltp))
     idx = strikes.index(atm_strike)
     
-    # NEW: Dynamic ranges (±15 for BANKNIFTY, ±10 for others)
+    # Dynamic range: +/- 15 strikes for BankNifty, +/- 10 for Stocks
     range_size = 15 if underlying_name == "BANKNIFTY" else 10
     min_idx, max_idx = max(0, idx - range_size), min(len(strikes) - 1, idx + range_size)
     relevant_strikes = strikes[min_idx : max_idx+1]
@@ -134,17 +131,15 @@ def get_strength_label(lots):
     if lots >= 400: return "🚀 BLAST 🚀"
     elif lots >= 300: return "🌟 AWESOME"
     elif lots >= 200: return "✅ VERY GOOD"
-    else: return "⚡ GOOD" # Label for 100-199 lots
+    else: return "⚡ GOOD"
 
 def classify_action(symbol, oi_change, price_change):
-    # Futures logic
     if any(x in symbol for x in ["-FUT", "FUT", "-I"]):
         if oi_change > 0:
             return "FUTURE BUY (LONG) 📈" if price_change >= 0 else "FUTURE SELL (SHORT) 📉"
         else:
             return "SHORT COVERING ↗️" if price_change >= 0 else "LONG UNWINDING ↘️"
     
-    # Options logic
     is_call = symbol.endswith("CE")
     if oi_change > 0:
         if price_change >= 0:
@@ -157,11 +152,9 @@ def classify_action(symbol, oi_change, price_change):
         else:
             return "LONG UNWINDING (CE) ⤵️" if is_call else "LONG UNWINDING (PE) ⤵️"
 
-# Store 10-minute history for accumulation checks
 accum_history = {} 
 
 def process_quiet_accumulation(name, ltp, oi, alerts_list):
-    """Refined 10-minute Whale Accumulation & Breakout logic."""
     if name not in accum_history: 
         accum_history[name] = {'data': [], 'watching_breakout': False, 'high': 0, 'low': 0}
     
@@ -198,7 +191,6 @@ def detect_v_recovery(symbol, ltp, alerts_list):
     
     history = price_velocity_store[symbol]
     history.append((now, ltp))
-    
     if len(history) > 10: history.pop(0)
     
     for past_time, past_price in history:
