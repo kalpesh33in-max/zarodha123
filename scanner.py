@@ -1,4 +1,4 @@
-import pandas as pd
+import pd
 import time
 from heatmap_engine import calculate_heatmap
 from telegram_utils import send_telegram_message
@@ -8,7 +8,6 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
-
 
 def run_scanner(kite, stop_event=None):
 
@@ -34,12 +33,20 @@ def run_scanner(kite, stop_event=None):
 
                 # Send General Report only every 3 minutes (180 seconds)
                 if current_timestamp - last_report_time >= 180:
+                    final_message = report + f"\n⚖️ *SENTIMENT SCORE*: {score:.2f}\n"
+
+                    if score > 30:
+                        final_message += "🚀 *STATUS: STRONG BULLISH*"
+                    elif score < -30:
+                        final_message += "📉 *STATUS: STRONG BEARISH*"
+                    else:
+                        final_message += "⚖️ *STATUS: SIDEWAYS*"
+
                     print("Sending General Report...")
-                    send_telegram_message(report)
+                    send_telegram_message(final_message)
                     last_report_time = current_timestamp
 
-                # Alerts are checked and sent every 5 seconds (current loop speed)
-                # ALL Alerts now go to the BANK NIFTY channel as requested
+                # Alerts are checked and sent every 5 seconds
                 if bn_alerts:
                     print(f"Sending {len(bn_alerts)} Bank Nifty Alerts...")
                     for alert in bn_alerts:
@@ -48,12 +55,12 @@ def run_scanner(kite, stop_event=None):
                 if stock_alerts:
                     print(f"Sending {len(stock_alerts)} Bank Stock Alerts...")
                     for alert in stock_alerts:
-                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_BN, token=TELE_TOKEN_BN)
+                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_STOCKS, token=TELE_TOKEN_STOCKS)
 
                 if velocity_alerts:
                     print(f"Sending {len(velocity_alerts)} Velocity Burst Alerts...")
                     for alert in velocity_alerts:
-                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_BN, token=TELE_TOKEN_BN)
+                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_VELOCITY, token=TELE_TOKEN_VELOCITY)
 
             except Exception as e:
                 print(f"Error in scanner loop: {e}")
