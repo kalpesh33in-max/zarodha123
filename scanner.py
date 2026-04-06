@@ -1,44 +1,73 @@
+import pandas as pd
 import time
-from datetime import datetime
-from zoneinfo import ZoneInfo
 from heatmap_engine import calculate_heatmap
 from telegram_utils import send_telegram_message
-from env_config import *
+from env_config import TELE_CHAT_ID_BN, TELE_CHAT_ID_STOCKS, TELE_TOKEN_BN, TELE_TOKEN_STOCKS, TELE_TOKEN_VELOCITY, TELE_CHAT_ID_VELOCITY
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 
+
 def run_scanner(kite, stop_event=None):
-    last_report_time = 0 
-    
-    print("Scanner session initialized.")
-    # This fulfills your request for the "Scanner Start" message
-    send_telegram_message("✅ *Kite Scanner Login Successful!*\nStatus: Active\nMonth: April Contracts")
+
+    print("Scanner session initialized. Sending status to Telegram...")
+    send_telegram_message("✅ *Kite Scanner Login Successful!* Waiting for market hours (09:00 AM) to send reports...")
+
+    last_report_time = 0  # Track when the last general report was sent
 
     while stop_event is None or not stop_event.is_set():
+
+        # Use IST timezone
         now = datetime.now(IST)
-        
-        # Market Hours check (Mon-Fri, 09:15 - 15:30)
-        if (9 <= now.hour <= 15) and now.weekday() <= 4:
-            if now.hour == 9 and now.minute < 15:
-                time.sleep(10)
-                continue
-                
+        now_time = now.time()
+        current_timestamp = time.time()
+
+        start_time = datetime.strptime("09:00", "%H:%M").time()
+        end_time = datetime.strptime("15:30", "%H:%M").time()
+
+        if start_time <= now_time <= end_time and now.weekday() <= 4:
+
             try:
-                # Unpacks all 5 return values exactly as your March logic did
-                score, report, bn_al, st_al, vel_al = calculate_heatmap(kite)
+                score, report, bn_alerts, stock_alerts, velocity_alerts = calculate_heatmap(kite)
 
-                # Send Report every 3 Minutes
-                if time.time() - last_report_time >= 180:
-                    status = "🚀 BULLISH" if score > 20 else "📉 BEARISH" if score < -20 else "⚖️ NEUTRAL"
-                    send_telegram_message(f"{report}\n\n⚖️ *SENTIMENT*: `{score:.2f}`\n📍 *STATUS*: {status}")
-                    last_report_time = time.time()
+                # Send General Report only every 3 minutes (180 seconds)
+                if current_timestamp - last_report_time >= 180:
+                    print("Sending General Report...")
+                    send_telegram_message(report)
+                    last_report_time = current_timestamp
 
-                # Dispatching Alerts to their specific channels
-                for a in bn_al: send_telegram_message(a, TELE_CHAT_ID_BN, TELE_TOKEN_BN)
-                for a in st_al: send_telegram_message(a, TELE_CHAT_ID_STOCKS, TELE_TOKEN_STOCKS)
-                for a in vel_al: send_telegram_message(a, TELE_CHAT_ID_VELOCITY, TELE_TOKEN_VELOCITY)
+                # Alerts are checked and sent every 5 seconds (current loop speed)
+                # ALL Alerts now go to the BANK NIFTY channel as requested
+                if bn_alerts:
+                    print(f"Sending {len(bn_alerts)} Bank Nifty Alerts...")
+                    for alert in bn_alerts:
+                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_BN, token=TELE_TOKEN_BN)
+
+                if stock_alerts:
+                    print(f"Sending {len(stock_alerts)} Bank Stock Alerts...")
+                    for alert in stock_alerts:
+                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_BN, token=TELE_TOKEN_BN)
+
+                if velocity_alerts:
+                    print(f"Sending {len(velocity_alerts)} Velocity/Smart Money Alerts...")
+                    for alert in velocity_alerts:
+                        # Sent to Main Channel (TELE_CHAT_ID) as requested
+                        send_telegram_message(alert)
 
             except Exception as e:
-                print(f"Error: {e}")
-        
-        time.sleep(5)
+                print(f"Error in scanner loop: {e}")
+                send_telegram_message(f"Scanner Error: {e}")
+
+        else:
+            print(f"[{now.strftime('%H:%M:%S')}] Outside market hours. Scanner is silent.")
+
+        if stop_event:
+            if stop_event.wait(5):
+                break
+        else:
+            time.sleep(5)
+
+    print("Scanner loop stopped.")
+    send_telegram_message("🛑 *Market Scanner Process Ended.*")
