@@ -44,11 +44,15 @@ INDEX_SYMBOL = "NSE:NIFTY BANK"
 # State Tracking
 last_oi_store = {}
 last_strike_store = {} # {name: {'mc': x, 'mp': y, 'cc': x, 'cp': y}}
+day_open_oi_store = {} # {token: open_oi}
 option_history = {} 
 active_watches = {} 
 accum_history = {}
 price_velocity_store = {}
-global_recent_alerts = [] 
+
+# Shift Strings for Categorized Alerts
+max_shift_text = {} # {name: {'pe': text, 'ce': text}}
+chg_shift_text = {} # {name: {'pe': text, 'ce': text}}
 
 _options_df = None
 _futures_df = None
@@ -57,18 +61,8 @@ _futures_df = None
 # ================= HELPERS =================
 
 def add_global_alert(msg, name=None):
-    global global_recent_alerts
-    # Only allow alerts for Top 4 Banks and Bank Nifty
-    ALLOWED_FOR_LATEST = ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "BANKNIFTY", "HDBFU", "ICIBFU", "SBINFU", "AXISFU"]
-    
-    if name:
-        if not any(x in name for x in ALLOWED_FOR_LATEST):
-            return
-
-    if not global_recent_alerts or msg != global_recent_alerts[-1]:
-        global_recent_alerts.append(msg)
-    if len(global_recent_alerts) > 10:
-        global_recent_alerts.pop(0)
+    # Burst alerts logic if still needed, currently suppressed in report
+    pass
 
 def load_options_data():
     global _options_df
@@ -184,7 +178,6 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list):
                 action = classify_action(watch['symbol'], oi_chg, p_chg)
                 p_icon = "▲" if p_chg >= 0 else "▼"
                 alerts_list.append(f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n━━━━━━━━━━━━━━━\nLOTS: {final_lots}\nPRICE: {ltp:.2f} ({p_icon})\nFUTURE PRICE: {ltp:.2f}\n━━━━━━━━━━━━━━━\nEXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {oi:,}\nTIME: {now.strftime('%H:%M:%S')}")
-                add_global_alert(f"⚠️ {watch['name']} FUTURE BURST: {final_lots} Lots added!", watch['name'])
             del active_watches[key]
     history.append({'time': now, 'oi': oi, 'price': ltp})
     if len(history) > 20: history.pop(0)
@@ -207,23 +200,33 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list):
         q = option_quotes[t_str]
         curr_oi, ltp = q.get('oi', 0), q.get('last_price', 0)
         t_int = int(row['instrument_token'])
+        
+        # Track Day Baseline for Cumulative Buildup
+        if t_int not in day_open_oi_store:
+            day_open_oi_store[t_int] = curr_oi
+        
+        cumulative_oi_chg = curr_oi - day_open_oi_store[t_int]
+        
         if t_int not in option_history: option_history[t_int] = []
         history = option_history[t_int]
         prev_oi = history[-1]['oi'] if history else 0
         prev_price = history[-1]['price'] if history else 0
         oi_chg_tick = curr_oi - prev_oi
+        
         if row['instrument_type'] == 'CE':
             total_call += curr_oi
             if curr_oi > max_c_oi: max_c_oi, max_c = curr_oi, row['strike']
-            if oi_chg_tick > chg_c_oi: chg_c_oi, chg_c = oi_chg_tick, row['strike']
+            if cumulative_oi_chg > chg_c_oi: chg_c_oi, chg_c = cumulative_oi_chg, row['strike']
         else:
             total_put += curr_oi
             if curr_oi > max_p_oi: max_p_oi, max_p = curr_oi, row['strike']
-            if oi_chg_tick > chg_p_oi: chg_p_oi, chg_p = oi_chg_tick, row['strike']
+            if cumulative_oi_chg > chg_p_oi: chg_p_oi, chg_p = cumulative_oi_chg, row['strike']
+        
         if prev_oi > 0:
             tick_lots = int(abs(curr_oi - prev_oi) / lot_size)
             if tick_lots >= threshold and t_int not in active_watches:
                 active_watches[t_int] = {"start_oi": prev_oi, "start_price": prev_price, "end_time": now + timedelta(minutes=1), "symbol": row['tradingsymbol'], "underlying": name}
+        
         if t_int in active_watches:
             watch = active_watches[t_int]
             if now >= watch["end_time"]:
@@ -235,24 +238,37 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list):
                     action = classify_action(watch['symbol'], oi_chg, p_chg)
                     p_icon = "▲" if p_chg >= 0 else "▼"
                     alerts_list.append(f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n━━━━━━━━━━━━━━━\nLOTS: {final_lots}\nPRICE: {ltp:.2f} ({p_icon})\nFUTURE PRICE: {u_ltp:.2f}\n━━━━━━━━━━━━━━━\nEXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {curr_oi:,}\nTIME: {now.strftime('%H:%M:%S')}")
-                    add_global_alert(f"⚠️ {name} OPTION BURST: {final_lots} Lots added!", name)
                 del active_watches[t_int]
+        
         history.append({'time': now, 'oi': curr_oi, 'price': ltp})
         if len(history) > 20: history.pop(0)
 
-    # Track Shift Logic
-    if name not in last_strike_store: last_strike_store[name] = {'mc': max_c, 'mp': max_p, 'cc': chg_c, 'cp': chg_p}
+    # Track Shift Logic [NEW REQ per report1.pdf]
+    if name not in last_strike_store: 
+        last_strike_store[name] = {'mc': max_c, 'mp': max_p, 'cc': chg_c, 'cp': chg_p}
+        max_shift_text[name] = {'pe': f"{int(max_p)}", 'ce': f"{int(max_c)}"}
+        chg_shift_text[name] = {'pe': f"{int(chg_p)}", 'ce': f"{int(chg_c)}"}
+        
     prev = last_strike_store[name]
     
+    # MAX SHIFT Formatting
     if max_c > 0 and max_c != prev['mc'] and prev['mc'] != 0: 
-        add_global_alert(f"🔄 {name} MAX CE SHIFT: {int(prev['mc'])} → {int(max_c)} 🧱", name)
+        max_shift_text[name]['ce'] = f"SHIFT: {int(prev['mc'])}→{int(max_c)}"
+    else: max_shift_text[name]['ce'] = f"{int(max_c)}" if max_c > 0 else "No Data"
+
     if max_p > 0 and max_p != prev['mp'] and prev['mp'] != 0: 
-        add_global_alert(f"🔄 {name} MAX PE SHIFT: {int(prev['mp'])} → {int(max_p)} 🛡️", name)
+        max_shift_text[name]['pe'] = f"SHIFT: {int(prev['mp'])}→{int(max_p)}"
+    else: max_shift_text[name]['pe'] = f"{int(max_p)}" if max_p > 0 else "No Data"
+
+    # CHG SHIFT Formatting
     if chg_c > 0 and chg_c != prev['cc'] and prev['cc'] != 0: 
-        add_global_alert(f"🔥 {name} CHG CE SHIFT: {int(prev['cc'])} → {int(chg_c)}", name)
+        chg_shift_text[name]['ce'] = f"SHIFT: {int(prev['cc'])}→{int(chg_c)}"
+    else: chg_shift_text[name]['ce'] = f"{int(chg_c)}" if chg_c > 0 else "No Data"
+
     if chg_p > 0 and chg_p != prev['cp'] and prev['cp'] != 0: 
-        add_global_alert(f"🔥 {name} CHG PE SHIFT: {int(prev['cp'])} → {int(chg_p)}", name)
-    
+        chg_shift_text[name]['pe'] = f"SHIFT: {int(prev['cp'])}→{int(chg_p)}"
+    else: chg_shift_text[name]['pe'] = f"{int(chg_p)}" if chg_p > 0 else "No Data"
+
     if max_c > 0: last_strike_store[name]['mc'] = max_c
     if max_p > 0: last_strike_store[name]['mp'] = max_p
     if chg_c > 0: last_strike_store[name]['cc'] = chg_c
@@ -268,12 +284,15 @@ def calculate_heatmap(kite):
     symbols = fut_symbols + [INDEX_SYMBOL]
     try: data = kite.quote(symbols)
     except Exception as e: return 0, f"Error: {e}", [], [], []
+    
     score = 0
     report = "📊 *BANK MOVEMENT (FUTURES)*\n\n"
-    short = {"HDFCBANK": "HDBFU", "ICICIBANK": "ICIBFU", "SBIN": "SBINFU", "AXISBANK": "AXISFU", "BANKNIFTY": "BANKNIFTY"}
+    
+    alias = {"BANKNIFTY": "BNF", "HDFCBANK": "HDBFU", "ICICIBANK": "ICIBFU", "SBIN": "SBINFU", "AXISBANK": "AXISFU"}
     REPORT_BANKS = ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK"]
     bn_alerts = []; stock_alerts = []; bank_signals = {}
     
+    # Pre-collect data for all entities
     all_opt_tokens = []; underlying_map = {}
     for name in ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "BANKNIFTY"]:
         u_ltp = data.get(INDEX_SYMBOL if name=="BANKNIFTY" else next((s for s in fut_symbols if name in s), ""), {}).get("last_price", 0)
@@ -284,7 +303,16 @@ def calculate_heatmap(kite):
     opt_quotes = {}
     for i in range(0, len(all_opt_tokens), 400): opt_quotes.update(kite.quote(all_opt_tokens[i:i+400]))
 
-    for name in BANK_NAMES:
+    # [NEW] Process BNF First for Report Header Alignment
+    bn_ltp = data.get(INDEX_SYMBOL, {}).get("last_price", 0)
+    bn_open = data.get(INDEX_SYMBOL, {}).get("ohlc", {}).get("open", 0)
+    bn_change = ((bn_ltp - bn_open) / bn_open) * 100 if bn_open > 0 else 0
+    pcr_bn, max_c_bn, max_p_bn, chg_c_bn, chg_p_bn = process_option_logic("BANKNIFTY", underlying_map.get("BANKNIFTY", (pd.DataFrame(),0)), opt_quotes, bn_alerts)
+    
+    arrow = "⬆️" if bn_change > 0 else "⬇️"; icon = "🛡️" if pcr_bn > 1.3 else "🧱" if pcr_bn < 0.7 else ""
+    report += f"BNF={bn_ltp:.1f} {arrow}{icon},PCR-{pcr_bn:.2f}, MAX_OI: {int(max_p_bn)}P/{int(max_c_bn)}C | CHG_OI: {int(chg_p_bn)}P/{int(chg_c_bn)}C\n"
+
+    for name in REPORT_BANKS:
         sym = next((s for s in fut_symbols if name in s), None)
         if not sym or sym not in data: continue
         d = data[sym]; ltp, open_p, oi = d["last_price"], d["ohlc"]["open"], d.get("oi", 0)
@@ -292,35 +320,31 @@ def calculate_heatmap(kite):
         score += change * BANK_WEIGHTS.get(name, 0)
         bank_signals[name] = "BUY" if change > 0.3 else "SELL" if change < -0.3 else "NEUTRAL"
         
-        if name in ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK"]:
-            process_future_burst(sym, name, ltp, oi, stock_alerts)
+        process_future_burst(sym, name, ltp, oi, stock_alerts)
+        pcr, max_c, max_p, chg_c, chg_p = process_option_logic(name, underlying_map.get(name, (pd.DataFrame(),0)), opt_quotes, stock_alerts)
         
-        pcr = 1.0; max_c = max_p = chg_c = chg_p = 0
-        if name in underlying_map: pcr, max_c, max_p, chg_c, chg_p = process_option_logic(name, underlying_map[name], opt_quotes, stock_alerts)
-        
-        if name in REPORT_BANKS:
-            arrow = "⬆️" if change > 0 else "⬇️"; icon = "🛡️" if pcr > 1.3 else "🧱" if pcr < 0.7 else ""
-            report += f"{short[name]}={ltp:.1f}{arrow}{icon} , PCR-{pcr:.1f}\n    - MAX_OI: {int(max_p)}P/{int(max_c)}C | CHG_OI: {int(chg_p)}P/{int(chg_c)}C\n\n"
-
-    if INDEX_SYMBOL in data:
-        bn = data[INDEX_SYMBOL]; ltp, open_p = bn["last_price"], bn["ohlc"]["open"]; change = ((ltp - open_p) / open_p) * 100 if open_p > 0 else 0
-        pcr, max_c, max_p, chg_c, chg_p = process_option_logic("BANKNIFTY", underlying_map["BANKNIFTY"], opt_quotes, bn_alerts)
-        
-        bn_fut_sym = next((s for s in fut_symbols if "BANKNIFTY" in s), None)
-        if bn_fut_sym and bn_fut_sym in data:
-            fd = data[bn_fut_sym]
-            process_future_burst(bn_fut_sym, "BANKNIFTY", fd["last_price"], fd.get("oi",0), bn_alerts)
-
         arrow = "⬆️" if change > 0 else "⬇️"; icon = "🛡️" if pcr > 1.3 else "🧱" if pcr < 0.7 else ""
-        report += f"BANKNIFTY={ltp:.1f}{arrow}{icon} , PCR-{pcr:.2f}\n    - MAX_OI: {int(max_p)}P/{int(max_c)}C | CHG_OI: {int(chg_p)}P/{int(chg_c)}C\n\n"
+        report += f"{alias[name]}={ltp:.1f} {arrow}{icon},PCR-{pcr:.2f},MAX_OI: {int(max_p)}P/{int(max_c)}C | CHG_OI: {int(chg_p)}P/{int(chg_c)}C\n"
 
-    report += "🧠 *ADVANCED INSIGHTS*"
+    report += "\n🧠 *ADVANCED INSIGHTS*"
     h, i = bank_signals.get("HDFCBANK"), bank_signals.get("ICICIBANK")
     report += "\n✅ *INDEX SYNC:* Top Banks Aligned" if h == i else f"\n⚠️ *TUG-OF-WAR:* HDFC({h}) vs ICICI({i})"
+    
     report += f"\n\n⚖️ *SENTIMENT SCORE: {score:.2f}*"
     if abs(score) > 30 and h == i: report += "\n🌟🌟🌟 *3-STAR SIGNAL ACTIVE* 🌟🌟🌟"
-    report += f"\n{'🚀' if score > 30 else '📉' if score < -30 else '⚖️'} *STATUS: {'STRONG BULLISH' if score > 30 else 'STRONG BEARISH' if score < -30 else 'SIDEWAYS'}*"
+    report += f"\n🚀 *STATUS: {'STRONG BULLISH' if score > 30 else 'STRONG BEARISH' if score < -30 else 'SIDEWAYS'}*"
     
-    report += "\n\n🔔 *LATEST ALERTS:*"
-    for alert in global_recent_alerts[-5:]: report += f"\n• {alert}"
+    # [NEW ALERT SECTION PER report1.pdf]
+    report += "\n\n🔔 *🔄 MAX PE/CE SHIFT ALERTS:*"
+    for name in ["BANKNIFTY", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK"]:
+        m = max_shift_text.get(name, {'pe': 'No Data', 'ce': 'No Data'})
+        report += f"\n• 🔄 {alias[name]} MAX PE {m['pe']}==MAX CE:{m['ce']}"
+
+    report += "\n\n🔔 *🔥 CHG PE/CE SHIFT ALERTS:*"
+    for name in ["BANKNIFTY", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK"]:
+        c = chg_shift_text.get(name, {'pe': 'No Data', 'ce': 'No Data'})
+        # Special formatting for BNF in CHG shifts
+        prefix = "BNF" if name == "BANKNIFTY" else alias[name]
+        report += f"\n• 🔥 {prefix} CHG PE {c['pe']}==CE SHIFT:{c['ce']}"
+
     return score, report, bn_alerts, stock_alerts, []
