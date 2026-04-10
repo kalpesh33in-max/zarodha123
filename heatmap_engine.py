@@ -253,20 +253,20 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list):
     
     # MAX SHIFT Formatting
     if max_c > 0 and max_c != prev['mc'] and prev['mc'] != 0: 
-        max_shift_text[name]['ce'] = f"SHIFT: {int(prev['mc'])}→{int(max_c)}"
+        max_shift_text[name]['ce'] = f"{int(prev['mc'])}→{int(max_c)}"
     else: max_shift_text[name]['ce'] = f"{int(max_c)}" if max_c > 0 else "No Data"
 
     if max_p > 0 and max_p != prev['mp'] and prev['mp'] != 0: 
-        max_shift_text[name]['pe'] = f"SHIFT: {int(prev['mp'])}→{int(max_p)}"
+        max_shift_text[name]['pe'] = f"{int(prev['mp'])}→{int(max_p)}"
     else: max_shift_text[name]['pe'] = f"{int(max_p)}" if max_p > 0 else "No Data"
 
     # CHG SHIFT Formatting
     if chg_c > 0 and chg_c != prev['cc'] and prev['cc'] != 0: 
-        chg_shift_text[name]['ce'] = f"SHIFT: {int(prev['cc'])}→{int(chg_c)}"
+        chg_shift_text[name]['ce'] = f"{int(prev['cc'])}→{int(chg_c)}"
     else: chg_shift_text[name]['ce'] = f"{int(chg_c)}" if chg_c > 0 else "No Data"
 
     if chg_p > 0 and chg_p != prev['cp'] and prev['cp'] != 0: 
-        chg_shift_text[name]['pe'] = f"SHIFT: {int(prev['cp'])}→{int(chg_p)}"
+        chg_shift_text[name]['pe'] = f"{int(prev['cp'])}→{int(chg_p)}"
     else: chg_shift_text[name]['pe'] = f"{int(chg_p)}" if chg_p > 0 else "No Data"
 
     if max_c > 0: last_strike_store[name]['mc'] = max_c
@@ -289,12 +289,12 @@ def calculate_heatmap(kite):
     report = "📊 *BANK MOVEMENT (FUTURES)*\n\n"
     
     alias = {"BANKNIFTY": "BNF", "HDFCBANK": "HDBFU", "ICICIBANK": "ICIBFU", "SBIN": "SBINFU", "AXISBANK": "AXISFU"}
-    REPORT_BANKS = ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK"]
+    REPORT_BANKS = ["BANKNIFTY", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK"]
     bn_alerts = []; stock_alerts = []; bank_signals = {}
     
     # Pre-collect data for all entities
     all_opt_tokens = []; underlying_map = {}
-    for name in ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "BANKNIFTY"]:
+    for name in REPORT_BANKS:
         u_ltp = data.get(INDEX_SYMBOL if name=="BANKNIFTY" else next((s for s in fut_symbols if name in s), ""), {}).get("last_price", 0)
         if u_ltp > 0:
             df = get_relevant_options(name, u_ltp)
@@ -317,14 +317,21 @@ def calculate_heatmap(kite):
         if not sym or sym not in data: continue
         d = data[sym]; ltp, open_p, oi = d["last_price"], d["ohlc"]["open"], d.get("oi", 0)
         change = ((ltp - open_p) / open_p) * 100 if open_p > 0 else 0
-        score += change * BANK_WEIGHTS.get(name, 0)
-        bank_signals[name] = "BUY" if change > 0.3 else "SELL" if change < -0.3 else "NEUTRAL"
         
-        process_future_burst(sym, name, ltp, oi, stock_alerts)
-        pcr, max_c, max_p, chg_c, chg_p = process_option_logic(name, underlying_map.get(name, (pd.DataFrame(),0)), opt_quotes, stock_alerts)
+        # Don't add BNF to the score calculation if it's the index itself, or handle weight
+        if name != "BANKNIFTY":
+            score += change * BANK_WEIGHTS.get(name, 0)
+            bank_signals[name] = "BUY" if change > 0.3 else "SELL" if change < -0.3 else "NEUTRAL"
         
-        arrow = "⬆️" if change > 0 else "⬇️"; icon = "🛡️" if pcr > 1.3 else "🧱" if pcr < 0.7 else ""
-        report += f"{alias[name]}={ltp:.1f} {arrow}{icon},PCR-{pcr:.2f},MAX_OI: {int(max_p)}P/{int(max_c)}C | CHG_OI: {int(chg_p)}P/{int(chg_c)}C\n"
+        # Determine which alert list to use (BNF future bursts go to bn_alerts)
+        target_alerts = bn_alerts if name == "BANKNIFTY" else stock_alerts
+        process_future_burst(sym, name, ltp, oi, target_alerts)
+        
+        # PCR and Max OI reporting (Skip re-processing BNF options since done above, but still need the string for other banks)
+        if name != "BANKNIFTY":
+            pcr, max_c, max_p, chg_c, chg_p = process_option_logic(name, underlying_map.get(name, (pd.DataFrame(),0)), opt_quotes, stock_alerts)
+            arrow = "⬆️" if change > 0 else "⬇️"; icon = "🛡️" if pcr > 1.3 else "🧱" if pcr < 0.7 else ""
+            report += f"{alias[name]}={ltp:.1f} {arrow}{icon},PCR-{pcr:.2f},MAX_OI: {int(max_p)}P/{int(max_c)}C | CHG_OI: {int(chg_p)}P/{int(chg_c)}C\n"
 
     report += "\n🧠 *ADVANCED INSIGHTS*"
     h, i = bank_signals.get("HDFCBANK"), bank_signals.get("ICICIBANK")
@@ -338,13 +345,12 @@ def calculate_heatmap(kite):
     report += "\n\n🔔 *🔄 MAX PE/CE SHIFT ALERTS:*"
     for name in ["BANKNIFTY", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK"]:
         m = max_shift_text.get(name, {'pe': 'No Data', 'ce': 'No Data'})
-        report += f"\n• 🔄 {alias[name]} MAX PE {m['pe']}==MAX CE:{m['ce']}"
+        report += f"\n• 🔄 {alias[name]} PE {m['pe']} = CE:{m['ce']}"
 
     report += "\n\n🔔 *🔥 CHG PE/CE SHIFT ALERTS:*"
     for name in ["BANKNIFTY", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK"]:
         c = chg_shift_text.get(name, {'pe': 'No Data', 'ce': 'No Data'})
-        # Special formatting for BNF in CHG shifts
         prefix = "BNF" if name == "BANKNIFTY" else alias[name]
-        report += f"\n• 🔥 {prefix} CHG PE {c['pe']}==CE SHIFT:{c['ce']}"
+        report += f"\n• 🔥 {prefix} PE {c['pe']} = CE:{c['ce']}"
 
     return score, report, bn_alerts, stock_alerts, []
