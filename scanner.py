@@ -8,6 +8,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
+REPORT_INTERVAL_SECONDS = 300
 
 
 def run_scanner(kite, stop_event=None):
@@ -32,8 +33,8 @@ def run_scanner(kite, stop_event=None):
             try:
                 score, report, bn_alerts, stock_alerts, velocity_alerts = calculate_heatmap(kite)
 
-                # Send General Report only every 3 minutes (180 seconds)
-                if current_timestamp - last_report_time >= 180:
+                # Send general report every 5 minutes.
+                if current_timestamp - last_report_time >= REPORT_INTERVAL_SECONDS:
                     print("Sending General Report...")
                     send_telegram_message(report)
                     last_report_time = current_timestamp

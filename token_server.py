@@ -7,23 +7,31 @@ import os
 
 app = Flask(__name__)
 kite = KiteConnect(api_key=API_KEY)
+scanner_thread = None
+scanner_lock = threading.Lock()
 
 def start_scanner_if_token_exists():
-    if os.path.exists("access_token.txt"):
-        try:
-            with open("access_token.txt", "r") as f:
-                token = f.read().strip()
-            
-            if token:
-                print(f"Found saved token. Starting scanner automatically...")
-                kite.set_access_token(token)
-                
-                t = threading.Thread(target=run_scanner, args=(kite,))
-                t.daemon = True
-                t.start()
-                return True
-        except Exception as e:
-            print(f"Failed to auto-start scanner: {e}")
+    global scanner_thread
+    with scanner_lock:
+        if scanner_thread is not None and scanner_thread.is_alive():
+            print("Scanner already running. Skipping duplicate start.")
+            return True
+
+        if os.path.exists("access_token.txt"):
+            try:
+                with open("access_token.txt", "r") as f:
+                    token = f.read().strip()
+
+                if token:
+                    print("Found saved token. Starting scanner automatically...")
+                    kite.set_access_token(token)
+
+                    scanner_thread = threading.Thread(target=run_scanner, args=(kite,))
+                    scanner_thread.daemon = True
+                    scanner_thread.start()
+                    return True
+            except Exception as e:
+                print(f"Failed to auto-start scanner: {e}")
     return False
 
 @app.route("/")

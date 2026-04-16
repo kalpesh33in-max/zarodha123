@@ -184,11 +184,11 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list):
 
 def process_option_logic(name, underlying_data, option_quotes, alerts_list):
     if name not in ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "BANKNIFTY"]:
-        return 1.0, 0, 0, 0, 0
+        return 1.0, 0, 0, 0, 0, False, False, False, False
 
     threshold = 100 if name == "BANKNIFTY" else 50
     opt_df, u_ltp = underlying_data
-    if opt_df.empty: return 1.0, 0, 0, 0, 0
+    if opt_df.empty: return 1.0, 0, 0, 0, 0, False, False, False, False
     total_call = total_put = 0
     max_c_oi = max_p_oi = chg_c_oi = chg_p_oi = 0
     max_c = max_p = chg_c = chg_p = 0
@@ -244,12 +244,19 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list):
         if len(history) > 20: history.pop(0)
 
     # Track Shift Logic [NEW REQ per report1.pdf]
+    max_p_changed = max_c_changed = chg_p_changed = chg_c_changed = False
+
     if name not in last_strike_store: 
         last_strike_store[name] = {'mc': max_c, 'mp': max_p, 'cc': chg_c, 'cp': chg_p}
         max_shift_text[name] = {'pe': f"{int(max_p)}", 'ce': f"{int(max_c)}"}
         chg_shift_text[name] = {'pe': f"{int(chg_p)}", 'ce': f"{int(chg_c)}"}
         
     prev = last_strike_store[name]
+
+    max_p_changed = max_p > 0 and prev['mp'] != 0 and max_p != prev['mp']
+    max_c_changed = max_c > 0 and prev['mc'] != 0 and max_c != prev['mc']
+    chg_p_changed = chg_p > 0 and prev['cp'] != 0 and chg_p != prev['cp']
+    chg_c_changed = chg_c > 0 and prev['cc'] != 0 and chg_c != prev['cc']
     
     # MAX SHIFT Formatting
     if max_c > 0 and max_c != prev['mc'] and prev['mc'] != 0: 
@@ -274,7 +281,17 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list):
     if chg_c > 0: last_strike_store[name]['cc'] = chg_c
     if chg_p > 0: last_strike_store[name]['cp'] = chg_p
 
-    return (total_put / total_call if total_call > 0 else 1.0), max_c, max_p, chg_c, chg_p
+    return (
+        (total_put / total_call if total_call > 0 else 1.0),
+        max_c,
+        max_p,
+        chg_c,
+        chg_p,
+        max_p_changed,
+        max_c_changed,
+        chg_p_changed,
+        chg_c_changed,
+    )
 
 
 # ================= MAIN =================
@@ -307,10 +324,24 @@ def calculate_heatmap(kite):
     bn_ltp = data.get(INDEX_SYMBOL, {}).get("last_price", 0)
     bn_open = data.get(INDEX_SYMBOL, {}).get("ohlc", {}).get("open", 0)
     bn_change = ((bn_ltp - bn_open) / bn_open) * 100 if bn_open > 0 else 0
-    pcr_bn, max_c_bn, max_p_bn, chg_c_bn, chg_p_bn = process_option_logic("BANKNIFTY", underlying_map.get("BANKNIFTY", (pd.DataFrame(),0)), opt_quotes, bn_alerts)
+    (
+        pcr_bn,
+        max_c_bn,
+        max_p_bn,
+        chg_c_bn,
+        chg_p_bn,
+        max_p_bn_changed,
+        max_c_bn_changed,
+        chg_p_bn_changed,
+        chg_c_bn_changed,
+    ) = process_option_logic("BANKNIFTY", underlying_map.get("BANKNIFTY", (pd.DataFrame(),0)), opt_quotes, bn_alerts)
     
-    arrow = "⬆️" if bn_change > 0 else "⬇️"; icon = "🛡️" if pcr_bn > 1.3 else "🧱" if pcr_bn < 0.7 else ""
-    report += f"BNF={bn_ltp:.1f} {arrow}{icon},PCR-{pcr_bn:.2f}, MAX_OI: {int(max_p_bn)}P/{int(max_c_bn)}C | CHG_OI: {int(chg_p_bn)}P/{int(chg_c_bn)}C\n"
+    arrow = "⬆️" if bn_change > 0 else "⬇️"
+    report += (
+        f"BNF={bn_ltp:.1f} {arrow},PCR-{pcr_bn:.2f}, MAX_OI: "
+        f"{int(max_p_bn)}P{'*' if max_p_bn_changed else ''}/{int(max_c_bn)}C{'*' if max_c_bn_changed else ''} | "
+        f"CHG_OI: {int(chg_p_bn)}P{'*' if chg_p_bn_changed else ''}/{int(chg_c_bn)}C{'*' if chg_c_bn_changed else ''}\n"
+    )
 
     for name in REPORT_BANKS:
         sym = next((s for s in fut_symbols if name in s), None)
@@ -329,28 +360,30 @@ def calculate_heatmap(kite):
         
         # PCR and Max OI reporting (Skip re-processing BNF options since done above, but still need the string for other banks)
         if name != "BANKNIFTY":
-            pcr, max_c, max_p, chg_c, chg_p = process_option_logic(name, underlying_map.get(name, (pd.DataFrame(),0)), opt_quotes, stock_alerts)
-            arrow = "⬆️" if change > 0 else "⬇️"; icon = "🛡️" if pcr > 1.3 else "🧱" if pcr < 0.7 else ""
-            report += f"{alias[name]}={ltp:.1f} {arrow}{icon},PCR-{pcr:.2f},MAX_OI: {int(max_p)}P/{int(max_c)}C | CHG_OI: {int(chg_p)}P/{int(chg_c)}C\n"
+            (
+                pcr,
+                max_c,
+                max_p,
+                chg_c,
+                chg_p,
+                max_p_changed,
+                max_c_changed,
+                chg_p_changed,
+                chg_c_changed,
+            ) = process_option_logic(name, underlying_map.get(name, (pd.DataFrame(),0)), opt_quotes, stock_alerts)
+            arrow = "⬆️" if change > 0 else "⬇️"
+            report += (
+                f"{alias[name]}={ltp:.1f} {arrow},PCR-{pcr:.2f},MAX_OI: "
+                f"{int(max_p)}P{'*' if max_p_changed else ''}/{int(max_c)}C{'*' if max_c_changed else ''} | "
+                f"CHG_OI: {int(chg_p)}P{'*' if chg_p_changed else ''}/{int(chg_c)}C{'*' if chg_c_changed else ''}\n"
+            )
 
-    report += "\n🧠 *ADVANCED INSIGHTS*"
     h, i = bank_signals.get("HDFCBANK"), bank_signals.get("ICICIBANK")
-    report += "\n✅ *INDEX SYNC:* Top Banks Aligned" if h == i else f"\n⚠️ *TUG-OF-WAR:* HDFC({h}) vs ICICI({i})"
+    if h != i:
+        report += f"\n⚠️ *TUG-OF-WAR:* HDFC({h}) vs ICICI({i})"
     
     report += f"\n\n⚖️ *SENTIMENT SCORE: {score:.2f}*"
     if abs(score) > 30 and h == i: report += "\n🌟🌟🌟 *3-STAR SIGNAL ACTIVE* 🌟🌟🌟"
     report += f"\n🚀 *STATUS: {'STRONG BULLISH' if score > 30 else 'STRONG BEARISH' if score < -30 else 'SIDEWAYS'}*"
     
-    # [NEW ALERT SECTION PER report1.pdf]
-    report += "\n\n🔔 *🔄 MAX PE/CE SHIFT ALERTS:*"
-    for name in ["BANKNIFTY", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK"]:
-        m = max_shift_text.get(name, {'pe': 'No Data', 'ce': 'No Data'})
-        report += f"\n• 🔄 {alias[name]} PE {m['pe']} = CE:{m['ce']}"
-
-    report += "\n\n🔔 *🔥 CHG PE/CE SHIFT ALERTS:*"
-    for name in ["BANKNIFTY", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK"]:
-        c = chg_shift_text.get(name, {'pe': 'No Data', 'ce': 'No Data'})
-        prefix = "BNF" if name == "BANKNIFTY" else alias[name]
-        report += f"\n• 🔥 {prefix} PE {c['pe']} = CE:{c['ce']}"
-
     return score, report, bn_alerts, stock_alerts, []
