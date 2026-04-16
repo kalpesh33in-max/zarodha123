@@ -5,7 +5,8 @@ import pandas as pd
 from kiteconnect import KiteTicker
 
 from env_config import API_KEY
-from heatmap_engine import INDEX_SYMBOL, get_bank_futures, get_relevant_options, load_futures_data, load_options_data
+
+INDEX_SYMBOL = "NSE:NIFTY BANK"
 
 
 _cache_lock = threading.Lock()
@@ -118,6 +119,8 @@ class FlowEngine:
             return True
 
     def _build_subscription_map(self):
+        from heatmap_engine import get_bank_futures, get_relevant_options, load_futures_data, load_options_data
+
         if self._tokens:
             return self._tokens, self._symbol_by_token
 
