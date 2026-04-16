@@ -6,7 +6,73 @@ from kiteconnect import KiteTicker
 
 from env_config import API_KEY
 from heatmap_engine import INDEX_SYMBOL, get_bank_futures, get_relevant_options, load_futures_data, load_options_data
-from live_cache import mark_connected, update_symbol_quote, update_token_quote
+
+
+_cache_lock = threading.Lock()
+_token_quotes = {}
+_symbol_quotes = {}
+_meta = {
+    "connected": False,
+    "last_tick_time": 0.0,
+}
+
+
+def mark_connected(is_connected):
+    with _cache_lock:
+        _meta["connected"] = bool(is_connected)
+        if is_connected:
+            _meta["last_tick_time"] = time.time()
+
+
+def update_token_quote(token, quote):
+    if token is None or not isinstance(quote, dict):
+        return
+
+    now = time.time()
+    payload = dict(quote)
+    payload["ts"] = now
+
+    with _cache_lock:
+        _token_quotes[str(token)] = payload
+        _meta["last_tick_time"] = now
+
+
+def update_symbol_quote(symbol, quote):
+    if not symbol or not isinstance(quote, dict):
+        return
+
+    now = time.time()
+    payload = dict(quote)
+    payload["ts"] = now
+
+    with _cache_lock:
+        _symbol_quotes[symbol] = payload
+        _meta["last_tick_time"] = now
+
+
+def get_token_quotes(tokens, max_age_seconds=15):
+    now = time.time()
+    fresh = {}
+    wanted = {str(token) for token in tokens}
+
+    with _cache_lock:
+        for token in wanted:
+            data = _token_quotes.get(token)
+            if data and now - data.get("ts", 0) <= max_age_seconds:
+                fresh[token] = dict(data)
+    return fresh
+
+
+def get_symbol_quotes(symbols, max_age_seconds=15):
+    now = time.time()
+    fresh = {}
+
+    with _cache_lock:
+        for symbol in symbols:
+            data = _symbol_quotes.get(symbol)
+            if data and now - data.get("ts", 0) <= max_age_seconds:
+                fresh[symbol] = dict(data)
+    return fresh
 
 
 class FlowEngine:

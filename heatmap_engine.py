@@ -1,6 +1,8 @@
 import pandas as pd
 from datetime import datetime, timedelta
 
+from websocket_flow import get_symbol_quotes, get_token_quotes
+
 # ================= CONFIG =================
 
 BANK_WEIGHTS = {
@@ -56,6 +58,7 @@ chg_shift_text = {} # {name: {'pe': text, 'ce': text}}
 
 _options_df = None
 _futures_df = None
+_index_df = None
 
 
 # ================= HELPERS =================
@@ -84,6 +87,15 @@ def load_futures_data():
         except Exception as e: print(f"Error loading Futures: {e}")
     return _futures_df
 
+def load_index_data():
+    global _index_df
+    if _index_df is None:
+        try:
+            df = pd.read_csv("instruments.csv")
+            _index_df = df[(df["segment"] == "INDICES") & (df["exchange"] == "NSE")].copy()
+        except Exception as e: print(f"Error loading Indices: {e}")
+    return _index_df
+
 def get_active_future(name):
     df = load_futures_data()
     if df is None or df.empty: return None
@@ -91,6 +103,53 @@ def get_active_future(name):
     if futures.empty: return None
     nearest_expiry = futures['expiry'].min()
     return "NFO:" + futures[futures['expiry'] == nearest_expiry].iloc[0]['tradingsymbol']
+
+def get_symbol_token(symbol):
+    if symbol == INDEX_SYMBOL:
+        df = load_index_data()
+        if df is None or df.empty:
+            return None
+        rows = df[df["tradingsymbol"] == "NIFTY BANK"]
+        if rows.empty:
+            return None
+        return int(rows.iloc[0]["instrument_token"])
+
+    if ":" not in symbol:
+        return None
+
+    tradingsymbol = symbol.split(":", 1)[1]
+    df = load_futures_data()
+    if df is None or df.empty:
+        return None
+    rows = df[df["tradingsymbol"] == tradingsymbol]
+    if rows.empty:
+        return None
+    return int(rows.iloc[0]["instrument_token"])
+
+def get_symbol_quotes_with_fallback(kite, symbols, max_age_seconds=15):
+    data = get_symbol_quotes(symbols, max_age_seconds=max_age_seconds)
+    missing = [symbol for symbol in symbols if symbol not in data]
+    if missing:
+        try:
+            data.update(kite.quote(missing))
+        except Exception as e:
+            print(f"Fallback symbol quote error: {e}")
+    return data
+
+def get_option_quotes_with_fallback(kite, tokens, max_age_seconds=15):
+    token_strings = [str(int(token)) for token in tokens]
+    data = get_token_quotes(token_strings, max_age_seconds=max_age_seconds)
+    missing = [int(token) for token in token_strings if token not in data]
+    for i in range(0, len(missing), 400):
+        chunk = missing[i:i + 400]
+        if not chunk:
+            continue
+        try:
+            fresh = kite.quote(chunk)
+            data.update({str(key): value for key, value in fresh.items()})
+        except Exception as e:
+            print(f"Fallback option quote error: {e}")
+    return data
 
 def get_bank_futures(kite):
     symbols = []
@@ -299,8 +358,9 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list):
 def calculate_heatmap(kite):
     fut_symbols = get_bank_futures(kite)
     symbols = fut_symbols + [INDEX_SYMBOL]
-    try: data = kite.quote(symbols)
-    except Exception as e: return 0, f"Error: {e}", [], [], []
+    data = get_symbol_quotes_with_fallback(kite, symbols)
+    if not data:
+        return 0, "Error: unable to fetch market data", [], [], []
     
     score = 0
     report = "📊 *BANK MOVEMENT (FUTURES)*\n\n"
@@ -317,8 +377,7 @@ def calculate_heatmap(kite):
             df = get_relevant_options(name, u_ltp)
             if not df.empty: underlying_map[name] = (df, u_ltp); all_opt_tokens.extend(df['instrument_token'].tolist())
     
-    opt_quotes = {}
-    for i in range(0, len(all_opt_tokens), 400): opt_quotes.update(kite.quote(all_opt_tokens[i:i+400]))
+    opt_quotes = get_option_quotes_with_fallback(kite, all_opt_tokens)
 
     # [NEW] Process BNF First for Report Header Alignment
     bn_ltp = data.get(INDEX_SYMBOL, {}).get("last_price", 0)
