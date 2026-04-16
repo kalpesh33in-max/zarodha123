@@ -2,16 +2,19 @@ from flask import Flask, request
 from kiteconnect import KiteConnect
 from scanner import run_scanner
 from env_config import API_KEY, API_SECRET
+from websocket_flow import FlowEngine
 import threading
 import os
 
 app = Flask(__name__)
 kite = KiteConnect(api_key=API_KEY)
 scanner_thread = None
+flow_engine = None
 scanner_lock = threading.Lock()
+AUTO_START_ON_IMPORT = os.getenv("AUTO_START_SCANNER_ON_IMPORT", "").strip().lower() in {"1", "true", "yes"}
 
 def start_scanner_if_token_exists():
-    global scanner_thread
+    global scanner_thread, flow_engine
     with scanner_lock:
         if scanner_thread is not None and scanner_thread.is_alive():
             print("Scanner already running. Skipping duplicate start.")
@@ -25,6 +28,8 @@ def start_scanner_if_token_exists():
                 if token:
                     print("Found saved token. Starting scanner automatically...")
                     kite.set_access_token(token)
+                    flow_engine = FlowEngine(kite)
+                    flow_engine.start()
 
                     scanner_thread = threading.Thread(target=run_scanner, args=(kite,))
                     scanner_thread.daemon = True
@@ -55,9 +60,10 @@ def login():
     except Exception as e:
         return f"<h1>Error</h1><p>Login failed: {str(e)}</p>"
 
-# Automatically try to start scanner on load
-start_scanner_if_token_exists()
+if AUTO_START_ON_IMPORT:
+    start_scanner_if_token_exists()
 
 if __name__ == "__main__":
+    start_scanner_if_token_exists()
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
