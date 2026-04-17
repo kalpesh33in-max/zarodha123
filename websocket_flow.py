@@ -85,6 +85,7 @@ class FlowEngine:
         self._tokens = list(tokens or [])
         self._symbol_by_token = {}
         self._access_token_override = access_token
+        self._auth_failed = False
 
     def start(self):
         with self._lock:
@@ -106,6 +107,7 @@ class FlowEngine:
                 self._symbol_by_token = symbol_by_token
             if tokens:
                 self._tokens = tokens
+            self._auth_failed = False
             self.kws = KiteTicker(API_KEY, access_token)
             self.kws.on_connect = self.on_connect
             self.kws.on_ticks = self.on_ticks
@@ -190,6 +192,7 @@ class FlowEngine:
 
     def on_connect(self, ws, response):
         mark_connected(True)
+        self._auth_failed = False
         if not self._tokens:
             return
 
@@ -218,14 +221,37 @@ class FlowEngine:
 
     def on_close(self, ws, code, reason):
         mark_connected(False)
+        if self._is_auth_failure(code, reason):
+            self._auth_failed = True
+            print("WebSocket auth failed. Check API key and access token. Stopping reconnect attempts.")
+            self._stop_reconnect(ws)
         print(f"WebSocket closed: {code} {reason}")
 
     def on_error(self, ws, code, reason):
+        if self._is_auth_failure(code, reason):
+            self._auth_failed = True
+            print("WebSocket auth failed during upgrade. Check API key and access token pairing.")
+            self._stop_reconnect(ws)
         print(f"WebSocket error: {code} {reason}")
 
     def on_reconnect(self, ws, attempts_count):
+        if self._auth_failed:
+            self._stop_reconnect(ws)
+            print("WebSocket reconnect blocked because the last failure was authentication-related.")
+            return
         print(f"WebSocket reconnect attempt: {attempts_count}")
 
     def on_noreconnect(self, ws):
         mark_connected(False)
         print("WebSocket stopped reconnecting.")
+
+    def _is_auth_failure(self, code, reason):
+        reason_text = str(reason or "").lower()
+        return code == 1006 and ("403" in reason_text or "forbidden" in reason_text)
+
+    def _stop_reconnect(self, ws):
+        try:
+            if hasattr(ws, "stop_retry"):
+                ws.stop_retry()
+        except Exception as e:
+            print(f"Failed to stop WebSocket retry loop cleanly: {e}")

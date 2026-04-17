@@ -49,8 +49,7 @@ def get_automated_token():
             # Exchange for access_token
             data = kite.generate_session(request_token, api_secret=API_SECRET)
             access_token = data["access_token"]
-
-            print(f"Login Success! Access Token: {access_token}")
+            print("Login success. Access token generated and saved.")
             
             # Save token for other scripts
             with open("access_token.txt", "w") as f:
