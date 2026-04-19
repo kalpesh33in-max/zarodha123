@@ -62,7 +62,7 @@ def run_scanner(kite, stop_event=None):
                 send_telegram_message(f"Scanner Error: {e}")
 
         else:
-            print(f"[{now.strftime('%H:%M:%S')}] Outside market hours. Scanner is silent.")
+            print(f"[{now.strftime('%H:%M:%S')}] Outside trading session (weekend/market closed). Scanner is silent.")
 
         if stop_event:
             if stop_event.wait(5):

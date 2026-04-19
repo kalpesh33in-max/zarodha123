@@ -195,10 +195,20 @@ def get_strength_label(lots, name="BANKNIFTY"):
         elif lots >= 75: return "✅ VERY GOOD"
         else: return "⚡ GOOD"
 
+def format_oi_delta(oi_delta):
+    value = abs(oi_delta or 0)
+    if value >= 10000000:
+        return f"{value/10000000:.1f}Cr"
+    if value >= 100000:
+        return f"{value/100000:.1f}L"
+    if value >= 1000:
+        return f"{value/1000:.1f}K"
+    return f"{value:.0f}"
+
 def format_shift_strike(strike, changed, suffix, oi_delta=None):
     if strike and strike > 0:
         arrow = "▲" if (oi_delta is None or oi_delta >= 0) else "▼"
-        return f"{int(strike)}{suffix}{arrow}{'*' if changed else ''}"
+        return f"{int(strike)}{suffix}({format_oi_delta(oi_delta)}{arrow}){'*' if changed else ''}"
     return f"No Data{suffix}"
 
 def determine_shift_label(prev, current, price_change_pct):
@@ -224,6 +234,28 @@ def determine_shift_label(prev, current, price_change_pct):
     if chg_shifted and abs(price_change_pct) <= 0.15:
         return "ABSORPTION WATCH"
     return "NO MAJOR SHIFT"
+
+def determine_direction_and_hedge(shift_label, price_change_pct, pcr, max_p_delta, max_c_delta, chg_p_delta, chg_c_delta):
+    pe_build = max_p_delta > 0 or chg_p_delta > 0
+    ce_build = max_c_delta > 0 or chg_c_delta > 0
+
+    if shift_label == "STRONG BULLISH SHIFT" and price_change_pct >= 0 and pcr >= 1:
+        direction = "BULLISH"
+    elif shift_label == "STRONG BEARISH SHIFT" and price_change_pct <= 0 and pcr <= 1:
+        direction = "BEARISH"
+    else:
+        direction = "SIDEWAYS"
+
+    if price_change_pct > 0 and ce_build:
+        hedge = "⛔ UPSIDE CAPPED"
+    elif price_change_pct < 0 and pe_build:
+        hedge = "🛡 DOWNSIDE PROTECTED"
+    elif pe_build and ce_build:
+        hedge = "⚖ BOTH SIDE HEDGE"
+    else:
+        hedge = "NEUTRAL"
+
+    return direction, hedge
 
 def classify_action(symbol, oi_change, price_change):
     if any(x in symbol for x in ["-FUT", "FUT", "-I"]):
@@ -442,12 +474,16 @@ def calculate_heatmap(kite):
         chg_p_bn_delta,
         chg_c_bn_delta,
     ) = process_option_logic("BANKNIFTY", underlying_map.get("BANKNIFTY", (pd.DataFrame(),0)), opt_quotes, bn_alerts, bn_change)
+    direction_bn, hedge_bn = determine_direction_and_hedge(
+        shift_bn, bn_change, pcr_bn, max_p_bn_delta, max_c_bn_delta, chg_p_bn_delta, chg_c_bn_delta
+    )
     
     arrow = "⬆️" if bn_change > 0 else "⬇️"
     report += (
         f"BNF={bn_ltp:.1f} {arrow},PCR-{pcr_bn:.2f},SHIFT:{shift_bn}\n"
-        f"MAX_OI:{format_shift_strike(max_p_bn, max_p_bn_changed, 'P', max_p_bn_delta)}/{format_shift_strike(max_c_bn, max_c_bn_changed, 'C', max_c_bn_delta)}|"
+        f"MAX_OI:{format_shift_strike(max_p_bn, max_p_bn_changed, 'P', max_p_bn_delta)}/{format_shift_strike(max_c_bn, max_c_bn_changed, 'C', max_c_bn_delta)}\n"
         f"CHG_OI:{format_shift_strike(chg_p_bn, chg_p_bn_changed, 'P', chg_p_bn_delta)}/{format_shift_strike(chg_c_bn, chg_c_bn_changed, 'C', chg_c_bn_delta)}\n"
+        f"DIRECTION:{direction_bn} | HEDGE:{hedge_bn}\n"
     )
 
     for name in REPORT_BANKS:
@@ -483,11 +519,15 @@ def calculate_heatmap(kite):
                 chg_p_delta,
                 chg_c_delta,
             ) = process_option_logic(name, underlying_map.get(name, (pd.DataFrame(),0)), opt_quotes, stock_alerts, change)
+            direction_label, hedge_label = determine_direction_and_hedge(
+                shift_label, change, pcr, max_p_delta, max_c_delta, chg_p_delta, chg_c_delta
+            )
             arrow = "⬆️" if change > 0 else "⬇️"
             report += (
                 f"{alias[name]}={ltp:.1f} {arrow},PCR-{pcr:.2f},SHIFT:{shift_label}\n"
-                f"MAX_OI:{format_shift_strike(max_p, max_p_changed, 'P', max_p_delta)}/{format_shift_strike(max_c, max_c_changed, 'C', max_c_delta)}|"
+                f"MAX_OI:{format_shift_strike(max_p, max_p_changed, 'P', max_p_delta)}/{format_shift_strike(max_c, max_c_changed, 'C', max_c_delta)}\n"
                 f"CHG_OI:{format_shift_strike(chg_p, chg_p_changed, 'P', chg_p_delta)}/{format_shift_strike(chg_c, chg_c_changed, 'C', chg_c_delta)}\n"
+                f"DIRECTION:{direction_label} | HEDGE:{hedge_label}\n"
             )
 
     h, i = bank_signals.get("HDFCBANK"), bank_signals.get("ICICIBANK")
