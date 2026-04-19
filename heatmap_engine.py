@@ -195,6 +195,36 @@ def get_strength_label(lots, name="BANKNIFTY"):
         elif lots >= 75: return "✅ VERY GOOD"
         else: return "⚡ GOOD"
 
+def format_shift_strike(strike, changed, suffix, oi_delta=None):
+    if strike and strike > 0:
+        arrow = "▲" if (oi_delta is None or oi_delta >= 0) else "▼"
+        return f"{int(strike)}{suffix}{arrow}{'*' if changed else ''}"
+    return f"No Data{suffix}"
+
+def determine_shift_label(prev, current, price_change_pct):
+    max_pe_up = current["mp"] > 0 and prev["mp"] > 0 and current["mp"] > prev["mp"]
+    max_ce_up = current["mc"] > 0 and prev["mc"] > 0 and current["mc"] > prev["mc"]
+    chg_pe_up = current["cp"] > 0 and prev["cp"] > 0 and current["cp"] > prev["cp"]
+    chg_ce_up = current["cc"] > 0 and prev["cc"] > 0 and current["cc"] > prev["cc"]
+
+    max_pe_down = current["mp"] > 0 and prev["mp"] > 0 and current["mp"] < prev["mp"]
+    max_ce_down = current["mc"] > 0 and prev["mc"] > 0 and current["mc"] < prev["mc"]
+    chg_pe_down = current["cp"] > 0 and prev["cp"] > 0 and current["cp"] < prev["cp"]
+    chg_ce_down = current["cc"] > 0 and prev["cc"] > 0 and current["cc"] < prev["cc"]
+
+    max_shifted = current["mp"] != prev["mp"] or current["mc"] != prev["mc"]
+    chg_shifted = current["cp"] != prev["cp"] or current["cc"] != prev["cc"]
+
+    if (max_pe_up and max_ce_up) and (chg_pe_up and chg_ce_up):
+        return "STRONG BULLISH SHIFT"
+    if (max_pe_down and max_ce_down) and (chg_pe_down and chg_ce_down):
+        return "STRONG BEARISH SHIFT"
+    if not max_shifted and chg_shifted:
+        return "EARLY SHIFT"
+    if chg_shifted and abs(price_change_pct) <= 0.15:
+        return "ABSORPTION WATCH"
+    return "NO MAJOR SHIFT"
+
 def classify_action(symbol, oi_change, price_change):
     if any(x in symbol for x in ["-FUT", "FUT", "-I"]):
         if oi_change > 0: return "FUTURE BUY (LONG) 📈" if price_change >= 0 else "FUTURE SELL (SHORT) 📉"
@@ -241,16 +271,17 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list):
     history.append({'time': now, 'oi': oi, 'price': ltp})
     if len(history) > 20: history.pop(0)
 
-def process_option_logic(name, underlying_data, option_quotes, alerts_list):
+def process_option_logic(name, underlying_data, option_quotes, alerts_list, price_change_pct=0):
     if name not in ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "BANKNIFTY"]:
-        return 1.0, 0, 0, 0, 0, False, False, False, False
+        return 1.0, 0, 0, 0, 0, False, False, False, False, "NO MAJOR SHIFT", 0, 0, 0, 0
 
     threshold = 100 if name == "BANKNIFTY" else 50
     opt_df, u_ltp = underlying_data
-    if opt_df.empty: return 1.0, 0, 0, 0, 0, False, False, False, False
+    if opt_df.empty: return 1.0, 0, 0, 0, 0, False, False, False, False, "NO MAJOR SHIFT", 0, 0, 0, 0
     total_call = total_put = 0
     max_c_oi = max_p_oi = chg_c_oi = chg_p_oi = 0
     max_c = max_p = chg_c = chg_p = 0
+    max_c_delta = max_p_delta = chg_c_delta = chg_p_delta = 0
     lot_size = LOT_SIZES.get(name, 1)
     now = datetime.now()
     for _, row in opt_df.iterrows():
@@ -274,12 +305,16 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list):
         
         if row['instrument_type'] == 'CE':
             total_call += curr_oi
-            if curr_oi > max_c_oi: max_c_oi, max_c = curr_oi, row['strike']
-            if cumulative_oi_chg > chg_c_oi: chg_c_oi, chg_c = cumulative_oi_chg, row['strike']
+            if curr_oi > max_c_oi:
+                max_c_oi, max_c, max_c_delta = curr_oi, row['strike'], cumulative_oi_chg
+            if cumulative_oi_chg > chg_c_oi:
+                chg_c_oi, chg_c, chg_c_delta = cumulative_oi_chg, row['strike'], cumulative_oi_chg
         else:
             total_put += curr_oi
-            if curr_oi > max_p_oi: max_p_oi, max_p = curr_oi, row['strike']
-            if cumulative_oi_chg > chg_p_oi: chg_p_oi, chg_p = cumulative_oi_chg, row['strike']
+            if curr_oi > max_p_oi:
+                max_p_oi, max_p, max_p_delta = curr_oi, row['strike'], cumulative_oi_chg
+            if cumulative_oi_chg > chg_p_oi:
+                chg_p_oi, chg_p, chg_p_delta = cumulative_oi_chg, row['strike'], cumulative_oi_chg
         
         if prev_oi > 0:
             tick_lots = int(abs(curr_oi - prev_oi) / lot_size)
@@ -335,6 +370,9 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list):
         chg_shift_text[name]['pe'] = f"{int(prev['cp'])}→{int(chg_p)}"
     else: chg_shift_text[name]['pe'] = f"{int(chg_p)}" if chg_p > 0 else "No Data"
 
+    current = {'mc': max_c, 'mp': max_p, 'cc': chg_c, 'cp': chg_p}
+    shift_label = determine_shift_label(prev, current, price_change_pct)
+
     if max_c > 0: last_strike_store[name]['mc'] = max_c
     if max_p > 0: last_strike_store[name]['mp'] = max_p
     if chg_c > 0: last_strike_store[name]['cc'] = chg_c
@@ -350,6 +388,11 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list):
         max_c_changed,
         chg_p_changed,
         chg_c_changed,
+        shift_label,
+        max_p_delta,
+        max_c_delta,
+        chg_p_delta,
+        chg_c_delta,
     )
 
 
@@ -393,13 +436,18 @@ def calculate_heatmap(kite):
         max_c_bn_changed,
         chg_p_bn_changed,
         chg_c_bn_changed,
-    ) = process_option_logic("BANKNIFTY", underlying_map.get("BANKNIFTY", (pd.DataFrame(),0)), opt_quotes, bn_alerts)
+        shift_bn,
+        max_p_bn_delta,
+        max_c_bn_delta,
+        chg_p_bn_delta,
+        chg_c_bn_delta,
+    ) = process_option_logic("BANKNIFTY", underlying_map.get("BANKNIFTY", (pd.DataFrame(),0)), opt_quotes, bn_alerts, bn_change)
     
     arrow = "⬆️" if bn_change > 0 else "⬇️"
     report += (
-        f"BNF={bn_ltp:.1f} {arrow},PCR-{pcr_bn:.2f}, MAX_OI: "
-        f"{int(max_p_bn)}P{'*' if max_p_bn_changed else ''}/{int(max_c_bn)}C{'*' if max_c_bn_changed else ''} | "
-        f"CHG_OI: {int(chg_p_bn)}P{'*' if chg_p_bn_changed else ''}/{int(chg_c_bn)}C{'*' if chg_c_bn_changed else ''}\n"
+        f"BNF={bn_ltp:.1f} {arrow},PCR-{pcr_bn:.2f},SHIFT:{shift_bn}\n"
+        f"MAX_OI:{format_shift_strike(max_p_bn, max_p_bn_changed, 'P', max_p_bn_delta)}/{format_shift_strike(max_c_bn, max_c_bn_changed, 'C', max_c_bn_delta)}|"
+        f"CHG_OI:{format_shift_strike(chg_p_bn, chg_p_bn_changed, 'P', chg_p_bn_delta)}/{format_shift_strike(chg_c_bn, chg_c_bn_changed, 'C', chg_c_bn_delta)}\n"
     )
 
     for name in REPORT_BANKS:
@@ -429,12 +477,17 @@ def calculate_heatmap(kite):
                 max_c_changed,
                 chg_p_changed,
                 chg_c_changed,
-            ) = process_option_logic(name, underlying_map.get(name, (pd.DataFrame(),0)), opt_quotes, stock_alerts)
+                shift_label,
+                max_p_delta,
+                max_c_delta,
+                chg_p_delta,
+                chg_c_delta,
+            ) = process_option_logic(name, underlying_map.get(name, (pd.DataFrame(),0)), opt_quotes, stock_alerts, change)
             arrow = "⬆️" if change > 0 else "⬇️"
             report += (
-                f"{alias[name]}={ltp:.1f} {arrow},PCR-{pcr:.2f},MAX_OI: "
-                f"{int(max_p)}P{'*' if max_p_changed else ''}/{int(max_c)}C{'*' if max_c_changed else ''} | "
-                f"CHG_OI: {int(chg_p)}P{'*' if chg_p_changed else ''}/{int(chg_c)}C{'*' if chg_c_changed else ''}\n"
+                f"{alias[name]}={ltp:.1f} {arrow},PCR-{pcr:.2f},SHIFT:{shift_label}\n"
+                f"MAX_OI:{format_shift_strike(max_p, max_p_changed, 'P', max_p_delta)}/{format_shift_strike(max_c, max_c_changed, 'C', max_c_delta)}|"
+                f"CHG_OI:{format_shift_strike(chg_p, chg_p_changed, 'P', chg_p_delta)}/{format_shift_strike(chg_c, chg_c_changed, 'C', chg_c_delta)}\n"
             )
 
     h, i = bank_signals.get("HDFCBANK"), bank_signals.get("ICICIBANK")
