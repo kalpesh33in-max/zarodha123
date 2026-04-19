@@ -1,5 +1,6 @@
 import pandas as pd
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from websocket_flow import get_symbol_quotes, get_token_quotes
 
@@ -59,6 +60,8 @@ chg_shift_text = {} # {name: {'pe': text, 'ce': text}}
 _options_df = None
 _futures_df = None
 _index_df = None
+_history_cache = {}
+IST = ZoneInfo("Asia/Kolkata")
 
 
 # ================= HELPERS =================
@@ -257,6 +260,175 @@ def determine_direction_and_hedge(shift_label, price_change_pct, pcr, max_p_delt
 
     return direction, hedge
 
+def format_level(value):
+    if value is None or pd.isna(value):
+        return "NA"
+    return f"{round(float(value))}"
+
+def calculate_standard_pivots(high_value, low_value, close_value):
+    pivot = (high_value + low_value + close_value) / 3
+    r1 = (2 * pivot) - low_value
+    s1 = (2 * pivot) - high_value
+    r2 = pivot + (high_value - low_value)
+    s2 = pivot - (high_value - low_value)
+    return {
+        "P": pivot,
+        "R1": r1,
+        "S1": s1,
+        "S2": s2,
+        "R2": r2,
+    }
+
+def fetch_historical_frame(kite, instrument_token, interval, from_dt, to_dt, cache_key, continuous=False):
+    now_ts = datetime.now(IST).timestamp()
+    cached = _history_cache.get(cache_key)
+    if cached and now_ts - cached["ts"] <= 60:
+        return cached["data"]
+
+    try:
+        records = kite.historical_data(instrument_token, from_dt, to_dt, interval, continuous=continuous, oi=False)
+        frame = pd.DataFrame(records)
+        if not frame.empty and "date" in frame.columns:
+            frame["date"] = pd.to_datetime(frame["date"])
+        _history_cache[cache_key] = {"ts": now_ts, "data": frame}
+        return frame
+    except Exception as e:
+        print(f"Historical data fetch failed for token {instrument_token} interval {interval}: {e}")
+        return pd.DataFrame()
+
+def get_symbol_analytics(kite, symbol):
+    instrument_token = get_symbol_token(symbol)
+    if instrument_token is None:
+        return None
+
+    now_ist = datetime.now(IST)
+    session_start = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+    if now_ist < session_start:
+        session_start = session_start - timedelta(days=1)
+
+    five_minute = fetch_historical_frame(
+        kite,
+        instrument_token,
+        "5minute",
+        session_start.replace(tzinfo=None),
+        now_ist.replace(tzinfo=None),
+        ("5minute", instrument_token, session_start.date().isoformat()),
+    )
+
+    vwap_value = None
+    if not five_minute.empty and {"high", "low", "close", "volume"}.issubset(five_minute.columns):
+        valid = five_minute[five_minute["volume"] > 0].copy()
+        if not valid.empty:
+            typical_price = (valid["high"] + valid["low"] + valid["close"]) / 3
+            vwap_value = (typical_price * valid["volume"]).sum() / valid["volume"].sum()
+
+    daily_frame = fetch_historical_frame(
+        kite,
+        instrument_token,
+        "day",
+        (now_ist - timedelta(days=420)).replace(tzinfo=None),
+        now_ist.replace(tzinfo=None),
+        ("day", instrument_token),
+    )
+    hourly_frame = fetch_historical_frame(
+        kite,
+        instrument_token,
+        "60minute",
+        (now_ist - timedelta(days=30)).replace(tzinfo=None),
+        now_ist.replace(tzinfo=None),
+        ("60minute", instrument_token),
+    )
+    fifteen_frame = fetch_historical_frame(
+        kite,
+        instrument_token,
+        "15minute",
+        (now_ist - timedelta(days=10)).replace(tzinfo=None),
+        now_ist.replace(tzinfo=None),
+        ("15minute", instrument_token),
+    )
+
+    analytics = {
+        "vwap": vwap_value,
+        "sma200": {"D": None, "1H": None, "15M": None},
+        "pivot": {"D": None, "1H": None, "15M": None},
+    }
+
+    if not daily_frame.empty and len(daily_frame) >= 200:
+        analytics["sma200"]["D"] = daily_frame["close"].tail(200).mean()
+    if not hourly_frame.empty and len(hourly_frame) >= 200:
+        analytics["sma200"]["1H"] = hourly_frame["close"].tail(200).mean()
+    if not fifteen_frame.empty and len(fifteen_frame) >= 200:
+        analytics["sma200"]["15M"] = fifteen_frame["close"].tail(200).mean()
+
+    if not daily_frame.empty and len(daily_frame) >= 2:
+        prev_day = daily_frame.iloc[-2]
+        analytics["pivot"]["D"] = calculate_standard_pivots(prev_day["high"], prev_day["low"], prev_day["close"])
+    if not hourly_frame.empty and len(hourly_frame) >= 2:
+        prev_hour = hourly_frame.iloc[-2]
+        analytics["pivot"]["1H"] = calculate_standard_pivots(prev_hour["high"], prev_hour["low"], prev_hour["close"])
+    if not fifteen_frame.empty and len(fifteen_frame) >= 2:
+        prev_15m = fifteen_frame.iloc[-2]
+        analytics["pivot"]["15M"] = calculate_standard_pivots(prev_15m["high"], prev_15m["low"], prev_15m["close"])
+
+    return analytics
+
+def format_pivot_line(label, pivot_values):
+    if not pivot_values:
+        return f"PIVOT {label}:P:NA,R1:NA,S1:NA,S2:NA,R2:NA"
+    return (
+        f"PIVOT {label}:"
+        f"P:{format_level(pivot_values['P'])},"
+        f"R1:{format_level(pivot_values['R1'])},"
+        f"S1:{format_level(pivot_values['S1'])},"
+        f"S2:{format_level(pivot_values['S2'])},"
+        f"R2:{format_level(pivot_values['R2'])}"
+    )
+
+def classify_level_position(price, level, near_threshold):
+    if level is None or pd.isna(level):
+        return None
+    if abs(float(price) - float(level)) <= near_threshold:
+        return "NEAR"
+    return "ABOVE" if float(price) > float(level) else "BELOW"
+
+def build_levels_line(name, price, analytics):
+    if not analytics:
+        return "LEVELS:NA"
+
+    near_threshold = 25 if name == "BANKNIFTY" else 2
+    parts = []
+
+    vwap_state = classify_level_position(price, analytics.get("vwap"), near_threshold)
+    if vwap_state:
+        parts.append(f"{vwap_state} VWAP")
+
+    for label in ["D", "1H", "15M"]:
+        sma_value = analytics["sma200"].get(label)
+        sma_state = classify_level_position(price, sma_value, near_threshold)
+        if sma_state == "NEAR":
+            parts.append(f"NEAR SMA200-{label}")
+
+    pivot_checks = [
+        ("D", "P"),
+        ("1H", "P"),
+        ("1H", "R1"),
+        ("1H", "S1"),
+        ("15M", "P"),
+        ("15M", "R1"),
+        ("15M", "S1"),
+    ]
+    for timeframe, level_name in pivot_checks:
+        pivot_bucket = analytics["pivot"].get(timeframe)
+        if not pivot_bucket:
+            continue
+        pivot_state = classify_level_position(price, pivot_bucket.get(level_name), near_threshold)
+        if pivot_state == "NEAR":
+            parts.append(f"NEAR PIVOT-{timeframe}-{level_name}")
+
+    if not parts:
+        return "LEVELS:NA"
+    return "LEVELS:" + " | ".join(parts)
+
 def classify_action(symbol, oi_change, price_change):
     if any(x in symbol for x in ["-FUT", "FUT", "-I"]):
         if oi_change > 0: return "FUTURE BUY (LONG) 📈" if price_change >= 0 else "FUTURE SELL (SHORT) 📉"
@@ -446,8 +618,10 @@ def calculate_heatmap(kite):
     
     # Pre-collect data for all entities
     all_opt_tokens = []; underlying_map = {}
+    bnf_future_symbol = next((s for s in fut_symbols if "BANKNIFTY" in s), "")
     for name in REPORT_BANKS:
-        u_ltp = data.get(INDEX_SYMBOL if name=="BANKNIFTY" else next((s for s in fut_symbols if name in s), ""), {}).get("last_price", 0)
+        base_symbol = bnf_future_symbol if name == "BANKNIFTY" else next((s for s in fut_symbols if name in s), "")
+        u_ltp = data.get(base_symbol, {}).get("last_price", 0)
         if u_ltp > 0:
             df = get_relevant_options(name, u_ltp)
             if not df.empty: underlying_map[name] = (df, u_ltp); all_opt_tokens.extend(df['instrument_token'].tolist())
@@ -455,8 +629,8 @@ def calculate_heatmap(kite):
     opt_quotes = get_option_quotes_with_fallback(kite, all_opt_tokens)
 
     # [NEW] Process BNF First for Report Header Alignment
-    bn_ltp = data.get(INDEX_SYMBOL, {}).get("last_price", 0)
-    bn_open = data.get(INDEX_SYMBOL, {}).get("ohlc", {}).get("open", 0)
+    bn_ltp = data.get(bnf_future_symbol, {}).get("last_price", 0)
+    bn_open = data.get(bnf_future_symbol, {}).get("ohlc", {}).get("open", 0)
     bn_change = ((bn_ltp - bn_open) / bn_open) * 100 if bn_open > 0 else 0
     (
         pcr_bn,
@@ -477,6 +651,8 @@ def calculate_heatmap(kite):
     direction_bn, hedge_bn = determine_direction_and_hedge(
         shift_bn, bn_change, pcr_bn, max_p_bn_delta, max_c_bn_delta, chg_p_bn_delta, chg_c_bn_delta
     )
+    analytics_bn = get_symbol_analytics(kite, bnf_future_symbol or INDEX_SYMBOL)
+    levels_bn = build_levels_line("BANKNIFTY", bn_ltp, analytics_bn)
     
     arrow = "⬆️" if bn_change > 0 else "⬇️"
     report += (
@@ -484,6 +660,14 @@ def calculate_heatmap(kite):
         f"MAX_OI:{format_shift_strike(max_p_bn, max_p_bn_changed, 'P', max_p_bn_delta)}/{format_shift_strike(max_c_bn, max_c_bn_changed, 'C', max_c_bn_delta)}\n"
         f"CHG_OI:{format_shift_strike(chg_p_bn, chg_p_bn_changed, 'P', chg_p_bn_delta)}/{format_shift_strike(chg_c_bn, chg_c_bn_changed, 'C', chg_c_bn_delta)}\n"
         f"DIRECTION:{direction_bn} | HEDGE:{hedge_bn}\n"
+        f"VWAP:{format_level(analytics_bn['vwap'] if analytics_bn else None)} | "
+        f"SMA200 D:{format_level(analytics_bn['sma200']['D'] if analytics_bn else None)},"
+        f"1H:{format_level(analytics_bn['sma200']['1H'] if analytics_bn else None)},"
+        f"15M:{format_level(analytics_bn['sma200']['15M'] if analytics_bn else None)}\n"
+        f"{format_pivot_line('D', analytics_bn['pivot']['D'] if analytics_bn else None)}\n"
+        f"{format_pivot_line('1H', analytics_bn['pivot']['1H'] if analytics_bn else None)}\n"
+        f"{format_pivot_line('15M', analytics_bn['pivot']['15M'] if analytics_bn else None)}\n"
+        f"{levels_bn}\n"
     )
 
     for name in REPORT_BANKS:
@@ -519,6 +703,8 @@ def calculate_heatmap(kite):
                 chg_p_delta,
                 chg_c_delta,
             ) = process_option_logic(name, underlying_map.get(name, (pd.DataFrame(),0)), opt_quotes, stock_alerts, change)
+            analytics = get_symbol_analytics(kite, sym)
+            levels_line = build_levels_line(name, ltp, analytics)
             direction_label, hedge_label = determine_direction_and_hedge(
                 shift_label, change, pcr, max_p_delta, max_c_delta, chg_p_delta, chg_c_delta
             )
@@ -528,6 +714,14 @@ def calculate_heatmap(kite):
                 f"MAX_OI:{format_shift_strike(max_p, max_p_changed, 'P', max_p_delta)}/{format_shift_strike(max_c, max_c_changed, 'C', max_c_delta)}\n"
                 f"CHG_OI:{format_shift_strike(chg_p, chg_p_changed, 'P', chg_p_delta)}/{format_shift_strike(chg_c, chg_c_changed, 'C', chg_c_delta)}\n"
                 f"DIRECTION:{direction_label} | HEDGE:{hedge_label}\n"
+                f"VWAP:{format_level(analytics['vwap'] if analytics else None)} | "
+                f"SMA200 D:{format_level(analytics['sma200']['D'] if analytics else None)},"
+                f"1H:{format_level(analytics['sma200']['1H'] if analytics else None)},"
+                f"15M:{format_level(analytics['sma200']['15M'] if analytics else None)}\n"
+                f"{format_pivot_line('D', analytics['pivot']['D'] if analytics else None)}\n"
+                f"{format_pivot_line('1H', analytics['pivot']['1H'] if analytics else None)}\n"
+                f"{format_pivot_line('15M', analytics['pivot']['15M'] if analytics else None)}\n"
+                f"{levels_line}\n"
             )
 
     h, i = bank_signals.get("HDFCBANK"), bank_signals.get("ICICIBANK")
