@@ -56,6 +56,7 @@ price_velocity_store = {}
 # Shift Strings for Categorized Alerts
 max_shift_text = {} # {name: {'pe': text, 'ce': text}}
 chg_shift_text = {} # {name: {'pe': text, 'ce': text}}
+display_shift_store = {} # {name: {"max_side": "P"/"C", "chg_side": "P"/"C"}}
 
 _options_df = None
 _futures_df = None
@@ -211,8 +212,29 @@ def format_oi_delta(oi_delta):
 def format_shift_strike(strike, changed, suffix, oi_delta=None):
     if strike and strike > 0:
         arrow = "▲" if (oi_delta is None or oi_delta >= 0) else "▼"
-        return f"{int(strike)}{suffix}({format_oi_delta(oi_delta)}{arrow}){'*' if changed else ''}"
+        marker = "★" if changed else ""
+        return f"{int(strike)}{suffix}({format_oi_delta(oi_delta)}{arrow}){marker}"
     return f"No Data{suffix}"
+
+def resolve_display_shift(name, max_p_oi, max_c_oi, chg_p_oi, chg_c_oi):
+    current = {
+        "max_side": "P" if max_p_oi >= max_c_oi else "C",
+        "chg_side": "P" if chg_p_oi >= chg_c_oi else "C",
+    }
+    previous = display_shift_store.get(name)
+    display_shift_store[name] = current
+    if previous is None:
+        return "NO CHANGE"
+
+    changed_parts = []
+    if previous.get("max_side") != current["max_side"]:
+        changed_parts.append(f"MAXOI_{current['max_side']}")
+    if previous.get("chg_side") != current["chg_side"]:
+        changed_parts.append(f"CHGOI_{current['chg_side']}")
+
+    if not changed_parts:
+        return "NO CHANGE"
+    return ",".join(changed_parts)
 
 def determine_shift_label(prev, current, price_change_pct):
     max_pe_up = current["mp"] > 0 and prev["mp"] > 0 and current["mp"] > prev["mp"]
@@ -398,36 +420,49 @@ def build_levels_line(name, price, analytics):
     near_threshold = 25 if name == "BANKNIFTY" else 2
     parts = []
 
-    vwap_state = classify_level_position(price, analytics.get("vwap"), near_threshold)
-    if vwap_state:
-        parts.append(f"{vwap_state} VWAP")
-
-    for label in ["D", "1H", "15M"]:
-        sma_value = analytics["sma200"].get(label)
-        sma_state = classify_level_position(price, sma_value, near_threshold)
-        if sma_state == "NEAR":
-            parts.append(f"NEAR SMA200-{label}")
-
-    pivot_checks = [
-        ("D", "P"),
-        ("1H", "P"),
-        ("1H", "R1"),
-        ("1H", "S1"),
-        ("15M", "P"),
-        ("15M", "R1"),
-        ("15M", "S1"),
-    ]
-    for timeframe, level_name in pivot_checks:
+    pivot_checks_by_timeframe = {
+        "D": ["P"],
+        "1H": ["P", "R1", "S1"],
+        "15M": ["P", "R1", "S1"],
+    }
+    for timeframe, level_names in pivot_checks_by_timeframe.items():
         pivot_bucket = analytics["pivot"].get(timeframe)
         if not pivot_bucket:
             continue
-        pivot_state = classify_level_position(price, pivot_bucket.get(level_name), near_threshold)
-        if pivot_state == "NEAR":
-            parts.append(f"NEAR PIVOT-{timeframe}-{level_name}")
+
+        nearest_level = None
+        nearest_distance = None
+        for level_name in level_names:
+            level_value = pivot_bucket.get(level_name)
+            pivot_state = classify_level_position(price, level_value, near_threshold)
+            if pivot_state != "NEAR":
+                continue
+
+            distance = abs(float(price) - float(level_value))
+            if nearest_distance is None or distance < nearest_distance:
+                nearest_distance = distance
+                nearest_level = level_name
+
+        if nearest_level:
+            parts.append(f"PIVOT-{timeframe}-{nearest_level}")
 
     if not parts:
         return "LEVELS:NA"
-    return "LEVELS:" + " | ".join(parts)
+    return "LEVELS:" + ",".join(parts)
+
+def format_vwap_line(name, price, analytics):
+    if not analytics:
+        return "VWAP:NA"
+
+    vwap_value = analytics.get("vwap")
+    if vwap_value is None or pd.isna(vwap_value):
+        return "VWAP:NA"
+
+    near_threshold = 25 if name == "BANKNIFTY" else 2
+    state = classify_level_position(price, vwap_value, near_threshold)
+    if state == "NEAR":
+        return f"VWAP:{format_level(vwap_value)} Price NEAR VWAP"
+    return f"VWAP:{format_level(vwap_value)} Price {state} VWAP"
 
 def classify_action(symbol, oi_change, price_change):
     if any(x in symbol for x in ["-FUT", "FUT", "-I"]):
@@ -477,11 +512,11 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list):
 
 def process_option_logic(name, underlying_data, option_quotes, alerts_list, price_change_pct=0):
     if name not in ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "BANKNIFTY"]:
-        return 1.0, 0, 0, 0, 0, False, False, False, False, "NO MAJOR SHIFT", 0, 0, 0, 0
+        return 1.0, 0, 0, 0, 0, False, False, False, False, "MAXOI_P AND CHGOI_P", "NO MAJOR SHIFT", 0, 0, 0, 0
 
     threshold = 100 if name == "BANKNIFTY" else 50
     opt_df, u_ltp = underlying_data
-    if opt_df.empty: return 1.0, 0, 0, 0, 0, False, False, False, False, "NO MAJOR SHIFT", 0, 0, 0, 0
+    if opt_df.empty: return 1.0, 0, 0, 0, 0, False, False, False, False, "MAXOI_P AND CHGOI_P", "NO MAJOR SHIFT", 0, 0, 0, 0
     total_call = total_put = 0
     max_c_oi = max_p_oi = chg_c_oi = chg_p_oi = 0
     max_c = max_p = chg_c = chg_p = 0
@@ -575,6 +610,7 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, pric
     else: chg_shift_text[name]['pe'] = f"{int(chg_p)}" if chg_p > 0 else "No Data"
 
     current = {'mc': max_c, 'mp': max_p, 'cc': chg_c, 'cp': chg_p}
+    display_shift = resolve_display_shift(name, max_p_oi, max_c_oi, chg_p_oi, chg_c_oi)
     shift_label = determine_shift_label(prev, current, price_change_pct)
 
     if max_c > 0: last_strike_store[name]['mc'] = max_c
@@ -592,6 +628,7 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, pric
         max_c_changed,
         chg_p_changed,
         chg_c_changed,
+        display_shift,
         shift_label,
         max_p_delta,
         max_c_delta,
@@ -610,7 +647,7 @@ def calculate_heatmap(kite):
         return 0, "Error: unable to fetch market data", [], [], []
     
     score = 0
-    report = "📊 *BANK MOVEMENT (FUTURES)*\n\n"
+    report = "📊 *BANK MOVEMENT (FUTURES)*\n"
     
     alias = {"BANKNIFTY": "BNF", "HDFCBANK": "HDBFU", "ICICIBANK": "ICIBFU", "SBIN": "SBINFU", "AXISBANK": "AXISFU"}
     REPORT_BANKS = ["BANKNIFTY", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK"]
@@ -642,6 +679,7 @@ def calculate_heatmap(kite):
         max_c_bn_changed,
         chg_p_bn_changed,
         chg_c_bn_changed,
+        display_shift_bn,
         shift_bn,
         max_p_bn_delta,
         max_c_bn_delta,
@@ -653,21 +691,18 @@ def calculate_heatmap(kite):
     )
     analytics_bn = get_symbol_analytics(kite, bnf_future_symbol or INDEX_SYMBOL)
     levels_bn = build_levels_line("BANKNIFTY", bn_ltp, analytics_bn)
+    vwap_line_bn = format_vwap_line("BANKNIFTY", bn_ltp, analytics_bn)
     
     arrow = "⬆️" if bn_change > 0 else "⬇️"
     report += (
-        f"BNF={bn_ltp:.1f} {arrow},PCR-{pcr_bn:.2f},SHIFT:{shift_bn}\n"
-        f"MAX_OI:{format_shift_strike(max_p_bn, max_p_bn_changed, 'P', max_p_bn_delta)}/{format_shift_strike(max_c_bn, max_c_bn_changed, 'C', max_c_bn_delta)}\n"
-        f"CHG_OI:{format_shift_strike(chg_p_bn, chg_p_bn_changed, 'P', chg_p_bn_delta)}/{format_shift_strike(chg_c_bn, chg_c_bn_changed, 'C', chg_c_bn_delta)}\n"
-        f"DIRECTION:{direction_bn} | HEDGE:{hedge_bn}\n"
-        f"VWAP:{format_level(analytics_bn['vwap'] if analytics_bn else None)} | "
-        f"SMA200 D:{format_level(analytics_bn['sma200']['D'] if analytics_bn else None)},"
-        f"1H:{format_level(analytics_bn['sma200']['1H'] if analytics_bn else None)},"
-        f"15M:{format_level(analytics_bn['sma200']['15M'] if analytics_bn else None)}\n"
-        f"{format_pivot_line('D', analytics_bn['pivot']['D'] if analytics_bn else None)}\n"
-        f"{format_pivot_line('1H', analytics_bn['pivot']['1H'] if analytics_bn else None)}\n"
-        f"{format_pivot_line('15M', analytics_bn['pivot']['15M'] if analytics_bn else None)}\n"
+        f"BNF={bn_ltp:.1f} {arrow},SHIFT:{display_shift_bn}\n"
+        f"🔵 MAX_OI:{format_shift_strike(max_p_bn, max_p_bn_changed, 'P', max_p_bn_delta)}/{format_shift_strike(max_c_bn, max_c_bn_changed, 'C', max_c_bn_delta)}\n"
+        f"🔵 CHG_OI:{format_shift_strike(chg_p_bn, chg_p_bn_changed, 'P', chg_p_bn_delta)}/{format_shift_strike(chg_c_bn, chg_c_bn_changed, 'C', chg_c_bn_delta)}\n"
+        f"{vwap_line_bn}\n"
+    )
+    report += (
         f"{levels_bn}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
     )
 
     for name in REPORT_BANKS:
@@ -697,6 +732,7 @@ def calculate_heatmap(kite):
                 max_c_changed,
                 chg_p_changed,
                 chg_c_changed,
+                display_shift,
                 shift_label,
                 max_p_delta,
                 max_c_delta,
@@ -705,23 +741,20 @@ def calculate_heatmap(kite):
             ) = process_option_logic(name, underlying_map.get(name, (pd.DataFrame(),0)), opt_quotes, stock_alerts, change)
             analytics = get_symbol_analytics(kite, sym)
             levels_line = build_levels_line(name, ltp, analytics)
+            vwap_line = format_vwap_line(name, ltp, analytics)
             direction_label, hedge_label = determine_direction_and_hedge(
                 shift_label, change, pcr, max_p_delta, max_c_delta, chg_p_delta, chg_c_delta
             )
             arrow = "⬆️" if change > 0 else "⬇️"
             report += (
-                f"{alias[name]}={ltp:.1f} {arrow},PCR-{pcr:.2f},SHIFT:{shift_label}\n"
-                f"MAX_OI:{format_shift_strike(max_p, max_p_changed, 'P', max_p_delta)}/{format_shift_strike(max_c, max_c_changed, 'C', max_c_delta)}\n"
-                f"CHG_OI:{format_shift_strike(chg_p, chg_p_changed, 'P', chg_p_delta)}/{format_shift_strike(chg_c, chg_c_changed, 'C', chg_c_delta)}\n"
-                f"DIRECTION:{direction_label} | HEDGE:{hedge_label}\n"
-                f"VWAP:{format_level(analytics['vwap'] if analytics else None)} | "
-                f"SMA200 D:{format_level(analytics['sma200']['D'] if analytics else None)},"
-                f"1H:{format_level(analytics['sma200']['1H'] if analytics else None)},"
-                f"15M:{format_level(analytics['sma200']['15M'] if analytics else None)}\n"
-                f"{format_pivot_line('D', analytics['pivot']['D'] if analytics else None)}\n"
-                f"{format_pivot_line('1H', analytics['pivot']['1H'] if analytics else None)}\n"
-                f"{format_pivot_line('15M', analytics['pivot']['15M'] if analytics else None)}\n"
+                f"{alias[name]}={ltp:.1f} {arrow},SHIFT:{display_shift}\n"
+                f"🔵 MAX_OI:{format_shift_strike(max_p, max_p_changed, 'P', max_p_delta)}/{format_shift_strike(max_c, max_c_changed, 'C', max_c_delta)}\n"
+                f"🔵 CHG_OI:{format_shift_strike(chg_p, chg_p_changed, 'P', chg_p_delta)}/{format_shift_strike(chg_c, chg_c_changed, 'C', chg_c_delta)}\n"
+                f"{vwap_line}\n"
+            )
+            report += (
                 f"{levels_line}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
             )
 
     h, i = bank_signals.get("HDFCBANK"), bank_signals.get("ICICIBANK")
