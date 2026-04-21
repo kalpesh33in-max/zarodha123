@@ -56,11 +56,11 @@ price_velocity_store = {}
 # Shift Strings for Categorized Alerts
 max_shift_text = {} # {name: {'pe': text, 'ce': text}}
 chg_shift_text = {} # {name: {'pe': text, 'ce': text}}
-display_shift_store = {} # {name: {"max_side": "P"/"C", "chg_side": "P"/"C"}}
 
 _options_df = None
 _futures_df = None
 _index_df = None
+_equity_df = None
 _history_cache = {}
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -100,6 +100,20 @@ def load_index_data():
         except Exception as e: print(f"Error loading Indices: {e}")
     return _index_df
 
+def load_equity_data():
+    global _equity_df
+    if _equity_df is None:
+        try:
+            df = pd.read_csv("instruments.csv")
+            _equity_df = df[(df["segment"] == "NSE") & (df["exchange"] == "NSE")].copy()
+        except Exception as e: print(f"Error loading Equities: {e}")
+    return _equity_df
+
+def get_spot_symbol(name):
+    if name == "BANKNIFTY":
+        return INDEX_SYMBOL
+    return f"NSE:{name}"
+
 def get_active_future(name):
     df = load_futures_data()
     if df is None or df.empty: return None
@@ -122,6 +136,15 @@ def get_symbol_token(symbol):
         return None
 
     tradingsymbol = symbol.split(":", 1)[1]
+    if symbol.startswith("NSE:"):
+        df = load_equity_data()
+        if df is None or df.empty:
+            return None
+        rows = df[df["tradingsymbol"] == tradingsymbol]
+        if rows.empty:
+            return None
+        return int(rows.iloc[0]["instrument_token"])
+
     df = load_futures_data()
     if df is None or df.empty:
         return None
@@ -157,8 +180,8 @@ def get_option_quotes_with_fallback(kite, tokens, max_age_seconds=15):
 
 def get_bank_futures(kite):
     symbols = []
-    # Include Top 4 + Bank Nifty
-    for name in ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "BANKNIFTY"]:
+    # Include Bank Nifty and selected bank stocks.
+    for name in ["HDFCBANK", "ICICIBANK", "BANKNIFTY"]:
         sym = get_active_future(name)
         if sym: symbols.append(sym)
     return symbols
@@ -182,8 +205,8 @@ def get_relevant_options(name, ltp):
     strikes = sorted(options['strike'].unique())
     atm = min(strikes, key=lambda x: abs(x - ltp))
     idx = strikes.index(atm)
-    # Range: 25 for BANKNIFTY, 15 for Stocks
-    rng = 25 if name == "BANKNIFTY" else 15
+    # Range: 25 for BANKNIFTY, 10 for selected bank stocks.
+    rng = 25 if name == "BANKNIFTY" else 10
     selected = strikes[max(0, idx - rng): idx + rng + 1]
     return options[options['strike'].isin(selected)]
 
@@ -216,25 +239,25 @@ def format_shift_strike(strike, changed, suffix, oi_delta=None):
         return f"{int(strike)}{suffix}({format_oi_delta(oi_delta)}{arrow}){marker}"
     return f"No Data{suffix}"
 
-def resolve_display_shift(name, max_p_oi, max_c_oi, chg_p_oi, chg_c_oi):
-    current = {
-        "max_side": "P" if max_p_oi >= max_c_oi else "C",
-        "chg_side": "P" if chg_p_oi >= chg_c_oi else "C",
-    }
-    previous = display_shift_store.get(name)
-    display_shift_store[name] = current
-    if previous is None:
-        return "NO CHANGE"
+def format_oi_pair(label, put_text, call_text):
+    return f"{label}:{put_text} | {call_text}"
 
+def resolve_display_shift(prev, current):
+    checks = [
+        ("MAX_P", "mp"),
+        ("MAX_C", "mc"),
+        ("CHG_P", "cp"),
+        ("CHG_C", "cc"),
+    ]
     changed_parts = []
-    if previous.get("max_side") != current["max_side"]:
-        changed_parts.append(f"MAXOI_{current['max_side']}")
-    if previous.get("chg_side") != current["chg_side"]:
-        changed_parts.append(f"CHGOI_{current['chg_side']}")
 
-    if not changed_parts:
-        return "NO CHANGE"
-    return ",".join(changed_parts)
+    for label, key in checks:
+        old_value = prev.get(key, 0)
+        new_value = current.get(key, 0)
+        if old_value > 0 and new_value > 0 and old_value != new_value:
+            changed_parts.append(label)
+
+    return ",".join(changed_parts) if changed_parts else "NO CHANGE"
 
 def determine_shift_label(prev, current, price_change_pct):
     max_pe_up = current["mp"] > 0 and prev["mp"] > 0 and current["mp"] > prev["mp"]
@@ -413,42 +436,90 @@ def classify_level_position(price, level, near_threshold):
         return "NEAR"
     return "ABOVE" if float(price) > float(level) else "BELOW"
 
+def format_pivot_tag(timeframe, level_name, level_value):
+    return f"PIVOT-{timeframe}-{level_name}({format_level(level_value)})"
+
 def build_levels_line(name, price, analytics):
     if not analytics:
         return "LEVELS:NA"
 
     near_threshold = 25 if name == "BANKNIFTY" else 2
-    parts = []
+    grouped = {"NEAR": [], "ABOVE": [], "BELOW": []}
 
     pivot_checks_by_timeframe = {
-        "D": ["P"],
-        "1H": ["P", "R1", "S1"],
-        "15M": ["P", "R1", "S1"],
+        "D": ["P", "R1", "R2", "S1", "S2"],
+        "1H": ["P", "R1", "R2", "S1", "S2"],
+        "15M": ["P", "R1", "R2", "S1", "S2"],
     }
     for timeframe, level_names in pivot_checks_by_timeframe.items():
         pivot_bucket = analytics["pivot"].get(timeframe)
         if not pivot_bucket:
             continue
 
-        nearest_level = None
-        nearest_distance = None
+        nearest_by_state = {}
         for level_name in level_names:
             level_value = pivot_bucket.get(level_name)
             pivot_state = classify_level_position(price, level_value, near_threshold)
-            if pivot_state != "NEAR":
+            if pivot_state is None:
                 continue
 
             distance = abs(float(price) - float(level_value))
-            if nearest_distance is None or distance < nearest_distance:
-                nearest_distance = distance
-                nearest_level = level_name
+            previous = nearest_by_state.get(pivot_state)
+            if previous is None or distance < previous[1]:
+                nearest_by_state[pivot_state] = (level_name, distance)
 
-        if nearest_level:
-            parts.append(f"PIVOT-{timeframe}-{nearest_level}")
+        if "NEAR" in nearest_by_state:
+            level_name = nearest_by_state["NEAR"][0]
+            grouped["NEAR"].append(format_pivot_tag(timeframe, level_name, pivot_bucket.get(level_name)))
+            continue
 
-    if not parts:
+        for state in ["ABOVE", "BELOW"]:
+            if state in nearest_by_state:
+                level_name = nearest_by_state[state][0]
+                grouped[state].append(format_pivot_tag(timeframe, level_name, pivot_bucket.get(level_name)))
+
+    lines = []
+    for label in ["NEAR", "ABOVE", "BELOW"]:
+        if grouped[label]:
+            lines.append(f"{label}:{','.join(grouped[label])}")
+
+    if not lines:
         return "LEVELS:NA"
-    return "LEVELS:" + ",".join(parts)
+    return "\n".join(lines)
+
+def build_read_line(chg_p_oi, chg_c_oi, levels_line):
+    if chg_c_oi > chg_p_oi:
+        flow = "CALL_BLD▲"
+    elif chg_p_oi > chg_c_oi:
+        flow = "PUT_BLD▲"
+    else:
+        flow = "BAL_OI"
+
+    parts = [flow]
+    label_map = {"ABOVE": "ABO", "BELOW": "BEL", "NEAR": "NR"}
+    for state in ["ABOVE", "BELOW", "NEAR"]:
+        prefix = f"{state}:"
+        line = next((item for item in levels_line.splitlines() if item.startswith(prefix)), "")
+        if not line:
+            continue
+        first_tag = line[len(prefix):].split(",", 1)[0]
+        first_tag = first_tag.split("(", 1)[0]
+        if first_tag.startswith("PIVOT-"):
+            first_tag = first_tag.replace("PIVOT-", "P_", 1)
+        parts.append(f"{label_map[state]}_{first_tag}")
+
+    return "READ:" + "/".join(parts)
+
+def format_sma200_line(analytics):
+    if not analytics:
+        return "SMA200:D:NA,1H:NA,15M:NA"
+
+    sma = analytics.get("sma200", {})
+    return (
+        f"SMA200:D:{format_level(sma.get('D'))},"
+        f"1H:{format_level(sma.get('1H'))},"
+        f"15M:{format_level(sma.get('15M'))}"
+    )
 
 def format_vwap_line(name, price, analytics):
     if not analytics:
@@ -480,7 +551,7 @@ def classify_action(symbol, oi_change, price_change):
 # ================= DETECTION LOGIC =================
 
 def process_future_burst(symbol, name, ltp, oi, alerts_list):
-    if name not in ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "BANKNIFTY"]:
+    if name not in ["HDFCBANK", "ICICIBANK", "BANKNIFTY"]:
         return
 
     threshold = 100 if name == "BANKNIFTY" else 50
@@ -511,7 +582,7 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list):
     if len(history) > 20: history.pop(0)
 
 def process_option_logic(name, underlying_data, option_quotes, alerts_list, price_change_pct=0):
-    if name not in ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "BANKNIFTY"]:
+    if name not in ["HDFCBANK", "ICICIBANK", "BANKNIFTY"]:
         return 1.0, 0, 0, 0, 0, False, False, False, False, "MAXOI_P AND CHGOI_P", "NO MAJOR SHIFT", 0, 0, 0, 0
 
     threshold = 100 if name == "BANKNIFTY" else 50
@@ -610,7 +681,7 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, pric
     else: chg_shift_text[name]['pe'] = f"{int(chg_p)}" if chg_p > 0 else "No Data"
 
     current = {'mc': max_c, 'mp': max_p, 'cc': chg_c, 'cp': chg_p}
-    display_shift = resolve_display_shift(name, max_p_oi, max_c_oi, chg_p_oi, chg_c_oi)
+    display_shift = resolve_display_shift(prev, current)
     shift_label = determine_shift_label(prev, current, price_change_pct)
 
     if max_c > 0: last_strike_store[name]['mc'] = max_c
@@ -641,7 +712,8 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, pric
 
 def calculate_heatmap(kite):
     fut_symbols = get_bank_futures(kite)
-    symbols = fut_symbols + [INDEX_SYMBOL]
+    spot_symbols = [get_spot_symbol(name) for name in ["HDFCBANK", "ICICIBANK"]]
+    symbols = fut_symbols + [INDEX_SYMBOL] + spot_symbols
     data = get_symbol_quotes_with_fallback(kite, symbols)
     if not data:
         return 0, "Error: unable to fetch market data", [], [], []
@@ -650,7 +722,8 @@ def calculate_heatmap(kite):
     report = "📊 *BANK MOVEMENT (FUTURES)*\n"
     
     alias = {"BANKNIFTY": "BNF", "HDFCBANK": "HDBFU", "ICICIBANK": "ICIBFU", "SBIN": "SBINFU", "AXISBANK": "AXISFU"}
-    REPORT_BANKS = ["BANKNIFTY", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK"]
+    REPORT_BANKS = ["BANKNIFTY", "HDFCBANK", "ICICIBANK"]
+    DISPLAY_BANKS = {"BANKNIFTY", "HDFCBANK", "ICICIBANK"}
     bn_alerts = []; stock_alerts = []; bank_signals = {}
     
     # Pre-collect data for all entities
@@ -689,19 +762,25 @@ def calculate_heatmap(kite):
     direction_bn, hedge_bn = determine_direction_and_hedge(
         shift_bn, bn_change, pcr_bn, max_p_bn_delta, max_c_bn_delta, chg_p_bn_delta, chg_c_bn_delta
     )
-    analytics_bn = get_symbol_analytics(kite, bnf_future_symbol or INDEX_SYMBOL)
-    levels_bn = build_levels_line("BANKNIFTY", bn_ltp, analytics_bn)
-    vwap_line_bn = format_vwap_line("BANKNIFTY", bn_ltp, analytics_bn)
+    bn_spot_symbol = get_spot_symbol("BANKNIFTY")
+    bn_spot_ltp = data.get(bn_spot_symbol, {}).get("last_price", bn_ltp)
+    analytics_bn = get_symbol_analytics(kite, bn_spot_symbol)
+    levels_bn = build_levels_line("BANKNIFTY", bn_spot_ltp, analytics_bn)
+    vwap_line_bn = format_vwap_line("BANKNIFTY", bn_spot_ltp, analytics_bn)
+    sma200_line_bn = format_sma200_line(analytics_bn)
+    read_line_bn = build_read_line(chg_p_bn, chg_c_bn, levels_bn)
     
     arrow = "⬆️" if bn_change > 0 else "⬇️"
     report += (
         f"BNF={bn_ltp:.1f} {arrow},SHIFT:{display_shift_bn}\n"
-        f"🔵 MAX_OI:{format_shift_strike(max_p_bn, max_p_bn_changed, 'P', max_p_bn_delta)}/{format_shift_strike(max_c_bn, max_c_bn_changed, 'C', max_c_bn_delta)}\n"
-        f"🔵 CHG_OI:{format_shift_strike(chg_p_bn, chg_p_bn_changed, 'P', chg_p_bn_delta)}/{format_shift_strike(chg_c_bn, chg_c_bn_changed, 'C', chg_c_bn_delta)}\n"
+        f"{format_oi_pair('MAX_OI', format_shift_strike(max_p_bn, max_p_bn_changed, 'P', max_p_bn_delta), format_shift_strike(max_c_bn, max_c_bn_changed, 'C', max_c_bn_delta))}\n"
+        f"{format_oi_pair('CHG_OI', format_shift_strike(chg_p_bn, chg_p_bn_changed, 'P', chg_p_bn_delta), format_shift_strike(chg_c_bn, chg_c_bn_changed, 'C', chg_c_bn_delta))}\n"
         f"{vwap_line_bn}\n"
+        f"{sma200_line_bn}\n"
     )
     report += (
         f"{levels_bn}\n"
+        f"{read_line_bn}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
     )
 
@@ -739,29 +818,36 @@ def calculate_heatmap(kite):
                 chg_p_delta,
                 chg_c_delta,
             ) = process_option_logic(name, underlying_map.get(name, (pd.DataFrame(),0)), opt_quotes, stock_alerts, change)
-            analytics = get_symbol_analytics(kite, sym)
-            levels_line = build_levels_line(name, ltp, analytics)
-            vwap_line = format_vwap_line(name, ltp, analytics)
+            spot_symbol = get_spot_symbol(name)
+            spot_ltp = data.get(spot_symbol, {}).get("last_price", ltp)
+            analytics = get_symbol_analytics(kite, spot_symbol)
+            levels_line = build_levels_line(name, spot_ltp, analytics)
+            vwap_line = format_vwap_line(name, spot_ltp, analytics)
+            sma200_line = format_sma200_line(analytics)
+            read_line = build_read_line(chg_p, chg_c, levels_line)
             direction_label, hedge_label = determine_direction_and_hedge(
                 shift_label, change, pcr, max_p_delta, max_c_delta, chg_p_delta, chg_c_delta
             )
-            arrow = "⬆️" if change > 0 else "⬇️"
-            report += (
-                f"{alias[name]}={ltp:.1f} {arrow},SHIFT:{display_shift}\n"
-                f"🔵 MAX_OI:{format_shift_strike(max_p, max_p_changed, 'P', max_p_delta)}/{format_shift_strike(max_c, max_c_changed, 'C', max_c_delta)}\n"
-                f"🔵 CHG_OI:{format_shift_strike(chg_p, chg_p_changed, 'P', chg_p_delta)}/{format_shift_strike(chg_c, chg_c_changed, 'C', chg_c_delta)}\n"
-                f"{vwap_line}\n"
-            )
-            report += (
-                f"{levels_line}\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-            )
+            if name in DISPLAY_BANKS:
+                arrow = "⬆️" if change > 0 else "⬇️"
+                report += (
+                    f"{alias[name]}={ltp:.1f} {arrow},SHIFT:{display_shift}\n"
+                    f"{format_oi_pair('MAX_OI', format_shift_strike(max_p, max_p_changed, 'P', max_p_delta), format_shift_strike(max_c, max_c_changed, 'C', max_c_delta))}\n"
+                    f"{format_oi_pair('CHG_OI', format_shift_strike(chg_p, chg_p_changed, 'P', chg_p_delta), format_shift_strike(chg_c, chg_c_changed, 'C', chg_c_delta))}\n"
+                    f"{vwap_line}\n"
+                    f"{sma200_line}\n"
+                )
+                report += (
+                    f"{levels_line}\n"
+                    f"{read_line}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                )
 
     h, i = bank_signals.get("HDFCBANK"), bank_signals.get("ICICIBANK")
     if h != i:
         report += f"\n⚠️ *TUG-OF-WAR:* HDFC({h}) vs ICICI({i})"
     
-    report += f"\n\n⚖️ *SENTIMENT SCORE: {score:.2f}*"
+    report += f"\n⚖️ *SENTIMENT SCORE: {score:.2f}*"
     if abs(score) > 30 and h == i: report += "\n🌟🌟🌟 *3-STAR SIGNAL ACTIVE* 🌟🌟🌟"
     report += f"\n🚀 *STATUS: {'STRONG BULLISH' if score > 30 else 'STRONG BEARISH' if score < -30 else 'SIDEWAYS'}*"
     

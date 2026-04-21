@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 REPORT_INTERVAL_SECONDS = 300
+SCAN_INTERVAL_SECONDS = 2
 
 
 def run_scanner(kite, stop_event=None):
@@ -39,7 +40,7 @@ def run_scanner(kite, stop_event=None):
                     send_telegram_message(report)
                     last_report_time = current_timestamp
 
-                # Alerts are checked and sent every 5 seconds (current loop speed)
+                # Alerts are checked on the scanner loop cadence.
                 # ALL Alerts now go to the BANK NIFTY channel as requested
                 if bn_alerts:
                     print(f"Sending {len(bn_alerts)} Bank Nifty Alerts...")
@@ -65,10 +66,10 @@ def run_scanner(kite, stop_event=None):
             print(f"[{now.strftime('%H:%M:%S')}] Outside trading session (weekend/market closed). Scanner is silent.")
 
         if stop_event:
-            if stop_event.wait(5):
+            if stop_event.wait(SCAN_INTERVAL_SECONDS):
                 break
         else:
-            time.sleep(5)
+            time.sleep(SCAN_INTERVAL_SECONDS)
 
     print("Scanner loop stopped.")
     send_telegram_message("🛑 *Market Scanner Process Ended.*")

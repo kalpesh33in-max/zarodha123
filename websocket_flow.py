@@ -160,7 +160,7 @@ class FlowEngine:
             tokens.add(index_token)
             symbol_by_token[index_token] = INDEX_SYMBOL
 
-        report_names = ["BANKNIFTY", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK"]
+        report_names = ["BANKNIFTY", "HDFCBANK", "ICICIBANK"]
         for name in report_names:
             base_symbol = INDEX_SYMBOL if name == "BANKNIFTY" else next((s for s in fut_symbols if name in s), "")
             u_ltp = symbol_quotes.get(base_symbol, {}).get("last_price", 0)
