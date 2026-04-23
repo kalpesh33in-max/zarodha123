@@ -52,6 +52,7 @@ option_history = {}
 active_watches = {} 
 accum_history = {}
 price_velocity_store = {}
+high_conviction_store = {}
 
 # Shift Strings for Categorized Alerts
 max_shift_text = {} # {name: {'pe': text, 'ce': text}}
@@ -510,6 +511,15 @@ def build_read_line(chg_p_oi, chg_c_oi, levels_line):
 
     return "READ:" + "/".join(parts)
 
+def get_level_state(analytics, timeframe, level_name, price, near_threshold):
+    if not analytics:
+        return None
+    pivot_bucket = analytics.get("pivot", {}).get(timeframe)
+    if not pivot_bucket:
+        return None
+    level_value = pivot_bucket.get(level_name)
+    return classify_level_position(price, level_value, near_threshold)
+
 def format_sma200_line(analytics):
     if not analytics:
         return "SMA200:D:NA,1H:NA,15M:NA"
@@ -546,6 +556,105 @@ def classify_action(symbol, oi_change, price_change):
     else:
         if price_change >= 0: return "SHORT COVERING (CE) ⤴️" if is_call else "SHORT COVERING (PE) ⤴️"
         else: return "LONG UNWINDING (CE) ⤵️" if is_call else "LONG UNWINDING (PE) ⤵️"
+
+def build_high_conviction_alert(name, bias, fut_price, strike, option_type, price_change_pct, max_delta, chg_delta, analytics):
+    vwap_value = analytics.get("vwap") if analytics else None
+    pivot_value = analytics.get("pivot", {}).get("D", {}).get("P") if analytics else None
+    emoji = "🟢" if bias == "BULLISH" else "🔴"
+    writer_side = "PUT WRITER" if bias == "BULLISH" else "CALL WRITER"
+    return "\n".join([
+        "🔥 HIGH-CONVICTION ALERT 🔥",
+        f"{emoji} {name} {bias} CONFIRMATION",
+        "",
+        f"ACTION: BUY {name} {int(strike)} {option_type}",
+        f"FUTURE PRICE: {fut_price:.2f}",
+        f"PRICE CHANGE: {price_change_pct:+.2f}%",
+        "",
+        "CONFIRMATIONS:",
+        f"1. {writer_side} buildup is dominant",
+        f"2. MAX OI build: {format_oi_delta(max_delta)}",
+        f"3. CHG OI build: {format_oi_delta(chg_delta)}",
+        f"4. VWAP: {format_level(vwap_value)}",
+        f"5. Daily Pivot P: {format_level(pivot_value)}",
+        "",
+        "RISK:",
+        "SL: 30 pts",
+        "TARGET: 60 pts",
+        "",
+        f"TIME: {datetime.now().strftime('%H:%M:%S')}",
+    ])
+
+def evaluate_high_conviction(
+    name,
+    fut_price,
+    price_change_pct,
+    pcr,
+    max_c,
+    max_p,
+    chg_c,
+    chg_p,
+    shift_label,
+    max_p_delta,
+    max_c_delta,
+    chg_p_delta,
+    chg_c_delta,
+    analytics,
+):
+    if not analytics:
+        return None
+
+    near_threshold = 25 if name == "BANKNIFTY" else 2
+    vwap_state = classify_level_position(fut_price, analytics.get("vwap"), near_threshold)
+    pivot_state = get_level_state(analytics, "D", "P", fut_price, near_threshold)
+
+    bullish_threshold = 0.20 if name == "BANKNIFTY" else 0.12
+    bearish_threshold = -0.20 if name == "BANKNIFTY" else -0.12
+
+    bullish = (
+        shift_label == "STRONG BULLISH SHIFT"
+        and price_change_pct >= bullish_threshold
+        and pcr >= 1.0
+        and max_p_delta > max_c_delta
+        and chg_p_delta > chg_c_delta
+        and vwap_state == "ABOVE"
+        and pivot_state in {"ABOVE", "NEAR"}
+        and (chg_p or max_p) > 0
+    )
+    bearish = (
+        shift_label == "STRONG BEARISH SHIFT"
+        and price_change_pct <= bearish_threshold
+        and pcr <= 1.0
+        and max_c_delta > max_p_delta
+        and chg_c_delta > chg_p_delta
+        and vwap_state == "BELOW"
+        and pivot_state in {"BELOW", "NEAR"}
+        and (chg_c or max_c) > 0
+    )
+
+    if not bullish and not bearish:
+        return None
+
+    bias = "BULLISH" if bullish else "BEARISH"
+    strike = (chg_p or max_p) if bullish else (chg_c or max_c)
+    option_type = "CE" if bullish else "PE"
+    cooldown_key = f"{name}:{bias}"
+    now = datetime.now()
+    last_sent = high_conviction_store.get(cooldown_key)
+    if last_sent and (now - last_sent).total_seconds() < 300:
+        return None
+
+    high_conviction_store[cooldown_key] = now
+    return build_high_conviction_alert(
+        name,
+        bias,
+        fut_price,
+        strike,
+        option_type,
+        price_change_pct,
+        max_p_delta if bullish else max_c_delta,
+        chg_p_delta if bullish else chg_c_delta,
+        analytics,
+    )
 
 
 # ================= DETECTION LOGIC =================
@@ -716,15 +825,15 @@ def calculate_heatmap(kite):
     symbols = fut_symbols + [INDEX_SYMBOL] + spot_symbols
     data = get_symbol_quotes_with_fallback(kite, symbols)
     if not data:
-        return 0, "Error: unable to fetch market data", [], [], []
+        return 0, "", [], [], []
     
     score = 0
-    report = "📊 *BANK MOVEMENT (FUTURES)*\n"
+    report = ""
     
     alias = {"BANKNIFTY": "BNF", "HDFCBANK": "HDBFU", "ICICIBANK": "ICIBFU", "SBIN": "SBINFU", "AXISBANK": "AXISFU"}
     REPORT_BANKS = ["BANKNIFTY", "HDFCBANK", "ICICIBANK"]
     DISPLAY_BANKS = {"BANKNIFTY", "HDFCBANK", "ICICIBANK"}
-    bn_alerts = []; stock_alerts = []; bank_signals = {}
+    bn_alerts = []; stock_alerts = []; high_conviction_alerts = []; bank_signals = {}
     
     # Pre-collect data for all entities
     all_opt_tokens = []; underlying_map = {}
@@ -769,6 +878,24 @@ def calculate_heatmap(kite):
     vwap_line_bn = format_vwap_line("BANKNIFTY", bn_spot_ltp, analytics_bn)
     sma200_line_bn = format_sma200_line(analytics_bn)
     read_line_bn = build_read_line(chg_p_bn, chg_c_bn, levels_bn)
+    high_conviction_bn = evaluate_high_conviction(
+        "BANKNIFTY",
+        bn_ltp,
+        bn_change,
+        pcr_bn,
+        max_c_bn,
+        max_p_bn,
+        chg_c_bn,
+        chg_p_bn,
+        shift_bn,
+        max_p_bn_delta,
+        max_c_bn_delta,
+        chg_p_bn_delta,
+        chg_c_bn_delta,
+        analytics_bn,
+    )
+    if high_conviction_bn:
+        high_conviction_alerts.append(high_conviction_bn)
     
     arrow = "⬆️" if bn_change > 0 else "⬇️"
     report += (
@@ -828,6 +955,24 @@ def calculate_heatmap(kite):
             direction_label, hedge_label = determine_direction_and_hedge(
                 shift_label, change, pcr, max_p_delta, max_c_delta, chg_p_delta, chg_c_delta
             )
+            high_conviction = evaluate_high_conviction(
+                name,
+                ltp,
+                change,
+                pcr,
+                max_c,
+                max_p,
+                chg_c,
+                chg_p,
+                shift_label,
+                max_p_delta,
+                max_c_delta,
+                chg_p_delta,
+                chg_c_delta,
+                analytics,
+            )
+            if high_conviction:
+                high_conviction_alerts.append(high_conviction)
             if name in DISPLAY_BANKS:
                 arrow = "⬆️" if change > 0 else "⬇️"
                 report += (
@@ -851,4 +996,4 @@ def calculate_heatmap(kite):
     if abs(score) > 30 and h == i: report += "\n🌟🌟🌟 *3-STAR SIGNAL ACTIVE* 🌟🌟🌟"
     report += f"\n🚀 *STATUS: {'STRONG BULLISH' if score > 30 else 'STRONG BEARISH' if score < -30 else 'SIDEWAYS'}*"
     
-    return score, report, bn_alerts, stock_alerts, []
+    return score, report, bn_alerts, stock_alerts, high_conviction_alerts
