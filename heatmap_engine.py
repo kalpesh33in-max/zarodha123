@@ -663,7 +663,7 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list):
     if name not in ["HDFCBANK", "ICICIBANK", "BANKNIFTY"]:
         return
 
-    threshold = 100 if name == "BANKNIFTY" else 50
+    threshold = 200 if name == "BANKNIFTY" else 100
     lot_size = LOT_SIZES.get(name, 1)
     now = datetime.now()
     key = f"FUT_{symbol}"
@@ -694,7 +694,7 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, pric
     if name not in ["HDFCBANK", "ICICIBANK", "BANKNIFTY"]:
         return 1.0, 0, 0, 0, 0, False, False, False, False, "MAXOI_P AND CHGOI_P", "NO MAJOR SHIFT", 0, 0, 0, 0
 
-    threshold = 100 if name == "BANKNIFTY" else 50
+    threshold = 200 if name == "BANKNIFTY" else 100
     opt_df, u_ltp = underlying_data
     if opt_df.empty: return 1.0, 0, 0, 0, 0, False, False, False, False, "MAXOI_P AND CHGOI_P", "NO MAJOR SHIFT", 0, 0, 0, 0
     total_call = total_put = 0
