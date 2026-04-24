@@ -674,7 +674,7 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list):
     if prev_oi > 0:
         tick_lots = int(abs(oi - prev_oi) / lot_size)
         if tick_lots >= threshold and key not in active_watches:
-            active_watches[key] = {"start_oi": prev_oi, "start_price": prev_price, "end_time": now + timedelta(minutes=1), "symbol": symbol, "name": name}
+            active_watches[key] = {"start_oi": prev_oi, "start_price": prev_price, "end_time": now + timedelta(seconds=15), "symbol": symbol, "name": name}
     if key in active_watches:
         watch = active_watches[key]
         if now >= watch["end_time"]:
@@ -738,7 +738,7 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, pric
         if prev_oi > 0:
             tick_lots = int(abs(curr_oi - prev_oi) / lot_size)
             if tick_lots >= threshold and t_int not in active_watches:
-                active_watches[t_int] = {"start_oi": prev_oi, "start_price": prev_price, "end_time": now + timedelta(minutes=1), "symbol": row['tradingsymbol'], "underlying": name}
+                active_watches[t_int] = {"start_oi": prev_oi, "start_price": prev_price, "end_time": now + timedelta(seconds=15), "symbol": row['tradingsymbol'], "underlying": name}
         
         if t_int in active_watches:
             watch = active_watches[t_int]
