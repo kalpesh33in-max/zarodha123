@@ -63,10 +63,33 @@ _futures_df = None
 _index_df = None
 _equity_df = None
 _history_cache = {}
+_last_logged_expiry = {}
 IST = ZoneInfo("Asia/Kolkata")
 
 
 # ================= HELPERS =================
+
+def get_preferred_rollover_expiry(expiries):
+    valid_expiries = sorted(exp for exp in expiries if pd.notna(exp))
+    if not valid_expiries:
+        return None
+
+    now_ist = datetime.now(IST)
+    current_month = now_ist.month
+    current_year = now_ist.year
+
+    future_months = [
+        exp for exp in valid_expiries
+        if (int(exp.year), int(exp.month)) > (current_year, current_month)
+    ]
+    if future_months:
+        return future_months[0]
+
+    future_days = [exp for exp in valid_expiries if exp.date() >= now_ist.date()]
+    if future_days:
+        return future_days[0]
+
+    return valid_expiries[0]
 
 def add_global_alert(msg, name=None):
     # Burst alerts logic if still needed, currently suppressed in report
@@ -120,8 +143,19 @@ def get_active_future(name):
     if df is None or df.empty: return None
     futures = df[df['name'] == name]
     if futures.empty: return None
-    nearest_expiry = futures['expiry'].min()
-    return "NFO:" + futures[futures['expiry'] == nearest_expiry].iloc[0]['tradingsymbol']
+    preferred_expiry = get_preferred_rollover_expiry(futures['expiry'].unique())
+    if preferred_expiry is None:
+        return None
+    selected = futures[futures['expiry'] == preferred_expiry]
+    if selected.empty:
+        return None
+    tradingsymbol = selected.iloc[0]['tradingsymbol']
+    log_key = f"future:{name}"
+    expiry_text = preferred_expiry.strftime("%d-%m-%Y")
+    if _last_logged_expiry.get(log_key) != expiry_text:
+        print(f"Selected future expiry for {name}: {expiry_text} ({tradingsymbol})")
+        _last_logged_expiry[log_key] = expiry_text
+    return "NFO:" + tradingsymbol
 
 def get_symbol_token(symbol):
     if symbol == INDEX_SYMBOL:
@@ -191,15 +225,18 @@ def get_relevant_options(name, ltp):
     df = load_options_data()
     if df is None or df.empty: return pd.DataFrame()
     
-    stock_ref = df[df['name'] == 'HDFCBANK']
-    if stock_ref.empty:
-        options = df[df['name'] == name]
-        if options.empty: return pd.DataFrame()
-        expiry = sorted(options['expiry'].unique())[0]
-    else:
-        expiry = sorted(stock_ref['expiry'].unique())[0]
-    
     options = df[df['name'] == name]
+    if options.empty: return pd.DataFrame()
+
+    expiry = get_preferred_rollover_expiry(options['expiry'].unique())
+    if expiry is None:
+        return pd.DataFrame()
+    log_key = f"options:{name}"
+    expiry_text = expiry.strftime("%d-%m-%Y")
+    if _last_logged_expiry.get(log_key) != expiry_text:
+        print(f"Selected options expiry for {name}: {expiry_text}")
+        _last_logged_expiry[log_key] = expiry_text
+
     options = options[options['expiry'] == expiry]
     if options.empty: return pd.DataFrame()
     
