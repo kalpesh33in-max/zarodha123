@@ -219,6 +219,11 @@ def get_bank_futures(kite):
     for name in ["HDFCBANK", "ICICIBANK", "BANKNIFTY"]:
         sym = get_active_future(name)
         if sym: symbols.append(sym)
+    summary_key = "future_summary"
+    summary_text = ", ".join(symbols) if symbols else "none"
+    if _last_logged_expiry.get(summary_key) != summary_text:
+        print(f"Selected tracked futures: {summary_text}")
+        _last_logged_expiry[summary_key] = summary_text
     return symbols
 
 def get_relevant_options(name, ltp):
