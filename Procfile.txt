@@ -1,2 +1,1 @@
-web: python token_server.py
-worker: python login_scheduler.py
+web: python run_kite.py

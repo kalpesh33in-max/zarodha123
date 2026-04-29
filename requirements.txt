@@ -5,6 +5,4 @@ schedule
 websocket-client
 requests
 pyotp
-selenium
-webdriver-manager
 gunicorn

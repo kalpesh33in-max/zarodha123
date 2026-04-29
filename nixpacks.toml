@@ -1,8 +1,8 @@
 [phases.setup]
-nixPkgs = ["python311", "google-chrome", "chromedriver"]
+nixPkgs = ["python311"]
 
 [phases.install]
 cmds = ["pip install -r requirements.txt"]
 
 [start]
-cmd = "python token_server.py"
+cmd = "python run_kite.py"
