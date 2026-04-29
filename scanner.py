@@ -27,7 +27,7 @@ def run_scanner(kite, stop_event=None):
         if start_time <= now_time <= end_time and now.weekday() <= 4:
 
             try:
-                score, report, bn_alerts, stock_alerts, high_conviction_alerts = calculate_heatmap(kite)
+                score, report, bn_alerts, stock_alerts, gap_alerts = calculate_heatmap(kite)
 
                 # Alerts are checked on the scanner loop cadence.
                 # ALL Alerts now go to the BANK NIFTY channel as requested
@@ -41,10 +41,10 @@ def run_scanner(kite, stop_event=None):
                     for alert in stock_alerts:
                         send_telegram_message(alert, chat_id=TELE_CHAT_ID_BN, token=TELE_TOKEN_BN)
 
-                if high_conviction_alerts:
-                    print(f"Sending {len(high_conviction_alerts)} High-Conviction Alerts...")
-                    for alert in high_conviction_alerts:
-                        send_telegram_message(alert)
+                if gap_alerts:
+                    print(f"Sending {len(gap_alerts)} May Future Gap Reports...")
+                    for alert in gap_alerts:
+                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_BN, token=TELE_TOKEN_BN)
 
             except Exception as e:
                 print(f"Error in scanner loop: {e}")

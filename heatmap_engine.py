@@ -24,8 +24,14 @@ BANK_WEIGHTS = {
 }
 
 LOT_SIZES = {
+    "NIFTY": 65,
+    "BANKNIFTY": 30,
+    "FINNIFTY": 60,
+    "MIDCPNIFTY": 120,
+    "SENSEX": 20,
     "HDFCBANK": 550,
     "ICICIBANK": 700,
+    "RELIANCE": 500,
     "SBIN": 750,
     "AXISBANK": 625,
     "KOTAKBANK": 2000,
@@ -37,9 +43,22 @@ LOT_SIZES = {
     "PNB": 4000,
     "IDFCFIRSTB": 7500,
     "YESBANK": 8000,
-    "UNIONBANK": 5000,
-    "BANKNIFTY": 30
+    "UNIONBANK": 5000
 }
+
+INDEX_BURST_NAMES = {"BANKNIFTY", "NIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"}
+STOCK_BURST_NAMES = {"HDFCBANK", "ICICIBANK", "RELIANCE"}
+BURST_TRACK_NAMES = [
+    "BANKNIFTY",
+    "NIFTY",
+    "FINNIFTY",
+    "MIDCPNIFTY",
+    "SENSEX",
+    "HDFCBANK",
+    "ICICIBANK",
+    "RELIANCE",
+]
+WEEKLY_AND_MONTHLY_OPTION_NAMES = {"NIFTY", "SENSEX"}
 
 BANK_NAMES = list(BANK_WEIGHTS.keys())
 INDEX_SYMBOL = "NSE:NIFTY BANK"
@@ -53,6 +72,7 @@ active_watches = {}
 accum_history = {}
 price_velocity_store = {}
 high_conviction_store = {}
+gap_alert_store = {}
 
 # Shift Strings for Categorized Alerts
 max_shift_text = {} # {name: {'pe': text, 'ce': text}}
@@ -65,6 +85,9 @@ _equity_df = None
 _history_cache = {}
 _last_logged_expiry = {}
 IST = ZoneInfo("Asia/Kolkata")
+MAY_FUTURE_GAP_THRESHOLD_PCT = 3.0
+GAP_ALERT_COOLDOWN_SECONDS = 300
+INDEX_FUTURE_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "SENSEX50"}
 
 
 # ================= HELPERS =================
@@ -91,6 +114,65 @@ def get_preferred_rollover_expiry(expiries):
 
     return valid_expiries[0]
 
+
+def is_index_underlying(name):
+    return name in INDEX_BURST_NAMES
+
+
+def is_burst_underlying(name):
+    return name in INDEX_BURST_NAMES or name in STOCK_BURST_NAMES
+
+
+def get_burst_threshold(name):
+    return 200 if is_index_underlying(name) else 100
+
+
+def get_monthly_expiry(expiries, rollover_days=1):
+    valid_expiries = sorted(exp for exp in expiries if pd.notna(exp))
+    if not valid_expiries:
+        return None
+
+    now_ist = datetime.now(IST)
+    month_last_expiries = {}
+    for expiry in valid_expiries:
+        month_last_expiries[(int(expiry.year), int(expiry.month))] = expiry
+
+    ordered_monthlies = [month_last_expiries[key] for key in sorted(month_last_expiries)]
+    current_monthly = None
+    for expiry in ordered_monthlies:
+        if (int(expiry.year), int(expiry.month)) == (now_ist.year, now_ist.month):
+            current_monthly = expiry
+            break
+
+    if current_monthly is not None:
+        rollover_date = current_monthly.date() - timedelta(days=rollover_days)
+        if now_ist.date() >= rollover_date:
+            for expiry in ordered_monthlies:
+                if expiry > current_monthly:
+                    return expiry
+        elif current_monthly.date() >= now_ist.date():
+            return current_monthly
+
+    future_monthlies = [exp for exp in ordered_monthlies if exp.date() >= now_ist.date()]
+    if future_monthlies:
+        return future_monthlies[0]
+    return ordered_monthlies[-1]
+
+
+def get_weekly_and_monthly_expiries(expiries):
+    valid_expiries = sorted(exp for exp in expiries if pd.notna(exp))
+    if not valid_expiries:
+        return []
+
+    now_ist = datetime.now(IST)
+    weekly = next((exp for exp in valid_expiries if exp.date() >= now_ist.date()), None)
+    monthly = get_monthly_expiry(valid_expiries)
+    selected = []
+    for expiry in (weekly, monthly):
+        if expiry is not None and expiry not in selected:
+            selected.append(expiry)
+    return selected
+
 def add_global_alert(msg, name=None):
     # Burst alerts logic if still needed, currently suppressed in report
     pass
@@ -100,7 +182,7 @@ def load_options_data():
     if _options_df is None:
         try:
             df = pd.read_csv("instruments.csv")
-            _options_df = df[df['segment'].isin(['NFO-OPT'])].copy()
+            _options_df = df[df['segment'].isin(['NFO-OPT', 'BFO-OPT'])].copy()
             _options_df['expiry'] = pd.to_datetime(_options_df['expiry'], dayfirst=True)
         except Exception as e: print(f"Error loading Options: {e}")
     return _options_df
@@ -114,6 +196,17 @@ def load_futures_data():
             _futures_df['expiry'] = pd.to_datetime(_futures_df['expiry'], dayfirst=True)
         except Exception as e: print(f"Error loading Futures: {e}")
     return _futures_df
+
+def load_stock_futures_data():
+    df = load_futures_data()
+    if df is None or df.empty:
+        return pd.DataFrame()
+    return df[
+        (df["exchange"] == "NFO")
+        & (df["segment"] == "NFO-FUT")
+        & (df["name"].notna())
+        & (~df["name"].isin(INDEX_FUTURE_NAMES))
+    ].copy()
 
 def load_index_data():
     global _index_df
@@ -143,7 +236,7 @@ def get_active_future(name):
     if df is None or df.empty: return None
     futures = df[df['name'] == name]
     if futures.empty: return None
-    preferred_expiry = get_preferred_rollover_expiry(futures['expiry'].unique())
+    preferred_expiry = get_monthly_expiry(futures['expiry'].unique())
     if preferred_expiry is None:
         return None
     selected = futures[futures['expiry'] == preferred_expiry]
@@ -215,8 +308,7 @@ def get_option_quotes_with_fallback(kite, tokens, max_age_seconds=15):
 
 def get_bank_futures(kite):
     symbols = []
-    # Include Bank Nifty and selected bank stocks.
-    for name in ["HDFCBANK", "ICICIBANK", "BANKNIFTY"]:
+    for name in BURST_TRACK_NAMES:
         sym = get_active_future(name)
         if sym: symbols.append(sym)
     summary_key = "future_summary"
@@ -226,6 +318,26 @@ def get_bank_futures(kite):
         _last_logged_expiry[summary_key] = summary_text
     return symbols
 
+def get_stock_may_future_symbols():
+    futures = load_stock_futures_data()
+    if futures.empty:
+        return []
+
+    now_ist = datetime.now(IST)
+    may_futures = futures[
+        (futures["expiry"].dt.year == now_ist.year)
+        & (futures["expiry"].dt.month == 5)
+    ].copy()
+    if may_futures.empty:
+        return []
+
+    may_futures = may_futures.sort_values(["name", "expiry", "tradingsymbol"])
+    selected = may_futures.groupby("name", as_index=False).first()
+    return [
+        (row["name"], f"NFO:{row['tradingsymbol']}")
+        for _, row in selected.iterrows()
+    ]
+
 def get_relevant_options(name, ltp):
     df = load_options_data()
     if df is None or df.empty: return pd.DataFrame()
@@ -233,28 +345,33 @@ def get_relevant_options(name, ltp):
     options = df[df['name'] == name]
     if options.empty: return pd.DataFrame()
 
-    expiry = get_preferred_rollover_expiry(options['expiry'].unique())
-    if expiry is None:
+    if name in WEEKLY_AND_MONTHLY_OPTION_NAMES:
+        selected_expiries = get_weekly_and_monthly_expiries(options['expiry'].unique())
+    else:
+        monthly_expiry = get_monthly_expiry(options['expiry'].unique())
+        selected_expiries = [monthly_expiry] if monthly_expiry is not None else []
+
+    if not selected_expiries:
         return pd.DataFrame()
     log_key = f"options:{name}"
-    expiry_text = expiry.strftime("%d-%m-%Y")
+    expiry_text = ", ".join(exp.strftime("%d-%m-%Y") for exp in selected_expiries)
     if _last_logged_expiry.get(log_key) != expiry_text:
         print(f"Selected options expiry for {name}: {expiry_text}")
         _last_logged_expiry[log_key] = expiry_text
 
-    options = options[options['expiry'] == expiry]
+    options = options[options['expiry'].isin(selected_expiries)]
     if options.empty: return pd.DataFrame()
     
     strikes = sorted(options['strike'].unique())
     atm = min(strikes, key=lambda x: abs(x - ltp))
     idx = strikes.index(atm)
     # Range: 25 for BANKNIFTY, 10 for selected bank stocks.
-    rng = 25 if name == "BANKNIFTY" else 10
+    rng = 25 if is_index_underlying(name) else 10
     selected = strikes[max(0, idx - rng): idx + rng + 1]
-    return options[options['strike'].isin(selected)]
+    return options[options['strike'].isin(selected)].copy()
 
 def get_strength_label(lots, name="BANKNIFTY"):
-    if name == "BANKNIFTY":
+    if is_index_underlying(name):
         if lots >= 400: return "🚀 BLAST 🚀"
         elif lots >= 300: return "🌟 AWESOME"
         elif lots >= 200: return "✅ VERY GOOD"
@@ -698,14 +815,81 @@ def evaluate_high_conviction(
         analytics,
     )
 
+def _format_gap_signal(gap_pct):
+    return "FUTURE ABOVE SPOT" if gap_pct > 0 else "FUTURE BELOW SPOT"
+
+def build_may_future_gap_alerts(kite):
+    future_symbols = get_stock_may_future_symbols()
+    if not future_symbols:
+        return []
+
+    symbol_pairs = []
+    for name, future_symbol in future_symbols:
+        symbol_pairs.append((name, get_spot_symbol(name), future_symbol))
+
+    quote_symbols = []
+    for _, spot_symbol, future_symbol in symbol_pairs:
+        quote_symbols.append(spot_symbol)
+        quote_symbols.append(future_symbol)
+
+    data = get_symbol_quotes_with_fallback(kite, quote_symbols)
+    if not data:
+        return []
+
+    now = datetime.now()
+    rows = []
+    for name, spot_symbol, future_symbol in symbol_pairs:
+        spot_price = data.get(spot_symbol, {}).get("last_price", 0)
+        future_price = data.get(future_symbol, {}).get("last_price", 0)
+        if spot_price <= 0 or future_price <= 0:
+            continue
+
+        gap_pct = ((future_price - spot_price) / spot_price) * 100
+        if abs(gap_pct) < MAY_FUTURE_GAP_THRESHOLD_PCT:
+            continue
+
+        last_sent = gap_alert_store.get(name)
+        if last_sent and (now - last_sent).total_seconds() < GAP_ALERT_COOLDOWN_SECONDS:
+            continue
+
+        gap_alert_store[name] = now
+        rows.append(
+            {
+                "name": name,
+                "spot_price": spot_price,
+                "future_price": future_price,
+                "gap_pct": gap_pct,
+            }
+        )
+
+    if not rows:
+        return []
+
+    rows.sort(key=lambda item: abs(item["gap_pct"]), reverse=True)
+
+    alerts = []
+    chunk_size = 20
+    for i in range(0, len(rows), chunk_size):
+        chunk = rows[i:i + chunk_size]
+        body = "\n".join(
+            [
+                f"{item['name']}: Spot {item['spot_price']:.2f} | "
+                f"May Fut {item['future_price']:.2f} | "
+                f"Gap {item['gap_pct']:+.2f}% | {_format_gap_signal(item['gap_pct'])}"
+                for item in chunk
+            ]
+        )
+        alerts.append(f"📊 MAY FUTURE GAP REPORT\n\n{body}")
+    return alerts
+
 
 # ================= DETECTION LOGIC =================
 
 def process_future_burst(symbol, name, ltp, oi, alerts_list):
-    if name not in ["HDFCBANK", "ICICIBANK", "BANKNIFTY"]:
+    if not is_burst_underlying(name):
         return
 
-    threshold = 200 if name == "BANKNIFTY" else 100
+    threshold = get_burst_threshold(name)
     lot_size = LOT_SIZES.get(name, 1)
     now = datetime.now()
     key = f"FUT_{symbol}"
@@ -733,10 +917,10 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list):
     if len(history) > 20: history.pop(0)
 
 def process_option_logic(name, underlying_data, option_quotes, alerts_list, price_change_pct=0):
-    if name not in ["HDFCBANK", "ICICIBANK", "BANKNIFTY"]:
+    if not is_burst_underlying(name):
         return 1.0, 0, 0, 0, 0, False, False, False, False, "MAXOI_P AND CHGOI_P", "NO MAJOR SHIFT", 0, 0, 0, 0
 
-    threshold = 200 if name == "BANKNIFTY" else 100
+    threshold = get_burst_threshold(name)
     opt_df, u_ltp = underlying_data
     if opt_df.empty: return 1.0, 0, 0, 0, 0, False, False, False, False, "MAXOI_P AND CHGOI_P", "NO MAJOR SHIFT", 0, 0, 0, 0
     total_call = total_put = 0
@@ -874,13 +1058,14 @@ def calculate_heatmap(kite):
     
     alias = {"BANKNIFTY": "BNF", "HDFCBANK": "HDBFU", "ICICIBANK": "ICIBFU", "SBIN": "SBINFU", "AXISBANK": "AXISFU"}
     REPORT_BANKS = ["BANKNIFTY", "HDFCBANK", "ICICIBANK"]
+    BURST_ALERT_NAMES = BURST_TRACK_NAMES
     DISPLAY_BANKS = {"BANKNIFTY", "HDFCBANK", "ICICIBANK"}
-    bn_alerts = []; stock_alerts = []; high_conviction_alerts = []; bank_signals = {}
+    bn_alerts = []; stock_alerts = []; gap_alerts = []; bank_signals = {}
     
     # Pre-collect data for all entities
     all_opt_tokens = []; underlying_map = {}
     bnf_future_symbol = next((s for s in fut_symbols if "BANKNIFTY" in s), "")
-    for name in REPORT_BANKS:
+    for name in BURST_ALERT_NAMES:
         base_symbol = bnf_future_symbol if name == "BANKNIFTY" else next((s for s in fut_symbols if name in s), "")
         u_ltp = data.get(base_symbol, {}).get("last_price", 0)
         if u_ltp > 0:
@@ -920,25 +1105,6 @@ def calculate_heatmap(kite):
     vwap_line_bn = format_vwap_line("BANKNIFTY", bn_spot_ltp, analytics_bn)
     sma200_line_bn = format_sma200_line(analytics_bn)
     read_line_bn = build_read_line(chg_p_bn, chg_c_bn, levels_bn)
-    high_conviction_bn = evaluate_high_conviction(
-        "BANKNIFTY",
-        bn_ltp,
-        bn_change,
-        pcr_bn,
-        max_c_bn,
-        max_p_bn,
-        chg_c_bn,
-        chg_p_bn,
-        shift_bn,
-        max_p_bn_delta,
-        max_c_bn_delta,
-        chg_p_bn_delta,
-        chg_c_bn_delta,
-        analytics_bn,
-    )
-    if high_conviction_bn:
-        high_conviction_alerts.append(high_conviction_bn)
-    
     arrow = "⬆️" if bn_change > 0 else "⬇️"
     report += (
         f"BNF={bn_ltp:.1f} {arrow},SHIFT:{display_shift_bn}\n"
@@ -953,7 +1119,7 @@ def calculate_heatmap(kite):
         f"━━━━━━━━━━━━━━━━━━━━\n"
     )
 
-    for name in REPORT_BANKS:
+    for name in BURST_ALERT_NAMES:
         sym = next((s for s in fut_symbols if name in s), None)
         if not sym or sym not in data: continue
         d = data[sym]; ltp, open_p, oi = d["last_price"], d["ohlc"]["open"], d.get("oi", 0)
@@ -965,7 +1131,7 @@ def calculate_heatmap(kite):
             bank_signals[name] = "BUY" if change > 0.3 else "SELL" if change < -0.3 else "NEUTRAL"
         
         # Determine which alert list to use (BNF future bursts go to bn_alerts)
-        target_alerts = bn_alerts if name == "BANKNIFTY" else stock_alerts
+        target_alerts = bn_alerts if is_index_underlying(name) else stock_alerts
         process_future_burst(sym, name, ltp, oi, target_alerts)
         
         # PCR and Max OI reporting (Skip re-processing BNF options since done above, but still need the string for other banks)
@@ -997,24 +1163,6 @@ def calculate_heatmap(kite):
             direction_label, hedge_label = determine_direction_and_hedge(
                 shift_label, change, pcr, max_p_delta, max_c_delta, chg_p_delta, chg_c_delta
             )
-            high_conviction = evaluate_high_conviction(
-                name,
-                ltp,
-                change,
-                pcr,
-                max_c,
-                max_p,
-                chg_c,
-                chg_p,
-                shift_label,
-                max_p_delta,
-                max_c_delta,
-                chg_p_delta,
-                chg_c_delta,
-                analytics,
-            )
-            if high_conviction:
-                high_conviction_alerts.append(high_conviction)
             if name in DISPLAY_BANKS:
                 arrow = "⬆️" if change > 0 else "⬇️"
                 report += (
@@ -1037,5 +1185,6 @@ def calculate_heatmap(kite):
     report += f"\n⚖️ *SENTIMENT SCORE: {score:.2f}*"
     if abs(score) > 30 and h == i: report += "\n🌟🌟🌟 *3-STAR SIGNAL ACTIVE* 🌟🌟🌟"
     report += f"\n🚀 *STATUS: {'STRONG BULLISH' if score > 30 else 'STRONG BEARISH' if score < -30 else 'SIDEWAYS'}*"
-    
-    return score, report, bn_alerts, stock_alerts, high_conviction_alerts
+
+    gap_alerts = build_may_future_gap_alerts(kite)
+    return score, report, bn_alerts, stock_alerts, gap_alerts

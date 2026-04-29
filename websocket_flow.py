@@ -121,7 +121,7 @@ class FlowEngine:
             return True
 
     def _build_subscription_map(self):
-        from heatmap_engine import get_bank_futures, get_relevant_options, load_futures_data, load_options_data
+        from heatmap_engine import BURST_TRACK_NAMES, get_bank_futures, get_relevant_options, load_futures_data, load_options_data
 
         if self._tokens:
             return self._tokens, self._symbol_by_token
@@ -160,8 +160,7 @@ class FlowEngine:
             tokens.add(index_token)
             symbol_by_token[index_token] = INDEX_SYMBOL
 
-        report_names = ["BANKNIFTY", "HDFCBANK", "ICICIBANK"]
-        for name in report_names:
+        for name in BURST_TRACK_NAMES:
             base_symbol = INDEX_SYMBOL if name == "BANKNIFTY" else next((s for s in fut_symbols if name in s), "")
             u_ltp = symbol_quotes.get(base_symbol, {}).get("last_price", 0)
             if u_ltp <= 0:
