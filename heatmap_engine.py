@@ -58,8 +58,6 @@ BURST_TRACK_NAMES = [
     "ICICIBANK",
     "RELIANCE",
 ]
-WEEKLY_AND_MONTHLY_OPTION_NAMES = {"NIFTY", "SENSEX"}
-
 BANK_NAMES = list(BANK_WEIGHTS.keys())
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 
@@ -242,13 +240,17 @@ def get_active_future(name):
     selected = futures[futures['expiry'] == preferred_expiry]
     if selected.empty:
         return None
-    tradingsymbol = selected.iloc[0]['tradingsymbol']
+    row = selected.iloc[0]
+    tradingsymbol = row['tradingsymbol']
+    exchange = str(row.get('exchange', '') or '').strip()
     log_key = f"future:{name}"
     expiry_text = preferred_expiry.strftime("%d-%m-%Y")
     if _last_logged_expiry.get(log_key) != expiry_text:
-        print(f"Selected future expiry for {name}: {expiry_text} ({tradingsymbol})")
+        print(f"Selected future expiry for {name}: {expiry_text} ({exchange}:{tradingsymbol})")
         _last_logged_expiry[log_key] = expiry_text
-    return "NFO:" + tradingsymbol
+    if not exchange:
+        exchange = "NFO"
+    return f"{exchange}:{tradingsymbol}"
 
 def get_symbol_token(symbol):
     if symbol == INDEX_SYMBOL:
@@ -345,11 +347,8 @@ def get_relevant_options(name, ltp):
     options = df[df['name'] == name]
     if options.empty: return pd.DataFrame()
 
-    if name in WEEKLY_AND_MONTHLY_OPTION_NAMES:
-        selected_expiries = get_weekly_and_monthly_expiries(options['expiry'].unique())
-    else:
-        monthly_expiry = get_monthly_expiry(options['expiry'].unique())
-        selected_expiries = [monthly_expiry] if monthly_expiry is not None else []
+    monthly_expiry = get_monthly_expiry(options['expiry'].unique())
+    selected_expiries = [monthly_expiry] if monthly_expiry is not None else []
 
     if not selected_expiries:
         return pd.DataFrame()
@@ -365,8 +364,8 @@ def get_relevant_options(name, ltp):
     strikes = sorted(options['strike'].unique())
     atm = min(strikes, key=lambda x: abs(x - ltp))
     idx = strikes.index(atm)
-    # Range: 25 for BANKNIFTY, 10 for selected bank stocks.
-    rng = 25 if is_index_underlying(name) else 10
+    # Range: 15 for indices, 6 for tracked stocks.
+    rng = 15 if is_index_underlying(name) else 6
     selected = strikes[max(0, idx - rng): idx + rng + 1]
     return options[options['strike'].isin(selected)].copy()
 

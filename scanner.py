@@ -8,7 +8,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
-SCAN_INTERVAL_SECONDS = 2
+SCAN_INTERVAL_SECONDS = 5
 
 
 def run_scanner(kite, stop_event=None):
@@ -44,7 +44,7 @@ def run_scanner(kite, stop_event=None):
                 if gap_alerts:
                     print(f"Sending {len(gap_alerts)} May Future Gap Reports...")
                     for alert in gap_alerts:
-                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_BN, token=TELE_TOKEN_BN)
+                        send_telegram_message(alert)
 
             except Exception as e:
                 print(f"Error in scanner loop: {e}")
