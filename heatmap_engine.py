@@ -1152,6 +1152,8 @@ def calculate_heatmap(kite):
                 chg_p_delta,
                 chg_c_delta,
             ) = process_option_logic(name, underlying_map.get(name, (pd.DataFrame(),0)), opt_quotes, stock_alerts, change)
+            if name not in DISPLAY_BANKS:
+                continue
             spot_symbol = get_spot_symbol(name)
             spot_ltp = data.get(spot_symbol, {}).get("last_price", ltp)
             analytics = get_symbol_analytics(kite, spot_symbol)
