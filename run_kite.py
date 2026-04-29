@@ -119,14 +119,22 @@ def login():
 # --- Execution ---
 
 if __name__ == "__main__":
-    # 1. Start Scheduler Thread
+    # 1. Start Scheduler Thread (Background tasks)
     sched_thread = threading.Thread(target=run_scheduler_loop, daemon=True)
     sched_thread.start()
 
-    # 2. Attempt Auto-Start if token exists
+    # 2. Start Scanner Boot Thread
+    # Moving this to a thread ensures the Flask server (below) starts INSTANTLY
     if AUTO_START_SCANNER:
-        validate_and_start_scanner("Initial Boot")
+        boot_thread = threading.Thread(
+            target=validate_and_start_scanner, 
+            args=("Initial Boot",), 
+            daemon=True
+        )
+        boot_thread.start()
 
-    # 3. Run Flask Server
+    # 3. Run Flask Server (Main Thread)
+    # Railway needs this to start immediately to pass health checks
     port = int(os.getenv("PORT", 8080))
+    print(f"Starting Web Server on port {port}...")
     app.run(host="0.0.0.0", port=port)
