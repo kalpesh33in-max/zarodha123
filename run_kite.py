@@ -17,6 +17,7 @@ from telegram_utils import send_telegram_message
 IST = ZoneInfo("Asia/Kolkata")
 TOKEN_FILE = "access_token.txt"
 AUTO_START_SCANNER = os.getenv("AUTO_START_SCANNER", "true").lower() in ("true", "1", "yes")
+AUTO_START_BACKGROUND = os.getenv("AUTO_START_BACKGROUND", "true").lower() in ("true", "1", "yes")
 
 app = Flask(__name__)
 kite = KiteConnect(api_key=API_KEY)
@@ -25,6 +26,7 @@ kite = KiteConnect(api_key=API_KEY)
 scanner_thread = None
 flow_engine = None
 scanner_lock = threading.Lock()
+background_started = False
 
 # --- Utility Functions ---
 
@@ -95,21 +97,30 @@ def run_scheduler_loop():
         time.sleep(10)
 
 # --- Gunicorn Hooks / App Initialization ---
-def on_starting(server, worker):
-    """ Called in the master process before workers are forked. """
-    print("Gunicorn master: Starting background tasks...")
-    # Start Scheduler Thread
+def start_background_services(source):
+    global background_started
+    with scanner_lock:
+        if background_started:
+            print(f"[{source}] Background services already started.")
+            return
+        background_started = True
+
+    print(f"[{source}] Starting background tasks...")
     sched_thread = threading.Thread(target=run_scheduler_loop, daemon=True)
     sched_thread.start()
 
-    # Attempt to start scanner if token exists
     if AUTO_START_SCANNER:
         boot_thread = threading.Thread(
-            target=validate_and_start_scanner, 
-            args=("Initial Boot (Gunicorn)",), 
+            target=validate_and_start_scanner,
+            args=(source,),
             daemon=True
         )
         boot_thread.start()
+
+
+def on_starting(server, worker):
+    """ Called in the master process before workers are forked. """
+    start_background_services("Initial Boot (Gunicorn)")
 
 # --- Flask Routes ---
 
@@ -136,10 +147,14 @@ def login():
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
+
+if AUTO_START_BACKGROUND:
+    start_background_services("Module Import")
+
 # This block is only executed when run directly (e.g., `python run_kite.py`)
 if __name__ == "__main__":
-    print(f"Starting Flask Dev Server directly on port {os.getenv("PORT", 8080)}...")
+    print(f"Starting Flask Dev Server directly on port {os.getenv('PORT', 8080)}...")
     # For local testing, we still want to start background tasks
-    on_starting(None, None) # Simulate gunicorn hook
+    start_background_services("Direct Run")
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)

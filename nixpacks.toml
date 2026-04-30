@@ -5,4 +5,4 @@ nixPkgs = ["python311"]
 cmds = ["pip install -r requirements.txt"]
 
 [start]
-cmd = "gunicorn -w 4 -b 0.0.0.0:$PORT run_kite:app"
+cmd = "gunicorn -w 1 -b 0.0.0.0:$PORT --log-level info run_kite:app"
