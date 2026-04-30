@@ -1,3 +1,23 @@
+import threading
+import os
+import time
+import schedule
+import requests
+from flask import Flask, request
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from kiteconnect import KiteConnect
+from env_config import API_KEY, API_SECRET
+from scanner import run_scanner
+from websocket_flow import FlowEngine
+from telegram_utils import send_telegram_message
+
+# --- Configuration ---
+IST = ZoneInfo("Asia/Kolkata")
+TOKEN_FILE = "access_token.txt"
+AUTO_START_SCANNER = os.getenv("AUTO_START_SCANNER", "true").lower() in ("true", "1", "yes")
+
 app = Flask(__name__)
 kite = KiteConnect(api_key=API_KEY)
 
@@ -5,31 +25,6 @@ kite = KiteConnect(api_key=API_KEY)
 scanner_thread = None
 flow_engine = None
 scanner_lock = threading.Lock()
-
-# Flag to ensure background tasks are started only once
-_background_tasks_started = False
-
-def start_background_tasks_if_needed():
-    global _background_tasks_started
-    if _background_tasks_started:
-        return
-
-    print("Starting background tasks (scheduler and scanner bootup)...")
-
-    # 1. Start Scheduler Thread (Background tasks)
-    sched_thread = threading.Thread(target=run_scheduler_loop, daemon=True)
-    sched_thread.start()
-
-    # 2. Start Scanner Boot Thread (if auto-start is enabled)
-    if AUTO_START_SCANNER:
-        boot_thread = threading.Thread(
-            target=validate_and_start_scanner, 
-            args=("Initial Boot",), 
-            daemon=True
-        )
-        boot_thread.start()
-    
-    _background_tasks_started = True
 
 # --- Utility Functions ---
 
@@ -50,7 +45,9 @@ def validate_and_start_scanner(source):
             return True
 
         token = load_saved_token()
-        if not token: return False
+        if not token:
+            print(f"[{source}] No access token found. Cannot start scanner.")
+            return False
 
         try:
             kite.set_access_token(token)
@@ -89,7 +86,6 @@ def morning_task():
     
     print(f"Morning Task Started at {now.strftime('%H:%M')}")
     update_instruments()
-    # Automated login removed for speed. User will click link in Telegram.
 
 def run_scheduler_loop():
     print("Background Scheduler Active.")
@@ -98,17 +94,33 @@ def run_scheduler_loop():
         schedule.run_pending()
         time.sleep(10)
 
+# --- Gunicorn Hooks / App Initialization ---
+def on_starting(server, worker):
+    """ Called in the master process before workers are forked. """
+    print("Gunicorn master: Starting background tasks...")
+    # Start Scheduler Thread
+    sched_thread = threading.Thread(target=run_scheduler_loop, daemon=True)
+    sched_thread.start()
+
+    # Attempt to start scanner if token exists
+    if AUTO_START_SCANNER:
+        boot_thread = threading.Thread(
+            target=validate_and_start_scanner, 
+            args=("Initial Boot (Gunicorn)",), 
+            daemon=True
+        )
+        boot_thread.start()
+
 # --- Flask Routes ---
 
 @app.route("/")
 def home():
-    start_background_tasks_if_needed() # Ensure tasks are started when any route is hit
+    # This route is now purely for health checks and basic status
     status = "RUNNING" if (scanner_thread and scanner_thread.is_alive()) else "STOPPED"
     return f"<h3>Kite Scanner Status: {status}</h3><p>Server Time: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')}</p>"
 
 @app.route("/login")
 def login():
-    start_background_tasks_if_needed() # Ensure tasks are started
     request_token = request.args.get("request_token")
     if not request_token:
         login_url = f"https://kite.zerodha.com/connect/login?api_key={API_KEY}&v=3"
@@ -125,9 +137,9 @@ def login():
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
 # This block is only executed when run directly (e.g., `python run_kite.py`)
-# For Gunicorn, the app is imported and routes are hit, triggering `start_background_tasks_if_needed()`
 if __name__ == "__main__":
-    print(f"Starting Web Server directly via Flask dev server on port {os.getenv("PORT", 8080)}...")
-    start_background_tasks_if_needed()
+    print(f"Starting Flask Dev Server directly on port {os.getenv("PORT", 8080)}...")
+    # For local testing, we still want to start background tasks
+    on_starting(None, None) # Simulate gunicorn hook
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
