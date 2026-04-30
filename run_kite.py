@@ -91,7 +91,11 @@ def morning_task():
 
 def run_scheduler_loop():
     print("Background Scheduler Active.")
-    schedule.every().monday.to().friday.at("08:30").do(morning_task)
+    schedule.every().monday.at("08:30").do(morning_task)
+    schedule.every().tuesday.at("08:30").do(morning_task)
+    schedule.every().wednesday.at("08:30").do(morning_task)
+    schedule.every().thursday.at("08:30").do(morning_task)
+    schedule.every().friday.at("08:30").do(morning_task)
     while True:
         schedule.run_pending()
         time.sleep(10)
