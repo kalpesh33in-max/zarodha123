@@ -113,29 +113,33 @@ def start_background_services(source):
     sched_thread = threading.Thread(target=run_scheduler_loop, daemon=True)
     sched_thread.start()
 
-    if AUTO_START_SCANNER:
+    if AUTO_START_SCANNER and load_saved_token():
         boot_thread = threading.Thread(
             target=validate_and_start_scanner,
             args=(source,),
             daemon=True
         )
         boot_thread.start()
+    elif AUTO_START_SCANNER:
+        print(f"[{source}] Scanner auto-start skipped: login required.")
 
 
-def on_starting(server, worker):
-    """ Called in the master process before workers are forked. """
-    start_background_services("Initial Boot (Gunicorn)")
+def ensure_background_services_started(source):
+    if AUTO_START_BACKGROUND:
+        start_background_services(source)
 
 # --- Flask Routes ---
 
 @app.route("/")
 def home():
+    ensure_background_services_started("HTTP /")
     # This route is now purely for health checks and basic status
     status = "RUNNING" if (scanner_thread and scanner_thread.is_alive()) else "STOPPED"
     return f"<h3>Kite Scanner Status: {status}</h3><p>Server Time: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')}</p>"
 
 @app.route("/login")
 def login():
+    ensure_background_services_started("HTTP /login")
     request_token = request.args.get("request_token")
     if not request_token:
         login_url = f"https://kite.zerodha.com/connect/login?api_key={API_KEY}&v=3"
@@ -150,10 +154,6 @@ def login():
         return "<h1>Success!</h1><p>Login successful and scanner started.</p>"
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
-
-
-if AUTO_START_BACKGROUND:
-    start_background_services("Module Import")
 
 # This block is only executed when run directly (e.g., `python run_kite.py`)
 if __name__ == "__main__":
