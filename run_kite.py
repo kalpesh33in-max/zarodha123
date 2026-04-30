@@ -1,23 +1,3 @@
-import threading
-import os
-import time
-import schedule
-import requests
-from flask import Flask, request
-from datetime import datetime
-from zoneinfo import ZoneInfo
-
-from kiteconnect import KiteConnect
-from env_config import API_KEY, API_SECRET
-from scanner import run_scanner
-from websocket_flow import FlowEngine
-from telegram_utils import send_telegram_message
-
-# --- Configuration ---
-IST = ZoneInfo("Asia/Kolkata")
-TOKEN_FILE = "access_token.txt"
-AUTO_START_SCANNER = os.getenv("AUTO_START_SCANNER", "true").lower() in ("true", "1", "yes")
-
 app = Flask(__name__)
 kite = KiteConnect(api_key=API_KEY)
 
@@ -25,6 +5,31 @@ kite = KiteConnect(api_key=API_KEY)
 scanner_thread = None
 flow_engine = None
 scanner_lock = threading.Lock()
+
+# Flag to ensure background tasks are started only once
+_background_tasks_started = False
+
+def start_background_tasks_if_needed():
+    global _background_tasks_started
+    if _background_tasks_started:
+        return
+
+    print("Starting background tasks (scheduler and scanner bootup)...")
+
+    # 1. Start Scheduler Thread (Background tasks)
+    sched_thread = threading.Thread(target=run_scheduler_loop, daemon=True)
+    sched_thread.start()
+
+    # 2. Start Scanner Boot Thread (if auto-start is enabled)
+    if AUTO_START_SCANNER:
+        boot_thread = threading.Thread(
+            target=validate_and_start_scanner, 
+            args=("Initial Boot",), 
+            daemon=True
+        )
+        boot_thread.start()
+    
+    _background_tasks_started = True
 
 # --- Utility Functions ---
 
@@ -73,6 +78,7 @@ def update_instruments():
             with open("instruments.csv", "wb") as f:
                 f.write(r.content)
             print("Instruments updated.")
+            # Make sure this URL is correct for your Railway deployment
             send_telegram_message("✅ Instruments Updated. Please log in to start scanner: https://your-app-url.up.railway.app/login")
     except Exception as e:
         print(f"Update Error: {e}")
@@ -96,11 +102,13 @@ def run_scheduler_loop():
 
 @app.route("/")
 def home():
+    start_background_tasks_if_needed() # Ensure tasks are started when any route is hit
     status = "RUNNING" if (scanner_thread and scanner_thread.is_alive()) else "STOPPED"
     return f"<h3>Kite Scanner Status: {status}</h3><p>Server Time: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')}</p>"
 
 @app.route("/login")
 def login():
+    start_background_tasks_if_needed() # Ensure tasks are started
     request_token = request.args.get("request_token")
     if not request_token:
         login_url = f"https://kite.zerodha.com/connect/login?api_key={API_KEY}&v=3"
@@ -116,25 +124,10 @@ def login():
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
-# --- Execution ---
-
+# This block is only executed when run directly (e.g., `python run_kite.py`)
+# For Gunicorn, the app is imported and routes are hit, triggering `start_background_tasks_if_needed()`
 if __name__ == "__main__":
-    # 1. Start Scheduler Thread (Background tasks)
-    sched_thread = threading.Thread(target=run_scheduler_loop, daemon=True)
-    sched_thread.start()
-
-    # 2. Start Scanner Boot Thread
-    # Moving this to a thread ensures the Flask server (below) starts INSTANTLY
-    if AUTO_START_SCANNER:
-        boot_thread = threading.Thread(
-            target=validate_and_start_scanner, 
-            args=("Initial Boot",), 
-            daemon=True
-        )
-        boot_thread.start()
-
-    # 3. Run Flask Server (Main Thread)
-    # Railway needs this to start immediately to pass health checks
+    print(f"Starting Web Server directly via Flask dev server on port {os.getenv("PORT", 8080)}...")
+    start_background_tasks_if_needed()
     port = int(os.getenv("PORT", 8080))
-    print(f"Starting Web Server on port {port}...")
     app.run(host="0.0.0.0", port=port)
