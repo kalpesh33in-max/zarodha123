@@ -34,6 +34,8 @@ day_open_oi_store = {}
 option_history = {}
 active_watches = {}
 gap_alert_store = {}
+r3_alert_store = {}
+r3_last_check_time = None
 
 _options_df = None
 _futures_df = None
@@ -42,6 +44,10 @@ _last_logged_expiry = {}
 IST = ZoneInfo("Asia/Kolkata")
 MAY_FUTURE_GAP_THRESHOLD_PCT = 3.0
 GAP_ALERT_COOLDOWN_SECONDS = 300
+R3_PIVOT_ALERT_START_TIME = datetime.strptime("09:15", "%H:%M").time()
+R3_PIVOT_RANGE_PCT = 0.5
+R3_PIVOT_CHECK_INTERVAL_SECONDS = 300
+R3_PIVOT_ALERT_COOLDOWN_SECONDS = 300
 
 
 def is_index_underlying(name):
@@ -364,6 +370,216 @@ def build_may_future_gap_alerts(kite):
     return alerts
 
 
+def _get_may_stock_future_contracts():
+    futures = load_stock_futures_data()
+    if futures.empty:
+        return []
+
+    now_ist = datetime.now(IST)
+    may_futures = futures[
+        (futures["expiry"].dt.year == now_ist.year)
+        & (futures["expiry"].dt.month == 5)
+    ].copy()
+    if may_futures.empty:
+        return []
+
+    may_futures = may_futures.sort_values(["name", "expiry", "tradingsymbol"])
+    selected = may_futures.groupby("name", as_index=False).first()
+    return [
+        {
+            "name": row["name"],
+            "symbol": f"NFO:{row['tradingsymbol']}",
+            "token": int(row["instrument_token"]),
+        }
+        for _, row in selected.iterrows()
+    ]
+
+
+def _get_latest_completed_candle(candles, interval_minutes, now_ist):
+    cutoff = now_ist - timedelta(minutes=interval_minutes)
+    completed = []
+    for candle in candles:
+        candle_time = candle.get("date")
+        if candle_time is None:
+            continue
+        if candle_time.tzinfo is None:
+            candle_time = candle_time.replace(tzinfo=IST)
+        else:
+            candle_time = candle_time.astimezone(IST)
+        if candle_time <= cutoff:
+            completed.append(candle)
+    return completed[-1] if completed else None
+
+
+def _calculate_classic_r3(candle):
+    high = float(candle.get("high", 0) or 0)
+    low = float(candle.get("low", 0) or 0)
+    close = float(candle.get("close", 0) or 0)
+    if high <= 0 or low <= 0 or close <= 0:
+        return None
+
+    pivot = (high + low + close) / 3
+    return high + (2 * (pivot - low))
+
+
+def _get_r3_for_interval(kite, token, interval, interval_minutes, now_ist):
+    from_time = now_ist.replace(hour=9, minute=0, second=0, microsecond=0)
+    to_time = now_ist
+    try:
+        candles = kite.historical_data(token, from_time, to_time, interval)
+    except Exception as e:
+        print(f"R3 historical data error for {token} {interval}: {e}")
+        return None
+
+    candle = _get_latest_completed_candle(candles, interval_minutes, now_ist)
+    if not candle:
+        return None
+
+    r3 = _calculate_classic_r3(candle)
+    if not r3:
+        return None
+
+    return {
+        "r3": r3,
+        "candle_time": candle.get("date"),
+        "high": candle.get("high", 0),
+        "low": candle.get("low", 0),
+        "close": candle.get("close", 0),
+    }
+
+
+def _get_previous_trading_day(now_ist):
+    day = now_ist.date() - timedelta(days=1)
+    while day.weekday() > 4:
+        day -= timedelta(days=1)
+    return day
+
+
+def _get_previous_day_r3_for_interval(kite, token, interval, now_ist):
+    prev_day = _get_previous_trading_day(now_ist)
+    from_time = datetime.combine(prev_day, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
+    to_time = datetime.combine(prev_day, datetime.strptime("15:30", "%H:%M").time(), tzinfo=IST)
+    try:
+        candles = kite.historical_data(token, from_time, to_time, interval)
+    except Exception as e:
+        print(f"Previous day R3 historical data error for {token} {interval}: {e}")
+        return None
+
+    if not candles:
+        return None
+
+    candle = candles[-1]
+    r3 = _calculate_classic_r3(candle)
+    if not r3:
+        return None
+
+    prev_close = float(candle.get("close", 0) or 0)
+    close_diff_pct = ((prev_close - r3) / r3) * 100
+    if abs(close_diff_pct) > R3_PIVOT_RANGE_PCT:
+        return None
+
+    return {
+        "r3": r3,
+        "prev_close": prev_close,
+        "close_diff_pct": close_diff_pct,
+        "candle_time": candle.get("date"),
+    }
+
+
+def build_may_future_r3_pivot_alerts(kite):
+    global r3_last_check_time
+
+    now_ist = datetime.now(IST)
+    if now_ist.weekday() > 4 or now_ist.time() < R3_PIVOT_ALERT_START_TIME:
+        return []
+
+    if (
+        r3_last_check_time
+        and (now_ist - r3_last_check_time).total_seconds() < R3_PIVOT_CHECK_INTERVAL_SECONDS
+    ):
+        return []
+    r3_last_check_time = now_ist
+
+    contracts = _get_may_stock_future_contracts()
+    if not contracts:
+        return []
+
+    symbols = [contract["symbol"] for contract in contracts]
+    data = get_symbol_quotes_with_fallback(kite, symbols)
+    if not data:
+        return []
+
+    rows = []
+    intervals = [
+        ("15MIN", "15minute"),
+        ("1HR", "60minute"),
+    ]
+
+    for contract in contracts:
+        symbol = contract["symbol"]
+        ltp = data.get(symbol, {}).get("last_price", 0)
+        if ltp <= 0:
+            continue
+
+        matched = []
+        for label, kite_interval in intervals:
+            r3_data = _get_previous_day_r3_for_interval(kite, contract["token"], kite_interval, now_ist)
+            if not r3_data:
+                continue
+
+            r3 = r3_data["r3"]
+            diff_pct = ((ltp - r3) / r3) * 100
+            if ltp <= r3:
+                continue
+
+            alert_key = f"R3:{contract['name']}:{label}"
+            last_sent = r3_alert_store.get(alert_key)
+            if last_sent and (now_ist - last_sent).total_seconds() < R3_PIVOT_ALERT_COOLDOWN_SECONDS:
+                continue
+
+            r3_alert_store[alert_key] = now_ist
+            matched.append(
+                {
+                    "label": label,
+                    "r3": r3,
+                    "diff_pct": diff_pct,
+                    "prev_close": r3_data["prev_close"],
+                    "close_diff_pct": r3_data["close_diff_pct"],
+                }
+            )
+
+        if matched:
+            rows.append(
+                {
+                    "name": contract["name"],
+                    "symbol": symbol,
+                    "ltp": ltp,
+                    "matches": matched,
+                }
+            )
+
+    if not rows:
+        return []
+
+    body_lines = []
+    for item in rows:
+        pivot_text = ", ".join(
+            f"{match['label']} R3 {match['r3']:.2f} | Above {match['diff_pct']:+.2f}% "
+            f"| Prev Close {match['prev_close']:.2f} ({match['close_diff_pct']:+.2f}%)"
+            for match in item["matches"]
+        )
+        body_lines.append(
+            f"{item['name']}: Fut {item['ltp']:.2f} | {pivot_text} | PRICE ABOVE R3"
+        )
+
+    alerts = []
+    chunk_size = 20
+    for i in range(0, len(body_lines), chunk_size):
+        chunk = "\n".join(body_lines[i:i + chunk_size])
+        alerts.append(f"MAY FUTURE R3 PIVOT REPORT\n\n{chunk}\n\nTIME: {now_ist.strftime('%H:%M:%S')}")
+    return alerts
+
+
 def process_future_burst(symbol, name, ltp, oi, alerts_list):
     if not is_burst_underlying(name):
         return
@@ -523,4 +739,5 @@ def calculate_heatmap(kite):
         process_option_logic(name, underlying_map.get(name, (pd.DataFrame(), 0)), opt_quotes, target_alerts)
 
     gap_alerts = build_may_future_gap_alerts(kite)
+    gap_alerts.extend(build_may_future_r3_pivot_alerts(kite))
     return 0, "", bn_alerts, stock_alerts, gap_alerts
