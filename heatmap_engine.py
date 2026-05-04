@@ -36,6 +36,7 @@ active_watches = {}
 gap_alert_store = {}
 r3_alert_store = {}
 r3_last_check_time = None
+r3_watch_last_sent_time = None
 
 _options_df = None
 _futures_df = None
@@ -43,11 +44,14 @@ _last_logged_expiry = {}
 
 IST = ZoneInfo("Asia/Kolkata")
 MAY_FUTURE_GAP_THRESHOLD_PCT = 3.0
+MAY_FUTURE_GAP_START_TIME = datetime.strptime("09:15", "%H:%M").time()
 GAP_ALERT_COOLDOWN_SECONDS = 300
 R3_PIVOT_ALERT_START_TIME = datetime.strptime("09:15", "%H:%M").time()
+R3_PIVOT_CLOSE_REMINDER_START_TIME = datetime.strptime("15:00", "%H:%M").time()
 R3_PIVOT_RANGE_PCT = 0.5
 R3_PIVOT_CHECK_INTERVAL_SECONDS = 300
-R3_PIVOT_ALERT_COOLDOWN_SECONDS = 300
+R3_PIVOT_REMINDER_SECONDS = 3600
+R3_PIVOT_CLOSE_REMINDER_SECONDS = 600
 
 
 def is_index_underlying(name):
@@ -258,22 +262,13 @@ def get_relevant_options(name, ltp):
 
 
 def get_strength_label(lots, name="BANKNIFTY"):
-    if is_index_underlying(name):
-        if lots >= 400:
-            return "ðŸš€ BLAST ðŸš€"
-        if lots >= 300:
-            return "ðŸŒŸ AWESOME"
-        if lots >= 200:
-            return "âœ… VERY GOOD"
-        return "âš¡ GOOD"
-
-    if lots >= 150:
-        return "ðŸš€ BLAST ðŸš€"
-    if lots >= 100:
-        return "ðŸŒŸ AWESOME"
-    if lots >= 75:
-        return "âœ… VERY GOOD"
-    return "âš¡ GOOD"
+    if lots >= 400:
+        return "🚀 BLAST 🚀"
+    if lots >= 300:
+        return "🌟 AWESOME"
+    if lots >= 200:
+        return "✅ VERY GOOD"
+    return "⚡ GOOD"
 
 
 def format_oi_delta(oi_delta):
@@ -290,18 +285,18 @@ def format_oi_delta(oi_delta):
 def classify_action(symbol, oi_change, price_change):
     if any(x in symbol for x in ["-FUT", "FUT", "-I"]):
         if oi_change > 0:
-            return "FUTURE BUY (LONG) ðŸ“ˆ" if price_change >= 0 else "FUTURE SELL (SHORT) ðŸ“‰"
-        return "SHORT COVERING â†—ï¸" if price_change >= 0 else "LONG UNWINDING â†˜ï¸"
+            return "FUTURE BUY (LONG) 📈" if price_change >= 0 else "FUTURE SELL (SHORT) 📉"
+        return "SHORT COVERING ↗️" if price_change >= 0 else "LONG UNWINDING ↘️"
 
     is_call = symbol.endswith("CE")
     if oi_change > 0:
         if price_change >= 0:
-            return "CALL BUY ðŸ”µ" if is_call else "PUT BUY ðŸ”´"
-        return "CALL WRITER âœï¸" if is_call else "PUT WRITER âœï¸"
+            return "CALL BUY 🔵" if is_call else "PUT BUY 🔴"
+        return "CALL WRITER ✍️" if is_call else "PUT WRITER ✍️"
 
     if price_change >= 0:
-        return "SHORT COVERING (CE) â¤´ï¸" if is_call else "SHORT COVERING (PE) â¤´ï¸"
-    return "LONG UNWINDING (CE) â¤µï¸" if is_call else "LONG UNWINDING (PE) â¤µï¸"
+        return "SHORT COVERING (CE) ⤴️" if is_call else "SHORT COVERING (PE) ⤴️"
+    return "LONG UNWINDING (CE) ⤵️" if is_call else "LONG UNWINDING (PE) ⤵️"
 
 
 def _format_gap_signal(gap_pct):
@@ -309,6 +304,10 @@ def _format_gap_signal(gap_pct):
 
 
 def build_may_future_gap_alerts(kite):
+    now_ist = datetime.now(IST)
+    if now_ist.weekday() > 4 or now_ist.time() < MAY_FUTURE_GAP_START_TIME:
+        return []
+
     future_symbols = get_stock_may_future_symbols()
     if not future_symbols:
         return []
@@ -324,7 +323,7 @@ def build_may_future_gap_alerts(kite):
     if not data:
         return []
 
-    now = datetime.now()
+    now = datetime.now(IST)
     rows = []
     for name, spot_symbol, future_symbol in symbol_pairs:
         spot_price = data.get(spot_symbol, {}).get("last_price", 0)
@@ -366,7 +365,7 @@ def build_may_future_gap_alerts(kite):
                 for item in chunk
             ]
         )
-        alerts.append(f"ðŸ“Š MAY FUTURE GAP REPORT\n\n{body}")
+        alerts.append(f"📊 MAY FUTURE GAP REPORT\n\n{body}")
     return alerts
 
 
@@ -487,7 +486,7 @@ def _get_previous_day_r3_for_interval(kite, token, interval, now_ist):
 
 
 def build_may_future_r3_pivot_alerts(kite):
-    global r3_last_check_time
+    global r3_last_check_time, r3_watch_last_sent_time
 
     now_ist = datetime.now(IST)
     if now_ist.weekday() > 4 or now_ist.time() < R3_PIVOT_ALERT_START_TIME:
@@ -509,7 +508,9 @@ def build_may_future_r3_pivot_alerts(kite):
     if not data:
         return []
 
-    rows = []
+    watch_rows = []
+    near_rows = []
+    breakout_rows = []
     intervals = [
         ("15MIN", "15minute"),
         ("1HR", "60minute"),
@@ -529,15 +530,6 @@ def build_may_future_r3_pivot_alerts(kite):
 
             r3 = r3_data["r3"]
             diff_pct = ((ltp - r3) / r3) * 100
-            if ltp <= r3:
-                continue
-
-            alert_key = f"R3:{contract['name']}:{label}"
-            last_sent = r3_alert_store.get(alert_key)
-            if last_sent and (now_ist - last_sent).total_seconds() < R3_PIVOT_ALERT_COOLDOWN_SECONDS:
-                continue
-
-            r3_alert_store[alert_key] = now_ist
             matched.append(
                 {
                     "label": label,
@@ -548,8 +540,42 @@ def build_may_future_r3_pivot_alerts(kite):
                 }
             )
 
+            if abs(diff_pct) <= R3_PIVOT_RANGE_PCT and ltp <= r3:
+                alert_key = f"R3_NEAR:{contract['name']}:{label}:{now_ist.date().isoformat()}"
+                if alert_key not in r3_alert_store:
+                    r3_alert_store[alert_key] = now_ist
+                    near_rows.append(
+                        {
+                            "name": contract["name"],
+                            "symbol": symbol,
+                            "ltp": ltp,
+                            "label": label,
+                            "r3": r3,
+                            "diff_pct": diff_pct,
+                            "prev_close": r3_data["prev_close"],
+                            "close_diff_pct": r3_data["close_diff_pct"],
+                        }
+                    )
+
+            if ltp > r3:
+                alert_key = f"R3_ABOVE:{contract['name']}:{label}:{now_ist.date().isoformat()}"
+                if alert_key not in r3_alert_store:
+                    r3_alert_store[alert_key] = now_ist
+                    breakout_rows.append(
+                        {
+                            "name": contract["name"],
+                            "symbol": symbol,
+                            "ltp": ltp,
+                            "label": label,
+                            "r3": r3,
+                            "diff_pct": diff_pct,
+                            "prev_close": r3_data["prev_close"],
+                            "close_diff_pct": r3_data["close_diff_pct"],
+                        }
+                    )
+
         if matched:
-            rows.append(
+            watch_rows.append(
                 {
                     "name": contract["name"],
                     "symbol": symbol,
@@ -558,25 +584,61 @@ def build_may_future_r3_pivot_alerts(kite):
                 }
             )
 
-    if not rows:
+    if not watch_rows and not near_rows and not breakout_rows:
         return []
 
-    body_lines = []
-    for item in rows:
-        pivot_text = ", ".join(
-            f"{match['label']} R3 {match['r3']:.2f} | Above {match['diff_pct']:+.2f}% "
-            f"| Prev Close {match['prev_close']:.2f} ({match['close_diff_pct']:+.2f}%)"
-            for match in item["matches"]
-        )
-        body_lines.append(
-            f"{item['name']}: Fut {item['ltp']:.2f} | {pivot_text} | PRICE ABOVE R3"
-        )
-
     alerts = []
-    chunk_size = 20
-    for i in range(0, len(body_lines), chunk_size):
-        chunk = "\n".join(body_lines[i:i + chunk_size])
-        alerts.append(f"MAY FUTURE R3 PIVOT REPORT\n\n{chunk}\n\nTIME: {now_ist.strftime('%H:%M:%S')}")
+
+    if near_rows:
+        body_lines = [
+            f"{item['name']}: Fut {item['ltp']:.2f} | {item['label']} R3 {item['r3']:.2f} "
+            f"| Near {item['diff_pct']:+.2f}% | Prev Close {item['prev_close']:.2f} "
+            f"({item['close_diff_pct']:+.2f}%)"
+            for item in near_rows
+        ]
+        for i in range(0, len(body_lines), 20):
+            chunk = "\n".join(body_lines[i:i + 20])
+            alerts.append(f"MAY FUTURE R3 NEAR ALERT\n\n{chunk}\n\nTIME: {now_ist.strftime('%H:%M:%S')} IST")
+
+    if breakout_rows:
+        body_lines = [
+            f"{item['name']}: Fut {item['ltp']:.2f} | {item['label']} R3 {item['r3']:.2f} "
+            f"| Above {item['diff_pct']:+.2f}% | Prev Close {item['prev_close']:.2f} "
+            f"({item['close_diff_pct']:+.2f}%)"
+            for item in breakout_rows
+        ]
+        for i in range(0, len(body_lines), 20):
+            chunk = "\n".join(body_lines[i:i + 20])
+            alerts.append(f"MAY FUTURE R3 BREAKOUT ALERT\n\n{chunk}\n\nTIME: {now_ist.strftime('%H:%M:%S')} IST")
+
+    reminder_seconds = (
+        R3_PIVOT_CLOSE_REMINDER_SECONDS
+        if now_ist.time() >= R3_PIVOT_CLOSE_REMINDER_START_TIME
+        else R3_PIVOT_REMINDER_SECONDS
+    )
+    reminder_due = (
+        watch_rows
+        and (
+            r3_watch_last_sent_time is None
+            or (now_ist - r3_watch_last_sent_time).total_seconds() >= reminder_seconds
+        )
+    )
+
+    if reminder_due:
+        r3_watch_last_sent_time = now_ist
+        body_lines = []
+        for item in watch_rows:
+            pivot_text = ", ".join(
+                f"{match['label']} R3 {match['r3']:.2f} | Fut {match['diff_pct']:+.2f}% vs R3 "
+                f"| Prev Close {match['prev_close']:.2f} ({match['close_diff_pct']:+.2f}%)"
+                for match in item["matches"]
+            )
+            body_lines.append(f"{item['name']}: Fut {item['ltp']:.2f} | {pivot_text}")
+
+        for i in range(0, len(body_lines), 20):
+            chunk = "\n".join(body_lines[i:i + 20])
+            alerts.append(f"MAY FUTURE R3 WATCHLIST\n\n{chunk}\n\nTIME: {now_ist.strftime('%H:%M:%S')} IST")
+
     return alerts
 
 
@@ -586,7 +648,7 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list):
 
     threshold = get_burst_threshold(name)
     lot_size = LOT_SIZES.get(name, 1)
-    now = datetime.now()
+    now = datetime.now(IST)
     key = f"FUT_{symbol}"
     if key not in option_history:
         option_history[key] = []
@@ -614,12 +676,12 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list):
             if final_lots >= threshold:
                 strength = get_strength_label(final_lots, watch["name"])
                 action = classify_action(watch["symbol"], oi_chg, p_chg)
-                p_icon = "â–²" if p_chg >= 0 else "â–¼"
+                p_icon = "▲" if p_chg >= 0 else "▼"
                 alerts_list.append(
-                    f"{strength}\nðŸš¨ {action}\nSymbol: {watch['symbol']}\n"
-                    f"â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
+                    f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n"
+                    f"━━━━━━━━━━━━━━━\n"
                     f"LOTS: {final_lots}\nPRICE: {ltp:.2f} ({p_icon})\nFUTURE PRICE: {ltp:.2f}\n"
-                    f"â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
+                    f"━━━━━━━━━━━━━━━\n"
                     f"EXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {oi:,}\n"
                     f"TIME: {now.strftime('%H:%M:%S')}"
                 )
@@ -640,7 +702,7 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list):
 
     threshold = get_burst_threshold(name)
     lot_size = LOT_SIZES.get(name, 1)
-    now = datetime.now()
+    now = datetime.now(IST)
 
     for _, row in opt_df.iterrows():
         t_str = str(int(row["instrument_token"]))
@@ -681,12 +743,12 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list):
                 if final_lots >= threshold:
                     strength = get_strength_label(final_lots, watch["underlying"])
                     action = classify_action(watch["symbol"], oi_chg, p_chg)
-                    p_icon = "â–²" if p_chg >= 0 else "â–¼"
+                    p_icon = "▲" if p_chg >= 0 else "▼"
                     alerts_list.append(
-                        f"{strength}\nðŸš¨ {action}\nSymbol: {watch['symbol']}\n"
-                        f"â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
+                        f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n"
+                        f"━━━━━━━━━━━━━━━\n"
                         f"LOTS: {final_lots}\nPRICE: {ltp:.2f} ({p_icon})\nFUTURE PRICE: {u_ltp:.2f}\n"
-                        f"â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n"
+                        f"━━━━━━━━━━━━━━━\n"
                         f"EXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {curr_oi:,}\n"
                         f"TIME: {now.strftime('%H:%M:%S')}"
                     )
