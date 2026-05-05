@@ -43,7 +43,7 @@ _futures_df = None
 _last_logged_expiry = {}
 
 IST = ZoneInfo("Asia/Kolkata")
-MAY_FUTURE_GAP_THRESHOLD_PCT = 3.0
+MAY_FUTURE_GAP_THRESHOLD_PCT = 2.0
 MAY_FUTURE_GAP_START_TIME = datetime.strptime("09:15", "%H:%M").time()
 GAP_ALERT_COOLDOWN_SECONDS = 300
 R3_PIVOT_ALERT_START_TIME = datetime.strptime("09:15", "%H:%M").time()
@@ -63,7 +63,10 @@ def is_burst_underlying(name):
 
 
 def get_burst_threshold(name):
-    return 200 if is_index_underlying(name) else 100
+    # Burst threshold in lots:
+    # - Index underlyings: 100 lots
+    # - Stock underlyings: 50 lots
+    return 100 if is_index_underlying(name) else 50
 
 
 def get_monthly_expiry(expiries, rollover_days=1):
@@ -395,7 +398,12 @@ def _get_may_stock_future_contracts():
 
 
 def _get_latest_completed_candle(candles, interval_minutes, now_ist):
-    cutoff = now_ist - timedelta(minutes=interval_minutes)
+    # Prefer the last *fully completed* candle. After market close, some larger
+    # intervals (e.g. 60minute) may include a final partial candle; we ignore it
+    # by anchoring completion to the session close (15:30 IST).
+    session_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+    anchor = session_close if now_ist >= session_close else now_ist
+    cutoff = anchor - timedelta(minutes=interval_minutes)
     completed = []
     for candle in candles:
         candle_time = candle.get("date")
@@ -454,7 +462,7 @@ def _get_previous_trading_day(now_ist):
     return day
 
 
-def _get_previous_day_r3_for_interval(kite, token, interval, now_ist):
+def _get_previous_day_r3_for_interval(kite, token, interval, interval_minutes, now_ist):
     prev_day = _get_previous_trading_day(now_ist)
     from_time = datetime.combine(prev_day, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
     to_time = datetime.combine(prev_day, datetime.strptime("15:30", "%H:%M").time(), tzinfo=IST)
@@ -467,7 +475,13 @@ def _get_previous_day_r3_for_interval(kite, token, interval, now_ist):
     if not candles:
         return None
 
-    candle = candles[-1]
+    # Use the last fully completed candle for the previous trading day.
+    # Kite can return a final partial candle for larger intervals (e.g. 60minute),
+    # which makes 15MIN/1HR pivots incorrectly identical.
+    prev_close_time = datetime.combine(prev_day, datetime.strptime("15:30", "%H:%M").time(), tzinfo=IST)
+    candle = _get_latest_completed_candle(candles, interval_minutes, prev_close_time)
+    if not candle:
+        candle = candles[-1]
     r3 = _calculate_classic_r3(candle)
     if not r3:
         return None
@@ -511,10 +525,23 @@ def build_may_future_r3_pivot_alerts(kite):
     watch_rows = []
     near_rows = []
     breakout_rows = []
+    # Zerodha chart Pivot Points (standard) on intraday charts are anchored to the
+    # previous trading session, but the H/L/C can differ slightly per timeframe
+    # because they are derived from that timeframe's candles.
     intervals = [
-        ("15MIN", "15minute"),
-        ("1HR", "60minute"),
+        ("15MIN", "15minute", 15),
+        ("1HR", "60minute", 60),
     ]
+
+    def _prev_week_window(now_ist):
+        # Previous calendar week (Mon-Fri) in IST.
+        # For 30m/1h charts, Kite pivots are anchored to previous week.
+        current_week_start = now_ist.date() - timedelta(days=now_ist.weekday())
+        prev_week_start = current_week_start - timedelta(days=7)
+        prev_week_end = prev_week_start + timedelta(days=4)
+        start = datetime.combine(prev_week_start, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
+        end = datetime.combine(prev_week_end, datetime.strptime("15:30", "%H:%M").time(), tzinfo=IST)
+        return start, end
 
     for contract in contracts:
         symbol = contract["symbol"]
@@ -523,20 +550,45 @@ def build_may_future_r3_pivot_alerts(kite):
             continue
 
         matched = []
-        for label, kite_interval in intervals:
-            r3_data = _get_previous_day_r3_for_interval(kite, contract["token"], kite_interval, now_ist)
-            if not r3_data:
+        for label, kite_interval, interval_minutes in intervals:
+            # Kite pivot anchor:
+            # - <=15m charts: previous trading day
+            # - >=30m charts (including 1H): previous week
+            if interval_minutes >= 30:
+                from_time, to_time = _prev_week_window(now_ist)
+            else:
+                prev_day = _get_previous_trading_day(now_ist)
+                from_time = datetime.combine(prev_day, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
+                to_time = datetime.combine(prev_day, datetime.strptime("15:30", "%H:%M").time(), tzinfo=IST)
+            try:
+                candles = kite.historical_data(contract["token"], from_time, to_time, kite_interval)
+            except Exception as e:
+                print(f"Previous session candle fetch error for {contract['token']} {kite_interval}: {e}")
+                continue
+            if not candles:
                 continue
 
-            r3 = r3_data["r3"]
+            # H/L/C derived from the anchor window candles for this interval.
+            high = max(float(c.get("high", 0) or 0) for c in candles)
+            low = min(float(c.get("low", 0) or 0) for c in candles)
+            prev_close = float(candles[-1].get("close", 0) or 0)
+            if high <= 0 or low <= 0 or prev_close <= 0:
+                continue
+
+            # Zerodha Kite "standard" pivots use PP=(H+L+C)/3 and:
+            # R3 = PP + 2*(H-L), S3 = PP - 2*(H-L)
+            # (R3/S3 differ from the classic floor-trader formula.)
+            pivot = (high + low + prev_close) / 3
+            r3 = pivot + (2 * (high - low))
+            close_diff_pct = ((prev_close - r3) / r3) * 100 if r3 else 0
             diff_pct = ((ltp - r3) / r3) * 100
             matched.append(
                 {
                     "label": label,
                     "r3": r3,
                     "diff_pct": diff_pct,
-                    "prev_close": r3_data["prev_close"],
-                    "close_diff_pct": r3_data["close_diff_pct"],
+                    "prev_close": prev_close,
+                    "close_diff_pct": close_diff_pct,
                 }
             )
 
@@ -552,8 +604,8 @@ def build_may_future_r3_pivot_alerts(kite):
                             "label": label,
                             "r3": r3,
                             "diff_pct": diff_pct,
-                            "prev_close": r3_data["prev_close"],
-                            "close_diff_pct": r3_data["close_diff_pct"],
+                            "prev_close": prev_close,
+                            "close_diff_pct": close_diff_pct,
                         }
                     )
 
@@ -569,8 +621,8 @@ def build_may_future_r3_pivot_alerts(kite):
                             "label": label,
                             "r3": r3,
                             "diff_pct": diff_pct,
-                            "prev_close": r3_data["prev_close"],
-                            "close_diff_pct": r3_data["close_diff_pct"],
+                            "prev_close": prev_close,
+                            "close_diff_pct": close_diff_pct,
                         }
                     )
 
@@ -770,12 +822,24 @@ def calculate_heatmap(kite):
     stock_alerts = []
     gap_alerts = []
 
+    # Map tracked future symbols by underlying name using an exact prefix match on tradingsymbol.
+    # This avoids substring collisions (e.g. "NIFTY" matching "BANKNIFTY").
+    fut_by_name = {}
+    for sym in fut_symbols:
+        try:
+            tsym = sym.split(":", 1)[1]
+        except Exception:
+            continue
+        for name in BURST_TRACK_NAMES:
+            if tsym.startswith(name):
+                fut_by_name[name] = sym
+
     all_opt_tokens = []
     underlying_map = {}
-    bnf_future_symbol = next((s for s in fut_symbols if "BANKNIFTY" in s), "")
+    bnf_future_symbol = fut_by_name.get("BANKNIFTY", "")
 
     for name in BURST_TRACK_NAMES:
-        base_symbol = bnf_future_symbol if name == "BANKNIFTY" else next((s for s in fut_symbols if name in s), "")
+        base_symbol = fut_by_name.get(name, "")
         u_ltp = data.get(base_symbol, {}).get("last_price", 0)
         if u_ltp <= 0:
             continue
@@ -788,7 +852,7 @@ def calculate_heatmap(kite):
     opt_quotes = get_option_quotes_with_fallback(kite, all_opt_tokens)
 
     for name in BURST_TRACK_NAMES:
-        sym = next((s for s in fut_symbols if name in s), None)
+        sym = fut_by_name.get(name)
         if not sym or sym not in data:
             continue
 

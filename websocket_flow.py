@@ -138,6 +138,17 @@ class FlowEngine:
         if not fut_symbols:
             return [], {}
 
+        # Exact prefix match to avoid substring collisions (e.g. "NIFTY" vs "BANKNIFTY").
+        fut_by_name = {}
+        for sym in fut_symbols:
+            parts = sym.split(":", 1)
+            if len(parts) != 2:
+                continue
+            tsym = parts[1]
+            for name in BURST_TRACK_NAMES:
+                if tsym.startswith(name):
+                    fut_by_name[name] = sym
+
         symbol_quotes = {}
         try:
             symbol_quotes = self.kite.quote(fut_symbols + [INDEX_SYMBOL])
@@ -161,7 +172,7 @@ class FlowEngine:
             symbol_by_token[index_token] = INDEX_SYMBOL
 
         for name in BURST_TRACK_NAMES:
-            base_symbol = INDEX_SYMBOL if name == "BANKNIFTY" else next((s for s in fut_symbols if name in s), "")
+            base_symbol = fut_by_name.get(name, "")
             u_ltp = symbol_quotes.get(base_symbol, {}).get("last_price", 0)
             if u_ltp <= 0:
                 continue
