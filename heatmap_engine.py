@@ -38,6 +38,10 @@ r3_alert_store = {}
 r3_last_check_time = None
 r3_watch_last_sent_time = None
 
+# Breakout reversal scanner state
+breakout_last_check = {"30minute": None, "60minute": None}
+breakout_alert_store = {}
+
 _options_df = None
 _futures_df = None
 _last_logged_expiry = {}
@@ -694,6 +698,144 @@ def build_may_future_r3_pivot_alerts(kite):
     return alerts
 
 
+def _is_close_near_high(candle, top_pct=0.25):
+    try:
+        high = float(candle.get("high", 0) or 0)
+        low = float(candle.get("low", 0) or 0)
+        close = float(candle.get("close", 0) or 0)
+        if high <= low:
+            return False
+        return (high - close) <= (high - low) * float(top_pct)
+    except Exception:
+        return False
+
+
+def _get_last_completed_candles(kite, token, interval, interval_minutes, now_ist, lookback=30):
+    # Fetch recent intraday candles and return the last completed ones.
+    from_time = now_ist.replace(hour=9, minute=0, second=0, microsecond=0)
+    to_time = now_ist
+    try:
+        candles = kite.historical_data(token, from_time, to_time, interval)
+    except Exception as e:
+        print(f"Breakout historical data error for {token} {interval}: {e}")
+        return []
+    if not candles:
+        return []
+    cutoff = now_ist
+    session_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+    if now_ist >= session_close:
+        cutoff = session_close
+    last = _get_latest_completed_candle(candles, interval_minutes, cutoff)
+    if not last:
+        return []
+    last_time = last.get("date")
+    if last_time is None:
+        return []
+    # collect completed candles up to last_time
+    completed = []
+    for c in candles:
+        if c.get("date") is None:
+            continue
+        if c.get("date") <= last_time:
+            completed.append(c)
+    return completed[-lookback:]
+
+
+def build_breakout_reversal_alerts(kite):
+    """
+    Detects 30m/1h breakout reversal pattern on stock futures.
+
+    Pattern (per timeframe):
+    - At least 3 consecutive candles with lower lows AND increasing volume
+    - First candle volume >= 100,000
+    - Next (reversal) candle breaks previous candle high, closes near its high,
+      and has volume greater than all previous candles in a lookback window.
+    Alerts are rate-limited and sent once per symbol+timeframe per day.
+    """
+    now_ist = datetime.now(IST)
+    if now_ist.weekday() > 4:
+        return []
+    start_time = datetime.strptime("09:15", "%H:%M").time()
+    end_time = datetime.strptime("15:30", "%H:%M").time()
+    if not (start_time <= now_ist.time() <= end_time):
+        return []
+
+    # Only re-check at most once per 2 minutes per timeframe (scanner runs every 5s).
+    alerts = []
+    intervals = [
+        ("30MIN", "30minute", 30),
+        ("1HR", "60minute", 60),
+    ]
+    for label, interval, mins in intervals:
+        last = breakout_last_check.get(interval)
+        if last and (now_ist - last).total_seconds() < 120:
+            continue
+        breakout_last_check[interval] = now_ist
+
+        futures = load_stock_futures_data()
+        if futures is None or futures.empty:
+            continue
+
+        # Choose the active (monthly) future per stock name.
+        for name in sorted(set(futures["name"].dropna().tolist())):
+            sym = get_active_future(name)
+            if not sym:
+                continue
+            tradingsymbol = sym.split(":", 1)[1] if ":" in sym else sym
+            rows = futures[futures["tradingsymbol"] == tradingsymbol]
+            if rows.empty:
+                continue
+            token = int(rows.iloc[0]["instrument_token"])
+
+            candles = _get_last_completed_candles(kite, token, interval, mins, now_ist, lookback=30)
+            if len(candles) < 24:
+                continue
+
+            # Use last 4 completed candles for the pattern.
+            c1, c2, c3, c4 = candles[-4], candles[-3], candles[-2], candles[-1]
+            v1 = float(c1.get("volume", 0) or 0)
+            v2 = float(c2.get("volume", 0) or 0)
+            v3 = float(c3.get("volume", 0) or 0)
+            v4 = float(c4.get("volume", 0) or 0)
+            if v1 < 100000:
+                continue
+            if not (v2 > v1 and v3 > v2):
+                continue
+
+            l1 = float(c1.get("low", 0) or 0)
+            l2 = float(c2.get("low", 0) or 0)
+            l3 = float(c3.get("low", 0) or 0)
+            if not (l2 < l1 and l3 < l2):
+                continue
+
+            h3 = float(c3.get("high", 0) or 0)
+            h4 = float(c4.get("high", 0) or 0)
+            if not (h4 > h3 and _is_close_near_high(c4, top_pct=0.25)):
+                continue
+
+            prev_vol_max = max(float(c.get("volume", 0) or 0) for c in candles[:-1]) if candles[:-1] else 0
+            if v4 <= prev_vol_max:
+                continue
+
+            key = f"BR_{name}_{label}_{now_ist.date().isoformat()}"
+            if key in breakout_alert_store:
+                continue
+            breakout_alert_store[key] = now_ist
+
+            close4 = float(c4.get("close", 0) or 0)
+            time4 = c4.get("date")
+            time_txt = time4.astimezone(IST).strftime("%H:%M") if hasattr(time4, "astimezone") else now_ist.strftime("%H:%M")
+            alerts.append(
+                f"🚨 {label} BREAKOUT REVERSAL\n"
+                f"Symbol: {sym}\n"
+                f"Close: {close4:.2f} | Break High: {h3:.2f}\n"
+                f"Vol Seq: {int(v1):,} < {int(v2):,} < {int(v3):,} < {int(v4):,}\n"
+                f"TIME: {time_txt} IST"
+            )
+
+    return alerts
+
+
 def process_future_burst(symbol, name, ltp, oi, alerts_list):
     if not is_burst_underlying(name):
         return
@@ -866,4 +1008,5 @@ def calculate_heatmap(kite):
 
     gap_alerts = build_may_future_gap_alerts(kite)
     gap_alerts.extend(build_may_future_r3_pivot_alerts(kite))
+    gap_alerts.extend(build_breakout_reversal_alerts(kite))
     return 0, "", bn_alerts, stock_alerts, gap_alerts
