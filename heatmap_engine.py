@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -56,6 +57,7 @@ R3_PIVOT_RANGE_PCT = 0.5
 R3_PIVOT_CHECK_INTERVAL_SECONDS = 300
 R3_PIVOT_REMINDER_SECONDS = 3600
 R3_PIVOT_CLOSE_REMINDER_SECONDS = 600
+SEND_R3_WATCHLIST = os.getenv("SEND_R3_WATCHLIST", "false").lower() in ("true", "1", "yes")
 
 
 def is_index_underlying(name):
@@ -679,7 +681,8 @@ def build_may_future_r3_pivot_alerts(kite):
         else R3_PIVOT_REMINDER_SECONDS
     )
     reminder_due = (
-        watch_rows
+        SEND_R3_WATCHLIST
+        and watch_rows
         and (
             r3_watch_last_sent_time is None
             or (now_ist - r3_watch_last_sent_time).total_seconds() >= reminder_seconds
@@ -724,6 +727,18 @@ def _is_close_near_low(candle, bottom_pct=0.25):
         if high <= low:
             return False
         return (close - low) <= (high - low) * float(bottom_pct)
+    except Exception:
+        return False
+
+
+def _is_close_near_level_pct(close, level, pct):
+    try:
+        close = float(close or 0)
+        level = float(level or 0)
+        pct = float(pct or 0)
+        if close <= 0 or level <= 0 or pct <= 0:
+            return False
+        return abs(close - level) / level <= (pct / 100.0)
     except Exception:
         return False
 
@@ -829,8 +844,24 @@ def build_breakout_reversal_alerts(kite):
             h3 = float(c3.get("high", 0) or 0)
             h4 = float(c4.get("high", 0) or 0)
 
-            bullish_ok = (l2 < l1 and l3 < l2) and (h4 > h3) and _is_close_near_high(c4, top_pct=0.25)
-            bearish_ok = (h2 > h1 and h3 > h2) and (l4 < l3) and _is_close_near_low(c4, bottom_pct=0.25)
+            close4 = float(c4.get("close", 0) or 0)
+            # Bullish reversal: 3 lower-lows with rising volume, then a reversal candle that
+            # closes just above the previous candle high (within 0.25%) and is strong (near its high).
+            bullish_ok = (
+                (l2 < l1 and l3 < l2)
+                and (h4 > h3)
+                # Allow close slightly below/above the previous candle high (within 0.25%),
+                # e.g. h3=100, close=99.75 is acceptable.
+                and _is_close_near_level_pct(close4, h3, pct=0.25)
+                and _is_close_near_high(c4, top_pct=0.25)
+            )
+            bearish_ok = (
+                (h2 > h1 and h3 > h2)
+                and (l4 < l3)
+                # Symmetric: close near previous candle low within 0.25%.
+                and _is_close_near_level_pct(close4, l3, pct=0.25)
+                and _is_close_near_low(c4, bottom_pct=0.25)
+            )
             if not (bullish_ok or bearish_ok):
                 continue
 
@@ -838,7 +869,6 @@ def build_breakout_reversal_alerts(kite):
             if v4 <= prev_vol_max:
                 continue
 
-            close4 = float(c4.get("close", 0) or 0)
             time4 = c4.get("date")
             time_txt = time4.astimezone(IST).strftime("%H:%M") if hasattr(time4, "astimezone") else now_ist.strftime("%H:%M")
 
