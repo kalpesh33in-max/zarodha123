@@ -111,7 +111,10 @@ def load_options_data():
         try:
             df = pd.read_csv("instruments.csv")
             _options_df = df[df["segment"].isin(["NFO-OPT", "BFO-OPT"])].copy()
-            _options_df["expiry"] = pd.to_datetime(_options_df["expiry"], dayfirst=True)
+            expiry = pd.to_datetime(_options_df["expiry"], format="%Y-%m-%d", errors="coerce")
+            if expiry.isna().mean() > 0.05:
+                expiry = pd.to_datetime(_options_df["expiry"], dayfirst=True, errors="coerce")
+            _options_df["expiry"] = expiry
         except Exception as e:
             print(f"Error loading Options: {e}")
     return _options_df
@@ -123,7 +126,10 @@ def load_futures_data():
         try:
             df = pd.read_csv("instruments.csv")
             _futures_df = df[df["segment"].str.contains("-FUT", na=False)].copy()
-            _futures_df["expiry"] = pd.to_datetime(_futures_df["expiry"], dayfirst=True)
+            expiry = pd.to_datetime(_futures_df["expiry"], format="%Y-%m-%d", errors="coerce")
+            if expiry.isna().mean() > 0.05:
+                expiry = pd.to_datetime(_futures_df["expiry"], dayfirst=True, errors="coerce")
+            _futures_df["expiry"] = expiry
         except Exception as e:
             print(f"Error loading Futures: {e}")
     return _futures_df
