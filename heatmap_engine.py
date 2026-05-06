@@ -710,6 +710,18 @@ def _is_close_near_high(candle, top_pct=0.25):
         return False
 
 
+def _is_close_near_low(candle, bottom_pct=0.25):
+    try:
+        high = float(candle.get("high", 0) or 0)
+        low = float(candle.get("low", 0) or 0)
+        close = float(candle.get("close", 0) or 0)
+        if high <= low:
+            return False
+        return (close - low) <= (high - low) * float(bottom_pct)
+    except Exception:
+        return False
+
+
 def _get_last_completed_candles(kite, token, interval, interval_minutes, now_ist, lookback=30):
     # Fetch recent intraday candles and return the last completed ones.
     from_time = now_ist.replace(hour=9, minute=0, second=0, microsecond=0)
@@ -746,10 +758,9 @@ def build_breakout_reversal_alerts(kite):
     Detects 30m/1h breakout reversal pattern on stock futures.
 
     Pattern (per timeframe):
-    - At least 3 consecutive candles with lower lows AND increasing volume
-    - First candle volume >= 100,000
-    - Next (reversal) candle breaks previous candle high, closes near its high,
-      and has volume greater than all previous candles in a lookback window.
+    - Volume sequence: v1>=100k, v2>v1, v3>v2, and reversal v4 is the highest in lookback
+    - Bullish: 3 candles with lower lows, then reversal candle breaks prev high and closes near its high
+    - Bearish: 3 candles with higher highs, then reversal candle breaks prev low and closes near its low
     Alerts are rate-limited and sent once per symbol+timeframe per day.
     """
     now_ist = datetime.now(IST)
@@ -805,33 +816,49 @@ def build_breakout_reversal_alerts(kite):
             l1 = float(c1.get("low", 0) or 0)
             l2 = float(c2.get("low", 0) or 0)
             l3 = float(c3.get("low", 0) or 0)
-            if not (l2 < l1 and l3 < l2):
-                continue
+            l4 = float(c4.get("low", 0) or 0)
 
+            h1 = float(c1.get("high", 0) or 0)
+            h2 = float(c2.get("high", 0) or 0)
             h3 = float(c3.get("high", 0) or 0)
             h4 = float(c4.get("high", 0) or 0)
-            if not (h4 > h3 and _is_close_near_high(c4, top_pct=0.25)):
+
+            bullish_ok = (l2 < l1 and l3 < l2) and (h4 > h3) and _is_close_near_high(c4, top_pct=0.25)
+            bearish_ok = (h2 > h1 and h3 > h2) and (l4 < l3) and _is_close_near_low(c4, bottom_pct=0.25)
+            if not (bullish_ok or bearish_ok):
                 continue
 
             prev_vol_max = max(float(c.get("volume", 0) or 0) for c in candles[:-1]) if candles[:-1] else 0
             if v4 <= prev_vol_max:
                 continue
 
-            key = f"BR_{name}_{label}_{now_ist.date().isoformat()}"
-            if key in breakout_alert_store:
-                continue
-            breakout_alert_store[key] = now_ist
-
             close4 = float(c4.get("close", 0) or 0)
             time4 = c4.get("date")
             time_txt = time4.astimezone(IST).strftime("%H:%M") if hasattr(time4, "astimezone") else now_ist.strftime("%H:%M")
-            alerts.append(
-                f"🚨 {label} BREAKOUT REVERSAL\n"
-                f"Symbol: {sym}\n"
-                f"Close: {close4:.2f} | Break High: {h3:.2f}\n"
-                f"Vol Seq: {int(v1):,} < {int(v2):,} < {int(v3):,} < {int(v4):,}\n"
-                f"TIME: {time_txt} IST"
-            )
+
+            if bullish_ok:
+                key = f"BR_BULL_{name}_{label}_{now_ist.date().isoformat()}"
+                if key not in breakout_alert_store:
+                    breakout_alert_store[key] = now_ist
+                    alerts.append(
+                        f"🚨 {label} BULLISH BREAKOUT REVERSAL\n"
+                        f"Symbol: {sym}\n"
+                        f"Close: {close4:.2f} | Break High: {h3:.2f}\n"
+                        f"Vol Seq: {int(v1):,} < {int(v2):,} < {int(v3):,} < {int(v4):,}\n"
+                        f"TIME: {time_txt} IST"
+                    )
+
+            if bearish_ok:
+                key = f"BR_BEAR_{name}_{label}_{now_ist.date().isoformat()}"
+                if key not in breakout_alert_store:
+                    breakout_alert_store[key] = now_ist
+                    alerts.append(
+                        f"🚨 {label} BEAR BREAKOUT REVERSAL\n"
+                        f"Symbol: {sym}\n"
+                        f"Close: {close4:.2f} | Break Low: {l3:.2f}\n"
+                        f"Vol Seq: {int(v1):,} < {int(v2):,} < {int(v3):,} < {int(v4):,}\n"
+                        f"TIME: {time_txt} IST"
+                    )
 
     return alerts
 
