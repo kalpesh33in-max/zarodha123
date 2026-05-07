@@ -844,11 +844,15 @@ def build_breakout_reversal_alerts(kite):
             h3 = float(c3.get("high", 0) or 0)
             h4 = float(c4.get("high", 0) or 0)
 
+            close1 = float(c1.get("close", 0) or 0)
+            close2 = float(c2.get("close", 0) or 0)
+            close3 = float(c3.get("close", 0) or 0)
             close4 = float(c4.get("close", 0) or 0)
             # Bullish reversal: 3 lower-lows with rising volume, then a reversal candle that
             # closes just above the previous candle high (within 0.25%) and is strong (near its high).
             bullish_ok = (
                 (l2 < l1 and l3 < l2)
+                and (close2 < close1 and close3 < close2)
                 and (h4 > h3)
                 # Allow close slightly below/above the previous candle high (within 0.25%),
                 # e.g. h3=100, close=99.75 is acceptable.
@@ -857,6 +861,7 @@ def build_breakout_reversal_alerts(kite):
             )
             bearish_ok = (
                 (h2 > h1 and h3 > h2)
+                and (close2 > close1 and close3 > close2)
                 and (l4 < l3)
                 # Symmetric: close near previous candle low within 0.25%.
                 and _is_close_near_level_pct(close4, l3, pct=0.25)
