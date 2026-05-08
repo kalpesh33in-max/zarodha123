@@ -9,12 +9,15 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 SCAN_INTERVAL_SECONDS = 5
+SILENT_LOG_INTERVAL_SECONDS = 300
 
 
 def run_scanner(kite, stop_event=None):
 
     print("Scanner session initialized. Sending status to Telegram...")
     send_telegram_message("✅ *Kite Scanner Login Successful!* Waiting for market hours (09:00 AM) to send reports...")
+
+    last_silent_log_time = 0.0
 
     while stop_event is None or not stop_event.is_set():
 
@@ -51,7 +54,11 @@ def run_scanner(kite, stop_event=None):
                 send_telegram_message(f"Scanner Error: {e}")
 
         else:
-            print(f"[{now.strftime('%H:%M:%S')}] Outside trading session (weekend/market closed). Scanner is silent.")
+            # Avoid spamming logs when the market is closed.
+            now_ts = now.timestamp()
+            if now_ts - last_silent_log_time >= SILENT_LOG_INTERVAL_SECONDS:
+                print(f"[{now.strftime('%H:%M:%S')}] Outside trading session (weekend/market closed). Scanner is silent.")
+                last_silent_log_time = now_ts
 
         if stop_event:
             if stop_event.wait(SCAN_INTERVAL_SECONDS):
