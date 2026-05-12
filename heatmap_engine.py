@@ -238,10 +238,33 @@ def get_stock_may_future_symbols():
 
     may_futures = may_futures.sort_values(["name", "expiry", "tradingsymbol"])
     selected = may_futures.groupby("name", as_index=False).first()
-    return [
-        (row["name"], f"NFO:{row['tradingsymbol']}")
-        for _, row in selected.iterrows()
-    ]
+    futures = futures.sort_values(["name", "expiry", "tradingsymbol"])
+
+    contracts = []
+    for _, row in selected.iterrows():
+        name = row["name"]
+        current_expiry = row["expiry"]
+        next_futures = futures[
+            (futures["name"] == name)
+            & (futures["expiry"] > current_expiry)
+        ]
+
+        next_symbol = None
+        next_month_label = "Next"
+        if not next_futures.empty:
+            next_row = next_futures.iloc[0]
+            next_symbol = f"NFO:{next_row['tradingsymbol']}"
+            next_month_label = next_row["expiry"].strftime("%b")
+
+        contracts.append(
+            (
+                name,
+                f"NFO:{row['tradingsymbol']}",
+                next_symbol,
+                next_month_label,
+            )
+        )
+    return contracts
 
 
 def get_relevant_options(name, ltp):
@@ -323,16 +346,21 @@ def build_may_future_gap_alerts(kite):
     if now_ist.weekday() > 4 or now_ist.time() < MAY_FUTURE_GAP_START_TIME:
         return []
 
-    future_symbols = get_stock_may_future_symbols()
-    if not future_symbols:
+    future_contracts = get_stock_may_future_symbols()
+    if not future_contracts:
         return []
 
-    symbol_pairs = [(name, get_spot_symbol(name), future_symbol) for name, future_symbol in future_symbols]
+    symbol_pairs = [
+        (name, get_spot_symbol(name), future_symbol, next_symbol, next_month_label)
+        for name, future_symbol, next_symbol, next_month_label in future_contracts
+    ]
 
     quote_symbols = []
-    for _, spot_symbol, future_symbol in symbol_pairs:
+    for _, spot_symbol, future_symbol, next_symbol, _ in symbol_pairs:
         quote_symbols.append(spot_symbol)
         quote_symbols.append(future_symbol)
+        if next_symbol:
+            quote_symbols.append(next_symbol)
 
     data = get_symbol_quotes_with_fallback(kite, quote_symbols)
     if not data:
@@ -340,13 +368,18 @@ def build_may_future_gap_alerts(kite):
 
     now = datetime.now(IST)
     rows = []
-    for name, spot_symbol, future_symbol in symbol_pairs:
+    for name, spot_symbol, future_symbol, next_symbol, next_month_label in symbol_pairs:
         spot_price = data.get(spot_symbol, {}).get("last_price", 0)
         future_price = data.get(future_symbol, {}).get("last_price", 0)
         if spot_price <= 0 or future_price <= 0:
             continue
 
         gap_pct = ((future_price - spot_price) / spot_price) * 100
+        next_future_price = data.get(next_symbol, {}).get("last_price", 0) if next_symbol else 0
+        next_gap_pct = None
+        if next_future_price > 0:
+            next_gap_pct = ((next_future_price - future_price) / future_price) * 100
+
         if abs(gap_pct) < MAY_FUTURE_GAP_THRESHOLD_PCT:
             continue
 
@@ -361,6 +394,9 @@ def build_may_future_gap_alerts(kite):
                 "spot_price": spot_price,
                 "future_price": future_price,
                 "gap_pct": gap_pct,
+                "next_future_price": next_future_price,
+                "next_gap_pct": next_gap_pct,
+                "next_month_label": next_month_label,
             }
         )
 
@@ -372,14 +408,22 @@ def build_may_future_gap_alerts(kite):
     chunk_size = 20
     for i in range(0, len(rows), chunk_size):
         chunk = rows[i:i + chunk_size]
-        body = "\n".join(
-            [
+        body_lines = []
+        for item in chunk:
+            if item["next_gap_pct"] is None:
+                next_future_text = "Next Fut NA | Next-vs-May NA"
+            else:
+                next_future_text = (
+                    f"{item['next_month_label']} Fut {item['next_future_price']:.2f} | "
+                    f"{item['next_month_label']}-vs-May {item['next_gap_pct']:+.2f}%"
+                )
+            body_lines.append(
                 f"{item['name']}: Spot {item['spot_price']:.2f} | "
                 f"May Fut {item['future_price']:.2f} | "
-                f"Gap {item['gap_pct']:+.2f}% | {_format_gap_signal(item['gap_pct'])}"
-                for item in chunk
-            ]
-        )
+                f"Spot Gap {item['gap_pct']:+.2f}% | "
+                f"{next_future_text} | {_format_gap_signal(item['gap_pct'])}"
+            )
+        body = "\n".join(body_lines)
         alerts.append(f"📊 MAY FUTURE GAP REPORT\n\n{body}")
     return alerts
 
