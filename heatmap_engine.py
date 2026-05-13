@@ -42,6 +42,8 @@ r3_watch_last_sent_time = None
 # Breakout reversal scanner state
 breakout_last_check = {"30minute": None, "60minute": None}
 breakout_alert_store = {}
+born_breakout_last_check_time = None
+born_breakout_alert_store = {}
 
 _options_df = None
 _futures_df = None
@@ -50,7 +52,7 @@ _last_logged_expiry = {}
 IST = ZoneInfo("Asia/Kolkata")
 MAY_FUTURE_GAP_THRESHOLD_PCT = 2.0
 MAY_FUTURE_GAP_START_TIME = datetime.strptime("09:15", "%H:%M").time()
-GAP_ALERT_COOLDOWN_SECONDS = 300
+GAP_ALERT_COOLDOWN_SECONDS = 3600
 R3_PIVOT_ALERT_START_TIME = datetime.strptime("09:15", "%H:%M").time()
 R3_PIVOT_CLOSE_REMINDER_START_TIME = datetime.strptime("15:00", "%H:%M").time()
 R3_PIVOT_RANGE_PCT = 0.5
@@ -58,6 +60,10 @@ R3_PIVOT_CHECK_INTERVAL_SECONDS = 300
 R3_PIVOT_REMINDER_SECONDS = 3600
 R3_PIVOT_CLOSE_REMINDER_SECONDS = 600
 SEND_R3_WATCHLIST = os.getenv("SEND_R3_WATCHLIST", "false").lower() in ("true", "1", "yes")
+BORN_BREAKOUT_ALERT_START_TIME = datetime.strptime("09:15", "%H:%M").time()
+BORN_BREAKOUT_CHECK_INTERVAL_SECONDS = 3600
+BORN_BREAKOUT_LOOKBACK_DAYS = 180
+BREAKOUT_MIN_FIRST_VOLUME = 25000
 
 
 def is_index_underlying(name):
@@ -453,6 +459,37 @@ def _get_may_stock_future_contracts():
     ]
 
 
+def _get_next_month_stock_future_contracts():
+    futures = load_stock_futures_data()
+    if futures.empty:
+        return []
+
+    today = datetime.now(IST).date()
+    futures = futures[
+        futures["expiry"].notna()
+        & (futures["expiry"].dt.date >= today)
+    ].copy()
+    if futures.empty:
+        return []
+
+    futures = futures.sort_values(["name", "expiry", "tradingsymbol"])
+    contracts = []
+    for name, rows in futures.groupby("name"):
+        rows = rows.sort_values(["expiry", "tradingsymbol"])
+        if len(rows) < 2:
+            continue
+        row = rows.iloc[1]
+        contracts.append(
+            {
+                "name": name,
+                "symbol": f"NFO:{row['tradingsymbol']}",
+                "token": int(row["instrument_token"]),
+                "expiry": row["expiry"],
+            }
+        )
+    return contracts
+
+
 def _get_latest_completed_candle(candles, interval_minutes, now_ist):
     # Prefer the last *fully completed* candle. After market close, some larger
     # intervals (e.g. 60minute) may include a final partial candle; we ignore it
@@ -751,6 +788,140 @@ def build_may_future_r3_pivot_alerts(kite):
     return alerts
 
 
+def _build_weekly_candles_from_daily(candles):
+    weekly = []
+    current_key = None
+    current = None
+
+    for candle in sorted(candles, key=lambda item: item.get("date")):
+        candle_time = candle.get("date")
+        if candle_time is None:
+            continue
+        if candle_time.tzinfo is None:
+            candle_time = candle_time.replace(tzinfo=IST)
+        else:
+            candle_time = candle_time.astimezone(IST)
+
+        week_start = candle_time.date() - timedelta(days=candle_time.weekday())
+        open_price = float(candle.get("open", 0) or 0)
+        high = float(candle.get("high", 0) or 0)
+        low = float(candle.get("low", 0) or 0)
+        close = float(candle.get("close", 0) or 0)
+        volume = float(candle.get("volume", 0) or 0)
+        if open_price <= 0 or high <= 0 or low <= 0 or close <= 0:
+            continue
+
+        if current_key != week_start:
+            if current:
+                weekly.append(current)
+            current_key = week_start
+            current = {
+                "week_start": week_start,
+                "open": open_price,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": volume,
+                "first_date": candle_time.date(),
+                "last_date": candle_time.date(),
+            }
+            continue
+
+        current["high"] = max(current["high"], high)
+        current["low"] = min(current["low"], low)
+        current["close"] = close
+        current["volume"] += volume
+        current["last_date"] = candle_time.date()
+
+    if current:
+        weekly.append(current)
+
+    return weekly
+
+
+def build_weekly_born_breakout_alerts(kite):
+    global born_breakout_last_check_time
+
+    now_ist = datetime.now(IST)
+    if now_ist.weekday() > 4 or now_ist.time() < BORN_BREAKOUT_ALERT_START_TIME:
+        return []
+
+    if (
+        born_breakout_last_check_time
+        and (now_ist - born_breakout_last_check_time).total_seconds()
+        < BORN_BREAKOUT_CHECK_INTERVAL_SECONDS
+    ):
+        return []
+    born_breakout_last_check_time = now_ist
+
+    contracts = _get_next_month_stock_future_contracts()
+    if not contracts:
+        return []
+
+    symbols = [contract["symbol"] for contract in contracts]
+    quote_data = get_symbol_quotes_with_fallback(kite, symbols)
+    alerts = []
+
+    for contract in contracts:
+        symbol = contract["symbol"]
+        ltp = quote_data.get(symbol, {}).get("last_price", 0)
+        if ltp <= 0:
+            continue
+
+        expiry = contract["expiry"]
+        from_date = expiry.date() - timedelta(days=BORN_BREAKOUT_LOOKBACK_DAYS)
+        from_time = datetime.combine(from_date, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
+
+        try:
+            candles = kite.historical_data(contract["token"], from_time, now_ist, "day")
+        except Exception as e:
+            print(f"Born breakout historical data error for {contract['token']}: {e}")
+            continue
+
+        weekly = _build_weekly_candles_from_daily(candles)
+        if len(weekly) < 2:
+            continue
+
+        born = weekly[0]
+        current = weekly[-1]
+        born_high = float(born["high"])
+        if born_high <= 0:
+            continue
+
+        already_crossed = any(
+            float(item["high"]) > born_high
+            for item in weekly[1:-1]
+        )
+        if already_crossed:
+            continue
+
+        break_price = max(float(current["high"]), float(ltp))
+        if break_price <= born_high:
+            continue
+
+        alert_key = (
+            f"BORN_WEEKLY:{contract['symbol']}:"
+            f"{born['week_start'].isoformat()}"
+        )
+        if alert_key in born_breakout_alert_store:
+            continue
+
+        born_breakout_alert_store[alert_key] = now_ist
+        break_pct = ((break_price - born_high) / born_high) * 100
+        alerts.append(
+            f"🚨 WEEKLY BORN BREAKOUT\n\n"
+            f"Symbol: {symbol}\n"
+            f"Born Week: {born['week_start'].strftime('%d-%m-%Y')}\n"
+            f"Born High: {born_high:.2f}\n"
+            f"Current Fut: {ltp:.2f}\n"
+            f"Break Above: {break_price:.2f} ({break_pct:+.2f}%)\n"
+            f"Expiry: {expiry.strftime('%d-%m-%Y')}\n"
+            f"TIME: {now_ist.strftime('%H:%M:%S')} IST"
+        )
+
+    return alerts
+
+
 def _is_close_near_high(candle, top_pct=0.25):
     try:
         high = float(candle.get("high", 0) or 0)
@@ -788,8 +959,10 @@ def _is_close_near_level_pct(close, level, pct):
 
 
 def _get_last_completed_candles(kite, token, interval, interval_minutes, now_ist, lookback=30):
-    # Fetch recent intraday candles and return the last completed ones.
-    from_time = now_ist.replace(hour=9, minute=0, second=0, microsecond=0)
+    # Fetch previous trading day plus current day so 30m/1h patterns have enough
+    # completed candles early in the session.
+    prev_day = _get_previous_trading_day(now_ist)
+    from_time = datetime.combine(prev_day, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
     to_time = now_ist
     try:
         candles = kite.historical_data(token, from_time, to_time, interval)
@@ -823,7 +996,7 @@ def build_breakout_reversal_alerts(kite):
     Detects 30m/1h breakout reversal pattern on stock futures.
 
     Pattern (per timeframe):
-    - Volume sequence: v1>=100k, v2>v1, v3>v2, and reversal v4 is the highest in lookback
+    - Volume sequence: v1>25k, v2>v1, v3>v2, and reversal v4 is the highest in lookback
     - Bullish: 3 candles with lower lows, then reversal candle breaks prev high and closes near its high
     - Bearish: 3 candles with higher highs, then reversal candle breaks prev low and closes near its low
     Alerts are rate-limited and sent once per symbol+timeframe per day.
@@ -864,7 +1037,7 @@ def build_breakout_reversal_alerts(kite):
             token = int(rows.iloc[0]["instrument_token"])
 
             candles = _get_last_completed_candles(kite, token, interval, mins, now_ist, lookback=30)
-            if len(candles) < 24:
+            if len(candles) < 4:
                 continue
 
             # Use last 4 completed candles for the pattern.
@@ -873,7 +1046,7 @@ def build_breakout_reversal_alerts(kite):
             v2 = float(c2.get("volume", 0) or 0)
             v3 = float(c3.get("volume", 0) or 0)
             v4 = float(c4.get("volume", 0) or 0)
-            if v1 < 100000:
+            if v1 <= BREAKOUT_MIN_FIRST_VOLUME:
                 continue
             if not (v2 > v1 and v3 > v2):
                 continue
@@ -1121,4 +1294,5 @@ def calculate_heatmap(kite):
     gap_alerts = build_may_future_gap_alerts(kite)
     gap_alerts.extend(build_may_future_r3_pivot_alerts(kite))
     gap_alerts.extend(build_breakout_reversal_alerts(kite))
+    gap_alerts.extend(build_weekly_born_breakout_alerts(kite))
     return 0, "", bn_alerts, stock_alerts, gap_alerts
