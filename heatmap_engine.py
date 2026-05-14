@@ -38,6 +38,9 @@ gap_alert_store = {}
 r3_alert_store = {}
 r3_last_check_time = None
 r3_watch_last_sent_time = None
+s4_alert_store = {}
+s4_state_store = {}
+s4_last_check_time = None
 
 # Breakout reversal scanner state
 breakout_last_check = {"30minute": None, "60minute": None}
@@ -60,6 +63,9 @@ R3_PIVOT_CHECK_INTERVAL_SECONDS = 300
 R3_PIVOT_REMINDER_SECONDS = 3600
 R3_PIVOT_CLOSE_REMINDER_SECONDS = 600
 SEND_R3_WATCHLIST = os.getenv("SEND_R3_WATCHLIST", "false").lower() in ("true", "1", "yes")
+S4_PIVOT_ALERT_START_TIME = R3_PIVOT_ALERT_START_TIME
+S4_PIVOT_RANGE_PCT = R3_PIVOT_RANGE_PCT
+S4_PIVOT_CHECK_INTERVAL_SECONDS = R3_PIVOT_CHECK_INTERVAL_SECONDS
 BORN_BREAKOUT_ALERT_START_TIME = datetime.strptime("09:15", "%H:%M").time()
 BORN_BREAKOUT_CHECK_INTERVAL_SECONDS = 3600
 BORN_BREAKOUT_LOOKBACK_DAYS = 180
@@ -788,6 +794,130 @@ def build_may_future_r3_pivot_alerts(kite):
     return alerts
 
 
+def build_stock_future_1hr_s4_alerts(kite):
+    global s4_last_check_time
+
+    now_ist = datetime.now(IST)
+    if now_ist.weekday() > 4 or now_ist.time() < S4_PIVOT_ALERT_START_TIME:
+        return []
+
+    if (
+        s4_last_check_time
+        and (now_ist - s4_last_check_time).total_seconds() < S4_PIVOT_CHECK_INTERVAL_SECONDS
+    ):
+        return []
+    s4_last_check_time = now_ist
+
+    contracts = _get_may_stock_future_contracts()
+    if not contracts:
+        return []
+
+    symbols = [contract["symbol"] for contract in contracts]
+    data = get_symbol_quotes_with_fallback(kite, symbols)
+    if not data:
+        return []
+
+    current_week_start = now_ist.date() - timedelta(days=now_ist.weekday())
+    prev_week_start = current_week_start - timedelta(days=7)
+    prev_week_end = prev_week_start + timedelta(days=4)
+    from_time = datetime.combine(prev_week_start, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
+    to_time = datetime.combine(prev_week_end, datetime.strptime("15:30", "%H:%M").time(), tzinfo=IST)
+
+    below_rows = []
+    ready_breakdown_rows = []
+    ready_breakup_rows = []
+    breakup_rows = []
+
+    for contract in contracts:
+        symbol = contract["symbol"]
+        ltp = data.get(symbol, {}).get("last_price", 0)
+        if ltp <= 0:
+            continue
+
+        try:
+            candles = kite.historical_data(contract["token"], from_time, to_time, "60minute")
+        except Exception as e:
+            print(f"S4 previous week candle fetch error for {contract['token']}: {e}")
+            continue
+        if not candles:
+            continue
+
+        high = max(float(c.get("high", 0) or 0) for c in candles)
+        low = min(float(c.get("low", 0) or 0) for c in candles)
+        prev_close = float(candles[-1].get("close", 0) or 0)
+        if high <= 0 or low <= 0 or prev_close <= 0:
+            continue
+
+        pivot = (high + low + prev_close) / 3
+        s4 = pivot - (3 * (high - low))
+        if s4 <= 0:
+            continue
+
+        diff_pct = ((ltp - s4) / s4) * 100
+        current_side = "below" if ltp < s4 else "above"
+        state_key = f"S4_STATE:{symbol}:{now_ist.date().isoformat()}"
+        prev_side = s4_state_store.get(state_key)
+
+        row = {
+            "name": contract["name"],
+            "month_label": "MAY",
+            "symbol": symbol,
+            "ltp": ltp,
+            "s4": s4,
+            "diff_pct": diff_pct,
+            "prev_close": prev_close,
+        }
+
+        if prev_side == "below" and ltp > s4:
+            alert_key = f"S4_BREAKUP:{symbol}:{now_ist.date().isoformat()}"
+            if alert_key not in s4_alert_store:
+                s4_alert_store[alert_key] = now_ist
+                breakup_rows.append(row)
+        elif ltp < s4:
+            if abs(diff_pct) <= S4_PIVOT_RANGE_PCT:
+                alert_key = f"S4_READY_BREAKUP:{symbol}:{now_ist.date().isoformat()}"
+                if alert_key not in s4_alert_store:
+                    s4_alert_store[alert_key] = now_ist
+                    ready_breakup_rows.append(row)
+            else:
+                alert_key = f"S4_BELOW:{symbol}:{now_ist.date().isoformat()}"
+                if alert_key not in s4_alert_store:
+                    s4_alert_store[alert_key] = now_ist
+                    below_rows.append(row)
+        elif 0 <= diff_pct <= S4_PIVOT_RANGE_PCT:
+            alert_key = f"S4_READY_BREAKDOWN:{symbol}:{now_ist.date().isoformat()}"
+            if alert_key not in s4_alert_store:
+                s4_alert_store[alert_key] = now_ist
+                ready_breakdown_rows.append(row)
+
+        s4_state_store[state_key] = current_side
+
+    def _format_rows(rows, side_text):
+        return [
+            f"{item['name']} {item['month_label']} FUT: Fut {item['ltp']:.2f} | "
+            f"1HR S4 {item['s4']:.2f} | {side_text} {item['diff_pct']:+.2f}% | "
+            f"Prev Close {item['prev_close']:.2f}"
+            for item in rows
+        ]
+
+    alerts = []
+    alert_groups = [
+        ("STOCK FUTURE 1HR S4 BELOW ALERT", below_rows, "Below"),
+        ("STOCK FUTURE 1HR S4 READY BREAKDOWN", ready_breakdown_rows, "Above"),
+        ("STOCK FUTURE 1HR S4 READY BREAKUP", ready_breakup_rows, "Below"),
+        ("STOCK FUTURE 1HR S4 BREAKUP ABOVE", breakup_rows, "Above"),
+    ]
+    for title, rows, side_text in alert_groups:
+        if not rows:
+            continue
+        body_lines = _format_rows(rows, side_text)
+        for i in range(0, len(body_lines), 20):
+            chunk = "\n".join(body_lines[i:i + 20])
+            alerts.append(f"{title}\n\n{chunk}\n\nTIME: {now_ist.strftime('%H:%M:%S')} IST")
+
+    return alerts
+
+
 def _build_weekly_candles_from_daily(candles):
     weekly = []
     current_key = None
@@ -1293,6 +1423,7 @@ def calculate_heatmap(kite):
 
     gap_alerts = build_may_future_gap_alerts(kite)
     gap_alerts.extend(build_may_future_r3_pivot_alerts(kite))
+    gap_alerts.extend(build_stock_future_1hr_s4_alerts(kite))
     gap_alerts.extend(build_breakout_reversal_alerts(kite))
     gap_alerts.extend(build_weekly_born_breakout_alerts(kite))
     return 0, "", bn_alerts, stock_alerts, gap_alerts
