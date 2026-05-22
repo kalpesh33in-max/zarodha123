@@ -16,17 +16,12 @@ LOT_SIZES = {
     "RELIANCE": 500,
 }
 
-INDEX_BURST_NAMES = {"BANKNIFTY", "NIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"}
-STOCK_BURST_NAMES = {"HDFCBANK", "ICICIBANK", "RELIANCE"}
+INDEX_BURST_NAMES = {"BANKNIFTY", "NIFTY", "SENSEX"}
+STOCK_BURST_NAMES = set()
 BURST_TRACK_NAMES = [
     "BANKNIFTY",
     "NIFTY",
-    "FINNIFTY",
-    "MIDCPNIFTY",
     "SENSEX",
-    "HDFCBANK",
-    "ICICIBANK",
-    "RELIANCE",
 ]
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 INDEX_FUTURE_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "SENSEX50"}
@@ -45,6 +40,7 @@ s4_last_check_time = None
 # Breakout reversal scanner state
 breakout_last_check = {"30minute": None, "60minute": None}
 breakout_alert_store = {}
+vpa_alert_store = {}
 born_breakout_last_check_time = None
 born_breakout_alert_store = {}
 
@@ -70,6 +66,10 @@ BORN_BREAKOUT_ALERT_START_TIME = datetime.strptime("09:15", "%H:%M").time()
 BORN_BREAKOUT_CHECK_INTERVAL_SECONDS = 3600
 BORN_BREAKOUT_LOOKBACK_DAYS = 180
 BREAKOUT_MIN_FIRST_VOLUME = 25000
+VPA_LOW_VOLUME_FACTOR = 0.75
+VPA_HIGH_VOLUME_FACTOR = 1.35
+VPA_NARROW_BODY_RANGE_PCT = 0.35
+VPA_DEEP_WICK_RANGE_PCT = 0.45
 
 
 def is_index_underlying(name):
@@ -1125,6 +1125,176 @@ def _get_last_completed_candles(kite, token, interval, interval_minutes, now_ist
     return completed[-lookback:]
 
 
+def _candle_number(candle, field):
+    try:
+        return float(candle.get(field, 0) or 0)
+    except Exception:
+        return 0.0
+
+
+def _candle_time_text(candle, now_ist):
+    candle_time = candle.get("date")
+    if hasattr(candle_time, "astimezone"):
+        return candle_time.astimezone(IST).strftime("%H:%M")
+    return now_ist.strftime("%H:%M")
+
+
+def _candle_key(candle, now_ist):
+    candle_time = candle.get("date")
+    if hasattr(candle_time, "isoformat"):
+        return candle_time.isoformat()
+    return now_ist.isoformat()
+
+
+def _build_simple_vpa_stock_alerts(name, symbol, label, candles, now_ist):
+    """
+    Converts VPA ideas into simple BUY/SELL/WAIT stock-future alerts.
+
+    The wording intentionally avoids VPA terms such as absorption, distribution,
+    supply, and demand because the Telegram alert should be action-oriented.
+    """
+    if len(candles) < 5:
+        return []
+
+    c1, c2, c3, c4, c5 = candles[-5], candles[-4], candles[-3], candles[-2], candles[-1]
+    prior_candles = candles[:-1][-20:] or candles[:-1]
+    volumes = [_candle_number(c, "volume") for c in prior_candles]
+    volumes = [vol for vol in volumes if vol > 0]
+    if not volumes:
+        return []
+
+    avg_volume = sum(volumes) / len(volumes)
+    open5 = _candle_number(c5, "open")
+    high5 = _candle_number(c5, "high")
+    low5 = _candle_number(c5, "low")
+    close5 = _candle_number(c5, "close")
+    volume5 = _candle_number(c5, "volume")
+    candle_range = high5 - low5
+    if min(open5, high5, low5, close5, volume5, candle_range) <= 0:
+        return []
+
+    body = abs(close5 - open5)
+    lower_wick = min(open5, close5) - low5
+    upper_wick = high5 - max(open5, close5)
+    narrow_body = body <= candle_range * VPA_NARROW_BODY_RANGE_PCT
+    lower_wick_signal = (
+        narrow_body
+        and lower_wick >= candle_range * VPA_DEEP_WICK_RANGE_PCT
+        and lower_wick > upper_wick
+    )
+    upper_wick_signal = (
+        narrow_body
+        and upper_wick >= candle_range * VPA_DEEP_WICK_RANGE_PCT
+        and upper_wick > lower_wick
+    )
+    low_volume = volume5 <= avg_volume * VPA_LOW_VOLUME_FACTOR
+    high_volume = volume5 >= avg_volume * VPA_HIGH_VOLUME_FACTOR
+
+    low1, low2, low3, low4 = (_candle_number(c, "low") for c in (c1, c2, c3, c4))
+    high1, high2, high3, high4 = (_candle_number(c, "high") for c in (c1, c2, c3, c4))
+    close1, close2, close3, close4 = (_candle_number(c, "close") for c in (c1, c2, c3, c4))
+    volume1, volume2, volume3, volume4 = (_candle_number(c, "volume") for c in (c1, c2, c3, c4))
+
+    recent_down = close4 < close1 or low4 <= min(low1, low2, low3)
+    recent_up = close4 > close1 or high4 >= max(high1, high2, high3)
+    test_buy_context = recent_down or low5 < min(low1, low2, low3, low4)
+    test_sell_context = recent_up or high5 > max(high1, high2, high3, high4)
+
+    alerts = []
+    time_txt = _candle_time_text(c5, now_ist)
+    candle_key = _candle_key(c5, now_ist)
+
+    def add_alert(signal_key, title, reason, signal):
+        alert_key = f"VPA:{signal_key}:{symbol}:{label}:{candle_key}"
+        if alert_key in vpa_alert_store:
+            return
+        vpa_alert_store[alert_key] = now_ist
+        alerts.append(
+            f"{title}\n\n"
+            f"Symbol: {symbol}\n"
+            f"TF: {label}\n"
+            f"Close: {close5:.2f}\n"
+            f"Volume: {int(volume5):,} (Avg {int(avg_volume):,})\n"
+            f"Reason: {reason}\n"
+            f"Signal: {signal}\n"
+            f"TIME: {time_txt} IST"
+        )
+
+    if test_buy_context and lower_wick_signal:
+        if low_volume:
+            add_alert(
+                "BUY_TEST_PASS",
+                "🟢 STOCK FUTURE BUY ALERT",
+                "Sellers look weak; price may move up.",
+                "Lower wick with low volume.",
+            )
+            return alerts
+        if high_volume:
+            add_alert(
+                "BUY_TEST_FAIL",
+                "⚠️ STOCK FUTURE BUY WAIT",
+                "Sellers are still active; avoid fresh buy.",
+                "Lower wick came with high volume.",
+            )
+            return alerts
+
+    if test_sell_context and upper_wick_signal:
+        if low_volume:
+            add_alert(
+                "SELL_TEST_PASS",
+                "🔴 STOCK FUTURE SELL ALERT",
+                "Buyers look weak; price may move down.",
+                "Upper wick with low volume.",
+            )
+            return alerts
+        if high_volume:
+            add_alert(
+                "SELL_TEST_FAIL",
+                "⚠️ STOCK FUTURE SELL WAIT",
+                "Buyers are still active; avoid fresh sell.",
+                "Upper wick came with high volume.",
+            )
+            return alerts
+
+    effort_spike = volume2 >= max(volume1, avg_volume * 1.15)
+    volume_fade = volume3 < volume2 and volume4 < volume3
+    bullish_reversal = (
+        recent_down
+        and effort_spike
+        and volume_fade
+        and high5 > high4
+        and _is_close_near_level_pct(close5, high4, pct=0.25)
+        and _is_close_near_high(c5, top_pct=0.30)
+        and volume5 >= volume4
+    )
+    bearish_reversal = (
+        recent_up
+        and effort_spike
+        and volume_fade
+        and low5 < low4
+        and _is_close_near_level_pct(close5, low4, pct=0.25)
+        and _is_close_near_low(c5, bottom_pct=0.30)
+        and volume5 >= volume4
+    )
+
+    if bullish_reversal:
+        add_alert(
+            "BUY_VOLUME_REVERSAL",
+            "🟢 STOCK FUTURE BUY ALERT",
+            "Sellers look weak; price broke previous high.",
+            "Down move lost volume, then price reversed up.",
+        )
+    elif bearish_reversal:
+        add_alert(
+            "SELL_VOLUME_REVERSAL",
+            "🔴 STOCK FUTURE SELL ALERT",
+            "Buyers look weak; price broke previous low.",
+            "Up move lost volume, then price reversed down.",
+        )
+
+    return alerts
+
+
 def build_breakout_reversal_alerts(kite):
     """
     Detects 30m/1h breakout reversal pattern on stock futures.
@@ -1173,6 +1343,8 @@ def build_breakout_reversal_alerts(kite):
             candles = _get_last_completed_candles(kite, token, interval, mins, now_ist, lookback=30)
             if len(candles) < 5:
                 continue
+
+            alerts.extend(_build_simple_vpa_stock_alerts(name, sym, label, candles, now_ist))
 
             # Use last 5 completed candles for the pattern.
             c1, c2, c3, c4, c5 = candles[-5], candles[-4], candles[-3], candles[-2], candles[-1]
