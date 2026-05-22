@@ -1089,10 +1089,14 @@ def _is_close_near_level_pct(close, level, pct):
 
 
 def _get_last_completed_candles(kite, token, interval, interval_minutes, now_ist, lookback=30):
-    # Fetch previous trading day plus current day so 30m/1h patterns have enough
-    # completed candles early in the session.
-    prev_day = _get_previous_trading_day(now_ist)
-    from_time = datetime.combine(prev_day, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
+    # Fetch last two trading days plus current day so 30m/1h patterns have
+    # enough completed candles early in the session.
+    start_day = now_ist.date()
+    for _ in range(2):
+        start_day -= timedelta(days=1)
+        while start_day.weekday() > 4:
+            start_day -= timedelta(days=1)
+    from_time = datetime.combine(start_day, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
     to_time = now_ist
     try:
         candles = kite.historical_data(token, from_time, to_time, interval)
@@ -1126,9 +1130,9 @@ def build_breakout_reversal_alerts(kite):
     Detects 30m/1h breakout reversal pattern on stock futures.
 
     Pattern (per timeframe):
-    - Volume sequence: v1>25k, v2>v1, v3>v2, and reversal v4 is the highest in lookback
-    - Bullish: 3 candles with lower lows, then reversal candle breaks prev high and closes near its high
-    - Bearish: 3 candles with higher highs, then reversal candle breaks prev low and closes near its low
+    - Volume sequence: v1>25k, v2>v1, v3>v2, v4>v3, and reversal v5 is the highest in lookback
+    - Bullish: 4 candles with lower lows, then reversal candle breaks prev high and closes near its high
+    - Bearish: 4 candles with higher highs, then reversal candle breaks prev low and closes near its low
     Alerts are rate-limited and sent once per symbol+timeframe per day.
     """
     now_ist = datetime.now(IST)
@@ -1167,62 +1171,66 @@ def build_breakout_reversal_alerts(kite):
             token = int(rows.iloc[0]["instrument_token"])
 
             candles = _get_last_completed_candles(kite, token, interval, mins, now_ist, lookback=30)
-            if len(candles) < 4:
+            if len(candles) < 5:
                 continue
 
-            # Use last 4 completed candles for the pattern.
-            c1, c2, c3, c4 = candles[-4], candles[-3], candles[-2], candles[-1]
+            # Use last 5 completed candles for the pattern.
+            c1, c2, c3, c4, c5 = candles[-5], candles[-4], candles[-3], candles[-2], candles[-1]
             v1 = float(c1.get("volume", 0) or 0)
             v2 = float(c2.get("volume", 0) or 0)
             v3 = float(c3.get("volume", 0) or 0)
             v4 = float(c4.get("volume", 0) or 0)
+            v5 = float(c5.get("volume", 0) or 0)
             if v1 <= BREAKOUT_MIN_FIRST_VOLUME:
                 continue
-            if not (v2 > v1 and v3 > v2):
+            if not (v2 > v1 and v3 > v2 and v4 > v3):
                 continue
 
             l1 = float(c1.get("low", 0) or 0)
             l2 = float(c2.get("low", 0) or 0)
             l3 = float(c3.get("low", 0) or 0)
             l4 = float(c4.get("low", 0) or 0)
+            l5 = float(c5.get("low", 0) or 0)
 
             h1 = float(c1.get("high", 0) or 0)
             h2 = float(c2.get("high", 0) or 0)
             h3 = float(c3.get("high", 0) or 0)
             h4 = float(c4.get("high", 0) or 0)
+            h5 = float(c5.get("high", 0) or 0)
 
             close1 = float(c1.get("close", 0) or 0)
             close2 = float(c2.get("close", 0) or 0)
             close3 = float(c3.get("close", 0) or 0)
             close4 = float(c4.get("close", 0) or 0)
-            # Bullish reversal: 3 lower-lows with rising volume, then a reversal candle that
+            close5 = float(c5.get("close", 0) or 0)
+            # Bullish reversal: 4 lower-lows with rising volume, then a reversal candle that
             # closes just above the previous candle high (within 0.25%) and is strong (near its high).
             bullish_ok = (
-                (l2 < l1 and l3 < l2)
-                and (close2 < close1 and close3 < close2)
-                and (h4 > h3)
+                (l2 < l1 and l3 < l2 and l4 < l3)
+                and (close2 < close1 and close3 < close2 and close4 < close3)
+                and (h5 > h4)
                 # Allow close slightly below/above the previous candle high (within 0.25%),
-                # e.g. h3=100, close=99.75 is acceptable.
-                and _is_close_near_level_pct(close4, h3, pct=0.25)
-                and _is_close_near_high(c4, top_pct=0.25)
+                # e.g. h4=100, close=99.75 is acceptable.
+                and _is_close_near_level_pct(close5, h4, pct=0.25)
+                and _is_close_near_high(c5, top_pct=0.25)
             )
             bearish_ok = (
-                (h2 > h1 and h3 > h2)
-                and (close2 > close1 and close3 > close2)
-                and (l4 < l3)
+                (h2 > h1 and h3 > h2 and h4 > h3)
+                and (close2 > close1 and close3 > close2 and close4 > close3)
+                and (l5 < l4)
                 # Symmetric: close near previous candle low within 0.25%.
-                and _is_close_near_level_pct(close4, l3, pct=0.25)
-                and _is_close_near_low(c4, bottom_pct=0.25)
+                and _is_close_near_level_pct(close5, l4, pct=0.25)
+                and _is_close_near_low(c5, bottom_pct=0.25)
             )
             if not (bullish_ok or bearish_ok):
                 continue
 
             prev_vol_max = max(float(c.get("volume", 0) or 0) for c in candles[:-1]) if candles[:-1] else 0
-            if v4 <= prev_vol_max:
+            if v5 <= prev_vol_max:
                 continue
 
-            time4 = c4.get("date")
-            time_txt = time4.astimezone(IST).strftime("%H:%M") if hasattr(time4, "astimezone") else now_ist.strftime("%H:%M")
+            time5 = c5.get("date")
+            time_txt = time5.astimezone(IST).strftime("%H:%M") if hasattr(time5, "astimezone") else now_ist.strftime("%H:%M")
 
             if bullish_ok:
                 key = f"BR_BULL_{name}_{label}_{now_ist.date().isoformat()}"
@@ -1231,8 +1239,8 @@ def build_breakout_reversal_alerts(kite):
                     alerts.append(
                         f"🚨 {label} BULLISH BREAKOUT REVERSAL\n"
                         f"Symbol: {sym}\n"
-                        f"Close: {close4:.2f} | Break High: {h3:.2f}\n"
-                        f"Vol Seq: {int(v1):,} < {int(v2):,} < {int(v3):,} < {int(v4):,}\n"
+                        f"Close: {close5:.2f} | Break High: {h4:.2f}\n"
+                        f"Vol Seq: {int(v1):,} < {int(v2):,} < {int(v3):,} < {int(v4):,} < {int(v5):,}\n"
                         f"TIME: {time_txt} IST"
                     )
 
@@ -1243,8 +1251,8 @@ def build_breakout_reversal_alerts(kite):
                     alerts.append(
                         f"🚨 {label} BEAR BREAKOUT REVERSAL\n"
                         f"Symbol: {sym}\n"
-                        f"Close: {close4:.2f} | Break Low: {l3:.2f}\n"
-                        f"Vol Seq: {int(v1):,} < {int(v2):,} < {int(v3):,} < {int(v4):,}\n"
+                        f"Close: {close5:.2f} | Break Low: {l4:.2f}\n"
+                        f"Vol Seq: {int(v1):,} < {int(v2):,} < {int(v3):,} < {int(v4):,} < {int(v5):,}\n"
                         f"TIME: {time_txt} IST"
                     )
 
