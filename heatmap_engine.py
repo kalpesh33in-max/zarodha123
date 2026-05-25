@@ -70,6 +70,7 @@ BORN_BREAKOUT_ALERT_START_TIME = datetime.strptime("09:15", "%H:%M").time()
 BORN_BREAKOUT_CHECK_INTERVAL_SECONDS = 3600
 BORN_BREAKOUT_LOOKBACK_DAYS = 180
 BREAKOUT_MIN_FIRST_VOLUME = 25000
+NON_BURST_ALERT_PAUSE_DATES = {"2026-05-26"}
 
 
 def is_index_underlying(name):
@@ -85,6 +86,10 @@ def get_burst_threshold(name):
     # - Index underlyings: 100 lots
     # - Stock underlyings: 50 lots
     return 100 if is_index_underlying(name) else 50
+
+
+def non_burst_alerts_paused_today():
+    return datetime.now(IST).date().isoformat() in NON_BURST_ALERT_PAUSE_DATES
 
 
 def get_monthly_expiry(expiries, rollover_days=1):
@@ -1390,6 +1395,9 @@ def calculate_heatmap(kite):
 
         process_future_burst(sym, name, ltp, oi, target_alerts)
         process_option_logic(name, underlying_map.get(name, (pd.DataFrame(), 0)), opt_quotes, target_alerts)
+
+    if non_burst_alerts_paused_today():
+        return 0, "", bn_alerts, stock_alerts, []
 
     gap_alerts = build_monthly_future_gap_alerts(kite)
     gap_alerts.extend(build_monthly_future_r3_pivot_alerts(kite))
