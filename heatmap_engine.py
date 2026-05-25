@@ -16,12 +16,17 @@ LOT_SIZES = {
     "RELIANCE": 500,
 }
 
-INDEX_BURST_NAMES = {"BANKNIFTY", "NIFTY", "SENSEX"}
-STOCK_BURST_NAMES = set()
+INDEX_BURST_NAMES = {"BANKNIFTY", "NIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
+STOCK_BURST_NAMES = {"RELIANCE", "HDFCBANK", "ICICIBANK"}
 BURST_TRACK_NAMES = [
     "BANKNIFTY",
     "NIFTY",
     "SENSEX",
+    "FINNIFTY",
+    "MIDCPNIFTY",
+    "RELIANCE",
+    "HDFCBANK",
+    "ICICIBANK",
 ]
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 INDEX_FUTURE_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "SENSEX50"}
@@ -40,7 +45,6 @@ s4_last_check_time = None
 # Breakout reversal scanner state
 breakout_last_check = {"30minute": None, "60minute": None}
 breakout_alert_store = {}
-vpa_alert_store = {}
 born_breakout_last_check_time = None
 born_breakout_alert_store = {}
 
@@ -49,8 +53,8 @@ _futures_df = None
 _last_logged_expiry = {}
 
 IST = ZoneInfo("Asia/Kolkata")
-MAY_FUTURE_GAP_THRESHOLD_PCT = 2.0
-MAY_FUTURE_GAP_START_TIME = datetime.strptime("09:15", "%H:%M").time()
+MONTHLY_FUTURE_GAP_THRESHOLD_PCT = 2.0
+MONTHLY_FUTURE_GAP_START_TIME = datetime.strptime("09:15", "%H:%M").time()
 GAP_ALERT_COOLDOWN_SECONDS = 3600
 R3_PIVOT_ALERT_START_TIME = datetime.strptime("09:15", "%H:%M").time()
 R3_PIVOT_CLOSE_REMINDER_START_TIME = datetime.strptime("15:00", "%H:%M").time()
@@ -66,10 +70,6 @@ BORN_BREAKOUT_ALERT_START_TIME = datetime.strptime("09:15", "%H:%M").time()
 BORN_BREAKOUT_CHECK_INTERVAL_SECONDS = 3600
 BORN_BREAKOUT_LOOKBACK_DAYS = 180
 BREAKOUT_MIN_FIRST_VOLUME = 25000
-VPA_LOW_VOLUME_FACTOR = 0.75
-VPA_HIGH_VOLUME_FACTOR = 1.35
-VPA_NARROW_BODY_RANGE_PCT = 0.35
-VPA_DEEP_WICK_RANGE_PCT = 0.45
 
 
 def is_index_underlying(name):
@@ -235,46 +235,49 @@ def get_bank_futures(kite):
     return symbols
 
 
-def get_stock_may_future_symbols():
+def _format_month_label(expiry):
+    if pd.isna(expiry):
+        return "MONTHLY"
+    return expiry.strftime("%b").upper()
+
+
+def _get_active_stock_future_contracts():
     futures = load_stock_futures_data()
     if futures.empty:
         return []
 
-    now_ist = datetime.now(IST)
-    may_futures = futures[
-        (futures["expiry"].dt.year == now_ist.year)
-        & (futures["expiry"].dt.month == 5)
-    ].copy()
-    if may_futures.empty:
-        return []
-
-    may_futures = may_futures.sort_values(["name", "expiry", "tradingsymbol"])
-    selected = may_futures.groupby("name", as_index=False).first()
     futures = futures.sort_values(["name", "expiry", "tradingsymbol"])
-
     contracts = []
-    for _, row in selected.iterrows():
-        name = row["name"]
+    for name, rows in futures.groupby("name"):
+        preferred_expiry = get_monthly_expiry(rows["expiry"].unique())
+        if preferred_expiry is None:
+            continue
+
+        selected = rows[rows["expiry"] == preferred_expiry]
+        if selected.empty:
+            continue
+
+        row = selected.iloc[0]
         current_expiry = row["expiry"]
-        next_futures = futures[
-            (futures["name"] == name)
-            & (futures["expiry"] > current_expiry)
-        ]
+        next_futures = rows[rows["expiry"] > current_expiry]
 
         next_symbol = None
         next_month_label = "Next"
         if not next_futures.empty:
             next_row = next_futures.iloc[0]
             next_symbol = f"NFO:{next_row['tradingsymbol']}"
-            next_month_label = next_row["expiry"].strftime("%b")
+            next_month_label = _format_month_label(next_row["expiry"])
 
         contracts.append(
-            (
-                name,
-                f"NFO:{row['tradingsymbol']}",
-                next_symbol,
-                next_month_label,
-            )
+            {
+                "name": name,
+                "symbol": f"NFO:{row['tradingsymbol']}",
+                "token": int(row["instrument_token"]),
+                "expiry": current_expiry,
+                "month_label": _format_month_label(current_expiry),
+                "next_symbol": next_symbol,
+                "next_month_label": next_month_label,
+            }
         )
     return contracts
 
@@ -353,22 +356,29 @@ def _format_gap_signal(gap_pct):
     return "FUTURE ABOVE SPOT" if gap_pct > 0 else "FUTURE BELOW SPOT"
 
 
-def build_may_future_gap_alerts(kite):
+def build_monthly_future_gap_alerts(kite):
     now_ist = datetime.now(IST)
-    if now_ist.weekday() > 4 or now_ist.time() < MAY_FUTURE_GAP_START_TIME:
+    if now_ist.weekday() > 4 or now_ist.time() < MONTHLY_FUTURE_GAP_START_TIME:
         return []
 
-    future_contracts = get_stock_may_future_symbols()
+    future_contracts = _get_active_stock_future_contracts()
     if not future_contracts:
         return []
 
     symbol_pairs = [
-        (name, get_spot_symbol(name), future_symbol, next_symbol, next_month_label)
-        for name, future_symbol, next_symbol, next_month_label in future_contracts
+        (
+            contract["name"],
+            get_spot_symbol(contract["name"]),
+            contract["symbol"],
+            contract["month_label"],
+            contract["next_symbol"],
+            contract["next_month_label"],
+        )
+        for contract in future_contracts
     ]
 
     quote_symbols = []
-    for _, spot_symbol, future_symbol, next_symbol, _ in symbol_pairs:
+    for _, spot_symbol, future_symbol, _, next_symbol, _ in symbol_pairs:
         quote_symbols.append(spot_symbol)
         quote_symbols.append(future_symbol)
         if next_symbol:
@@ -380,7 +390,7 @@ def build_may_future_gap_alerts(kite):
 
     now = datetime.now(IST)
     rows = []
-    for name, spot_symbol, future_symbol, next_symbol, next_month_label in symbol_pairs:
+    for name, spot_symbol, future_symbol, month_label, next_symbol, next_month_label in symbol_pairs:
         spot_price = data.get(spot_symbol, {}).get("last_price", 0)
         future_price = data.get(future_symbol, {}).get("last_price", 0)
         if spot_price <= 0 or future_price <= 0:
@@ -392,17 +402,18 @@ def build_may_future_gap_alerts(kite):
         if next_future_price > 0:
             next_gap_pct = ((next_future_price - future_price) / future_price) * 100
 
-        if abs(gap_pct) < MAY_FUTURE_GAP_THRESHOLD_PCT:
+        if abs(gap_pct) < MONTHLY_FUTURE_GAP_THRESHOLD_PCT:
             continue
 
-        last_sent = gap_alert_store.get(name)
+        last_sent = gap_alert_store.get(future_symbol)
         if last_sent and (now - last_sent).total_seconds() < GAP_ALERT_COOLDOWN_SECONDS:
             continue
 
-        gap_alert_store[name] = now
+        gap_alert_store[future_symbol] = now
         rows.append(
             {
                 "name": name,
+                "month_label": month_label,
                 "spot_price": spot_price,
                 "future_price": future_price,
                 "gap_pct": gap_pct,
@@ -423,77 +434,22 @@ def build_may_future_gap_alerts(kite):
         body_lines = []
         for item in chunk:
             if item["next_gap_pct"] is None:
-                next_future_text = "Next Fut NA | Next-vs-May NA"
+                next_future_text = f"Next Fut NA | Next-vs-{item['month_label']} NA"
             else:
                 next_future_text = (
                     f"{item['next_month_label']} Fut {item['next_future_price']:.2f} | "
-                    f"{item['next_month_label']}-vs-May {item['next_gap_pct']:+.2f}%"
+                    f"{item['next_month_label']}-vs-{item['month_label']} {item['next_gap_pct']:+.2f}%"
                 )
             body_lines.append(
                 f"{item['name']}: Spot {item['spot_price']:.2f} | "
-                f"May Fut {item['future_price']:.2f} | "
+                f"{item['month_label']} Fut {item['future_price']:.2f} | "
                 f"Spot Gap {item['gap_pct']:+.2f}% | "
                 f"{next_future_text} | {_format_gap_signal(item['gap_pct'])}"
             )
         body = "\n".join(body_lines)
-        alerts.append(f"📊 MAY FUTURE GAP REPORT\n\n{body}")
+        report_month = chunk[0]["month_label"] if chunk else "MONTHLY"
+        alerts.append(f"📊 {report_month} FUTURE GAP REPORT\n\n{body}")
     return alerts
-
-
-def _get_may_stock_future_contracts():
-    futures = load_stock_futures_data()
-    if futures.empty:
-        return []
-
-    now_ist = datetime.now(IST)
-    may_futures = futures[
-        (futures["expiry"].dt.year == now_ist.year)
-        & (futures["expiry"].dt.month == 5)
-    ].copy()
-    if may_futures.empty:
-        return []
-
-    may_futures = may_futures.sort_values(["name", "expiry", "tradingsymbol"])
-    selected = may_futures.groupby("name", as_index=False).first()
-    return [
-        {
-            "name": row["name"],
-            "symbol": f"NFO:{row['tradingsymbol']}",
-            "token": int(row["instrument_token"]),
-        }
-        for _, row in selected.iterrows()
-    ]
-
-
-def _get_next_month_stock_future_contracts():
-    futures = load_stock_futures_data()
-    if futures.empty:
-        return []
-
-    today = datetime.now(IST).date()
-    futures = futures[
-        futures["expiry"].notna()
-        & (futures["expiry"].dt.date >= today)
-    ].copy()
-    if futures.empty:
-        return []
-
-    futures = futures.sort_values(["name", "expiry", "tradingsymbol"])
-    contracts = []
-    for name, rows in futures.groupby("name"):
-        rows = rows.sort_values(["expiry", "tradingsymbol"])
-        if len(rows) < 2:
-            continue
-        row = rows.iloc[1]
-        contracts.append(
-            {
-                "name": name,
-                "symbol": f"NFO:{row['tradingsymbol']}",
-                "token": int(row["instrument_token"]),
-                "expiry": row["expiry"],
-            }
-        )
-    return contracts
 
 
 def _get_latest_completed_candle(candles, interval_minutes, now_ist):
@@ -598,7 +554,7 @@ def _get_previous_day_r3_for_interval(kite, token, interval, interval_minutes, n
     }
 
 
-def build_may_future_r3_pivot_alerts(kite):
+def build_monthly_future_r3_pivot_alerts(kite):
     global r3_last_check_time, r3_watch_last_sent_time
 
     now_ist = datetime.now(IST)
@@ -612,7 +568,7 @@ def build_may_future_r3_pivot_alerts(kite):
         return []
     r3_last_check_time = now_ist
 
-    contracts = _get_may_stock_future_contracts()
+    contracts = _get_active_stock_future_contracts()
     if not contracts:
         return []
 
@@ -692,12 +648,13 @@ def build_may_future_r3_pivot_alerts(kite):
             )
 
             if abs(diff_pct) <= R3_PIVOT_RANGE_PCT and ltp <= r3:
-                alert_key = f"R3_NEAR:{contract['name']}:{label}:{now_ist.date().isoformat()}"
+                alert_key = f"R3_NEAR:{symbol}:{label}:{now_ist.date().isoformat()}"
                 if alert_key not in r3_alert_store:
                     r3_alert_store[alert_key] = now_ist
                     near_rows.append(
                         {
                             "name": contract["name"],
+                            "month_label": contract["month_label"],
                             "symbol": symbol,
                             "ltp": ltp,
                             "label": label,
@@ -709,12 +666,13 @@ def build_may_future_r3_pivot_alerts(kite):
                     )
 
             if ltp > r3:
-                alert_key = f"R3_ABOVE:{contract['name']}:{label}:{now_ist.date().isoformat()}"
+                alert_key = f"R3_ABOVE:{symbol}:{label}:{now_ist.date().isoformat()}"
                 if alert_key not in r3_alert_store:
                     r3_alert_store[alert_key] = now_ist
                     breakout_rows.append(
                         {
                             "name": contract["name"],
+                            "month_label": contract["month_label"],
                             "symbol": symbol,
                             "ltp": ltp,
                             "label": label,
@@ -729,6 +687,7 @@ def build_may_future_r3_pivot_alerts(kite):
             watch_rows.append(
                 {
                     "name": contract["name"],
+                    "month_label": contract["month_label"],
                     "symbol": symbol,
                     "ltp": ltp,
                     "matches": matched,
@@ -742,25 +701,27 @@ def build_may_future_r3_pivot_alerts(kite):
 
     if near_rows:
         body_lines = [
-            f"{item['name']}: Fut {item['ltp']:.2f} | {item['label']} R3 {item['r3']:.2f} "
+            f"{item['name']} {item['month_label']} FUT: Fut {item['ltp']:.2f} | {item['label']} R3 {item['r3']:.2f} "
             f"| Near {item['diff_pct']:+.2f}% | Prev Close {item['prev_close']:.2f} "
             f"({item['close_diff_pct']:+.2f}%)"
             for item in near_rows
         ]
         for i in range(0, len(body_lines), 20):
             chunk = "\n".join(body_lines[i:i + 20])
-            alerts.append(f"MAY FUTURE R3 NEAR ALERT\n\n{chunk}\n\nTIME: {now_ist.strftime('%H:%M:%S')} IST")
+            report_month = near_rows[i]["month_label"]
+            alerts.append(f"{report_month} FUTURE R3 NEAR ALERT\n\n{chunk}\n\nTIME: {now_ist.strftime('%H:%M:%S')} IST")
 
     if breakout_rows:
         body_lines = [
-            f"{item['name']}: Fut {item['ltp']:.2f} | {item['label']} R3 {item['r3']:.2f} "
+            f"{item['name']} {item['month_label']} FUT: Fut {item['ltp']:.2f} | {item['label']} R3 {item['r3']:.2f} "
             f"| Above {item['diff_pct']:+.2f}% | Prev Close {item['prev_close']:.2f} "
             f"({item['close_diff_pct']:+.2f}%)"
             for item in breakout_rows
         ]
         for i in range(0, len(body_lines), 20):
             chunk = "\n".join(body_lines[i:i + 20])
-            alerts.append(f"MAY FUTURE R3 BREAKOUT ALERT\n\n{chunk}\n\nTIME: {now_ist.strftime('%H:%M:%S')} IST")
+            report_month = breakout_rows[i]["month_label"]
+            alerts.append(f"{report_month} FUTURE R3 BREAKOUT ALERT\n\n{chunk}\n\nTIME: {now_ist.strftime('%H:%M:%S')} IST")
 
     reminder_seconds = (
         R3_PIVOT_CLOSE_REMINDER_SECONDS
@@ -785,11 +746,12 @@ def build_may_future_r3_pivot_alerts(kite):
                 f"| Prev Close {match['prev_close']:.2f} ({match['close_diff_pct']:+.2f}%)"
                 for match in item["matches"]
             )
-            body_lines.append(f"{item['name']}: Fut {item['ltp']:.2f} | {pivot_text}")
+            body_lines.append(f"{item['name']} {item['month_label']} FUT: Fut {item['ltp']:.2f} | {pivot_text}")
 
         for i in range(0, len(body_lines), 20):
             chunk = "\n".join(body_lines[i:i + 20])
-            alerts.append(f"MAY FUTURE R3 WATCHLIST\n\n{chunk}\n\nTIME: {now_ist.strftime('%H:%M:%S')} IST")
+            report_month = watch_rows[i]["month_label"]
+            alerts.append(f"{report_month} FUTURE R3 WATCHLIST\n\n{chunk}\n\nTIME: {now_ist.strftime('%H:%M:%S')} IST")
 
     return alerts
 
@@ -808,7 +770,7 @@ def build_stock_future_1hr_s4_alerts(kite):
         return []
     s4_last_check_time = now_ist
 
-    contracts = _get_may_stock_future_contracts()
+    contracts = _get_active_stock_future_contracts()
     if not contracts:
         return []
 
@@ -860,7 +822,7 @@ def build_stock_future_1hr_s4_alerts(kite):
 
         row = {
             "name": contract["name"],
-            "month_label": "MAY",
+            "month_label": contract["month_label"],
             "symbol": symbol,
             "ltp": ltp,
             "s4": s4,
@@ -984,7 +946,7 @@ def build_weekly_born_breakout_alerts(kite):
         return []
     born_breakout_last_check_time = now_ist
 
-    contracts = _get_next_month_stock_future_contracts()
+    contracts = _get_active_stock_future_contracts()
     if not contracts:
         return []
 
@@ -1043,7 +1005,7 @@ def build_weekly_born_breakout_alerts(kite):
             f"Symbol: {symbol}\n"
             f"Born Week: {born['week_start'].strftime('%d-%m-%Y')}\n"
             f"Born High: {born_high:.2f}\n"
-            f"Current Fut: {ltp:.2f}\n"
+            f"Current {contract['month_label']} Fut: {ltp:.2f}\n"
             f"Break Above: {break_price:.2f} ({break_pct:+.2f}%)\n"
             f"Expiry: {expiry.strftime('%d-%m-%Y')}\n"
             f"TIME: {now_ist.strftime('%H:%M:%S')} IST"
@@ -1125,176 +1087,6 @@ def _get_last_completed_candles(kite, token, interval, interval_minutes, now_ist
     return completed[-lookback:]
 
 
-def _candle_number(candle, field):
-    try:
-        return float(candle.get(field, 0) or 0)
-    except Exception:
-        return 0.0
-
-
-def _candle_time_text(candle, now_ist):
-    candle_time = candle.get("date")
-    if hasattr(candle_time, "astimezone"):
-        return candle_time.astimezone(IST).strftime("%H:%M")
-    return now_ist.strftime("%H:%M")
-
-
-def _candle_key(candle, now_ist):
-    candle_time = candle.get("date")
-    if hasattr(candle_time, "isoformat"):
-        return candle_time.isoformat()
-    return now_ist.isoformat()
-
-
-def _build_simple_vpa_stock_alerts(name, symbol, label, candles, now_ist):
-    """
-    Converts VPA ideas into simple BUY/SELL/WAIT stock-future alerts.
-
-    The wording intentionally avoids VPA terms such as absorption, distribution,
-    supply, and demand because the Telegram alert should be action-oriented.
-    """
-    if len(candles) < 5:
-        return []
-
-    c1, c2, c3, c4, c5 = candles[-5], candles[-4], candles[-3], candles[-2], candles[-1]
-    prior_candles = candles[:-1][-20:] or candles[:-1]
-    volumes = [_candle_number(c, "volume") for c in prior_candles]
-    volumes = [vol for vol in volumes if vol > 0]
-    if not volumes:
-        return []
-
-    avg_volume = sum(volumes) / len(volumes)
-    open5 = _candle_number(c5, "open")
-    high5 = _candle_number(c5, "high")
-    low5 = _candle_number(c5, "low")
-    close5 = _candle_number(c5, "close")
-    volume5 = _candle_number(c5, "volume")
-    candle_range = high5 - low5
-    if min(open5, high5, low5, close5, volume5, candle_range) <= 0:
-        return []
-
-    body = abs(close5 - open5)
-    lower_wick = min(open5, close5) - low5
-    upper_wick = high5 - max(open5, close5)
-    narrow_body = body <= candle_range * VPA_NARROW_BODY_RANGE_PCT
-    lower_wick_signal = (
-        narrow_body
-        and lower_wick >= candle_range * VPA_DEEP_WICK_RANGE_PCT
-        and lower_wick > upper_wick
-    )
-    upper_wick_signal = (
-        narrow_body
-        and upper_wick >= candle_range * VPA_DEEP_WICK_RANGE_PCT
-        and upper_wick > lower_wick
-    )
-    low_volume = volume5 <= avg_volume * VPA_LOW_VOLUME_FACTOR
-    high_volume = volume5 >= avg_volume * VPA_HIGH_VOLUME_FACTOR
-
-    low1, low2, low3, low4 = (_candle_number(c, "low") for c in (c1, c2, c3, c4))
-    high1, high2, high3, high4 = (_candle_number(c, "high") for c in (c1, c2, c3, c4))
-    close1, close2, close3, close4 = (_candle_number(c, "close") for c in (c1, c2, c3, c4))
-    volume1, volume2, volume3, volume4 = (_candle_number(c, "volume") for c in (c1, c2, c3, c4))
-
-    recent_down = close4 < close1 or low4 <= min(low1, low2, low3)
-    recent_up = close4 > close1 or high4 >= max(high1, high2, high3)
-    test_buy_context = recent_down or low5 < min(low1, low2, low3, low4)
-    test_sell_context = recent_up or high5 > max(high1, high2, high3, high4)
-
-    alerts = []
-    time_txt = _candle_time_text(c5, now_ist)
-    candle_key = _candle_key(c5, now_ist)
-
-    def add_alert(signal_key, title, reason, signal):
-        alert_key = f"VPA:{signal_key}:{symbol}:{label}:{candle_key}"
-        if alert_key in vpa_alert_store:
-            return
-        vpa_alert_store[alert_key] = now_ist
-        alerts.append(
-            f"{title}\n\n"
-            f"Symbol: {symbol}\n"
-            f"TF: {label}\n"
-            f"Close: {close5:.2f}\n"
-            f"Volume: {int(volume5):,} (Avg {int(avg_volume):,})\n"
-            f"Reason: {reason}\n"
-            f"Signal: {signal}\n"
-            f"TIME: {time_txt} IST"
-        )
-
-    if test_buy_context and lower_wick_signal:
-        if low_volume:
-            add_alert(
-                "BUY_TEST_PASS",
-                "🟢 STOCK FUTURE BUY ALERT",
-                "Sellers look weak; price may move up.",
-                "Lower wick with low volume.",
-            )
-            return alerts
-        if high_volume:
-            add_alert(
-                "BUY_TEST_FAIL",
-                "⚠️ STOCK FUTURE BUY WAIT",
-                "Sellers are still active; avoid fresh buy.",
-                "Lower wick came with high volume.",
-            )
-            return alerts
-
-    if test_sell_context and upper_wick_signal:
-        if low_volume:
-            add_alert(
-                "SELL_TEST_PASS",
-                "🔴 STOCK FUTURE SELL ALERT",
-                "Buyers look weak; price may move down.",
-                "Upper wick with low volume.",
-            )
-            return alerts
-        if high_volume:
-            add_alert(
-                "SELL_TEST_FAIL",
-                "⚠️ STOCK FUTURE SELL WAIT",
-                "Buyers are still active; avoid fresh sell.",
-                "Upper wick came with high volume.",
-            )
-            return alerts
-
-    effort_spike = volume2 >= max(volume1, avg_volume * 1.15)
-    volume_fade = volume3 < volume2 and volume4 < volume3
-    bullish_reversal = (
-        recent_down
-        and effort_spike
-        and volume_fade
-        and high5 > high4
-        and _is_close_near_level_pct(close5, high4, pct=0.25)
-        and _is_close_near_high(c5, top_pct=0.30)
-        and volume5 >= volume4
-    )
-    bearish_reversal = (
-        recent_up
-        and effort_spike
-        and volume_fade
-        and low5 < low4
-        and _is_close_near_level_pct(close5, low4, pct=0.25)
-        and _is_close_near_low(c5, bottom_pct=0.30)
-        and volume5 >= volume4
-    )
-
-    if bullish_reversal:
-        add_alert(
-            "BUY_VOLUME_REVERSAL",
-            "🟢 STOCK FUTURE BUY ALERT",
-            "Sellers look weak; price broke previous high.",
-            "Down move lost volume, then price reversed up.",
-        )
-    elif bearish_reversal:
-        add_alert(
-            "SELL_VOLUME_REVERSAL",
-            "🔴 STOCK FUTURE SELL ALERT",
-            "Buyers look weak; price broke previous low.",
-            "Up move lost volume, then price reversed down.",
-        )
-
-    return alerts
-
-
 def build_breakout_reversal_alerts(kite):
     """
     Detects 30m/1h breakout reversal pattern on stock futures.
@@ -1343,8 +1135,6 @@ def build_breakout_reversal_alerts(kite):
             candles = _get_last_completed_candles(kite, token, interval, mins, now_ist, lookback=30)
             if len(candles) < 5:
                 continue
-
-            alerts.extend(_build_simple_vpa_stock_alerts(name, sym, label, candles, now_ist))
 
             # Use last 5 completed candles for the pattern.
             c1, c2, c3, c4, c5 = candles[-5], candles[-4], candles[-3], candles[-2], candles[-1]
@@ -1601,8 +1391,8 @@ def calculate_heatmap(kite):
         process_future_burst(sym, name, ltp, oi, target_alerts)
         process_option_logic(name, underlying_map.get(name, (pd.DataFrame(), 0)), opt_quotes, target_alerts)
 
-    gap_alerts = build_may_future_gap_alerts(kite)
-    gap_alerts.extend(build_may_future_r3_pivot_alerts(kite))
+    gap_alerts = build_monthly_future_gap_alerts(kite)
+    gap_alerts.extend(build_monthly_future_r3_pivot_alerts(kite))
     gap_alerts.extend(build_stock_future_1hr_s4_alerts(kite))
     gap_alerts.extend(build_breakout_reversal_alerts(kite))
     gap_alerts.extend(build_weekly_born_breakout_alerts(kite))
