@@ -16,18 +16,13 @@ LOT_SIZES = {
     "RELIANCE": 500,
 }
 
-INDEX_BURST_NAMES = {"BANKNIFTY", "NIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
-STOCK_BURST_NAMES = {"RELIANCE", "HDFCBANK", "ICICIBANK"}
+INDEX_BURST_NAMES = {"BANKNIFTY", "NIFTY"}
+STOCK_BURST_NAMES = set()
 BURST_TRACK_NAMES = [
     "BANKNIFTY",
     "NIFTY",
-    "SENSEX",
-    "FINNIFTY",
-    "MIDCPNIFTY",
-    "RELIANCE",
-    "HDFCBANK",
-    "ICICIBANK",
 ]
+BURST_THRESHOLD_LOTS = 300
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 INDEX_FUTURE_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "SENSEX50"}
 
@@ -40,11 +35,13 @@ r3_last_check_time = None
 r3_watch_last_sent_time = None
 s4_alert_store = {}
 s4_state_store = {}
-s4_last_check_time = None
+s4_last_slot = None
 
 # Breakout reversal scanner state
 breakout_last_check = {"30minute": None, "60minute": None}
 breakout_alert_store = {}
+volume_blast_last_slot = None
+volume_blast_alert_store = {}
 born_breakout_last_check_time = None
 born_breakout_alert_store = {}
 
@@ -63,13 +60,42 @@ R3_PIVOT_CHECK_INTERVAL_SECONDS = 300
 R3_PIVOT_REMINDER_SECONDS = 3600
 R3_PIVOT_CLOSE_REMINDER_SECONDS = 600
 SEND_R3_WATCHLIST = os.getenv("SEND_R3_WATCHLIST", "false").lower() in ("true", "1", "yes")
-S4_PIVOT_ALERT_START_TIME = R3_PIVOT_ALERT_START_TIME
 S4_PIVOT_RANGE_PCT = R3_PIVOT_RANGE_PCT
-S4_PIVOT_CHECK_INTERVAL_SECONDS = R3_PIVOT_CHECK_INTERVAL_SECONDS
-BORN_BREAKOUT_ALERT_START_TIME = datetime.strptime("09:15", "%H:%M").time()
-BORN_BREAKOUT_CHECK_INTERVAL_SECONDS = 3600
+S4_PIVOT_CHECK_TIMES = [
+    datetime.strptime(value, "%H:%M").time()
+    for value in ("09:30", "10:30", "11:30", "12:30", "13:30", "14:30", "15:25")
+]
+S4_PIVOT_CHECK_WINDOW_SECONDS = 120
+BORN_BREAKOUT_MORNING_START_TIME = datetime.strptime("09:00", "%H:%M").time()
+BORN_BREAKOUT_MORNING_END_TIME = datetime.strptime("09:30", "%H:%M").time()
+BORN_BREAKOUT_AFTERNOON_START_TIME = datetime.strptime("15:00", "%H:%M").time()
+BORN_BREAKOUT_AFTERNOON_END_TIME = datetime.strptime("15:30", "%H:%M").time()
+BORN_BREAKOUT_CHECK_INTERVAL_SECONDS = 1800
 BORN_BREAKOUT_LOOKBACK_DAYS = 180
-BREAKOUT_MIN_FIRST_VOLUME = 25000
+# Pause non-burst reports only for this date. They resume automatically the next day.
+BREAKOUT_MIN_FIRST_VOLUME = 50000
+VOLUME_BLAST_MIN_VOLUME = int(os.getenv("VOLUME_BLAST_MIN_VOLUME", "500000"))
+VOLUME_BLAST_LOOKAHEAD_CANDLES = int(os.getenv("VOLUME_BLAST_LOOKAHEAD_CANDLES", "20"))
+VOLUME_BLAST_PREVIOUS_QUIET_CANDLES = int(os.getenv("VOLUME_BLAST_PREVIOUS_QUIET_CANDLES", "10"))
+VOLUME_BLAST_CHECK_TIMES = [
+    datetime.strptime(value, "%H:%M").time()
+    for value in (
+        "09:45",
+        "10:15",
+        "10:45",
+        "11:15",
+        "11:45",
+        "12:15",
+        "12:45",
+        "13:15",
+        "13:45",
+        "14:15",
+        "14:45",
+        "15:15",
+        "15:30",
+    )
+]
+VOLUME_BLAST_CHECK_WINDOW_SECONDS = 120
 NON_BURST_ALERT_PAUSE_DATES = {"2026-05-26"}
 
 
@@ -82,14 +108,59 @@ def is_burst_underlying(name):
 
 
 def get_burst_threshold(name):
-    # Burst threshold in lots:
-    # - Index underlyings: 100 lots
-    # - Stock underlyings: 50 lots
-    return 100 if is_index_underlying(name) else 50
+    return BURST_THRESHOLD_LOTS
 
 
 def non_burst_alerts_paused_today():
     return datetime.now(IST).date().isoformat() in NON_BURST_ALERT_PAUSE_DATES
+
+
+def in_born_breakout_window(now_ist):
+    t = now_ist.time()
+    return (
+        BORN_BREAKOUT_MORNING_START_TIME <= t <= BORN_BREAKOUT_MORNING_END_TIME
+        or BORN_BREAKOUT_AFTERNOON_START_TIME <= t <= BORN_BREAKOUT_AFTERNOON_END_TIME
+    )
+
+
+def get_due_s4_slot(now_ist):
+    current = datetime.combine(
+        now_ist.date(),
+        now_ist.time(),
+        tzinfo=IST,
+    )
+
+    for slot_time in S4_PIVOT_CHECK_TIMES:
+        slot = datetime.combine(
+            now_ist.date(),
+            slot_time,
+            tzinfo=IST,
+        )
+        delta = (current - slot).total_seconds()
+        if 0 <= delta <= S4_PIVOT_CHECK_WINDOW_SECONDS:
+            return slot.strftime("%Y-%m-%d %H:%M")
+
+    return None
+
+
+def get_due_volume_blast_slot(now_ist):
+    current = datetime.combine(
+        now_ist.date(),
+        now_ist.time(),
+        tzinfo=IST,
+    )
+
+    for slot_time in VOLUME_BLAST_CHECK_TIMES:
+        slot = datetime.combine(
+            now_ist.date(),
+            slot_time,
+            tzinfo=IST,
+        )
+        delta = (current - slot).total_seconds()
+        if 0 <= delta <= VOLUME_BLAST_CHECK_WINDOW_SECONDS:
+            return slot.strftime("%Y-%m-%d %H:%M")
+
+    return None
 
 
 def get_monthly_expiry(expiries, rollover_days=1):
@@ -122,6 +193,39 @@ def get_monthly_expiry(expiries, rollover_days=1):
     if future_monthlies:
         return future_monthlies[0]
     return ordered_monthlies[-1]
+
+
+def get_nifty_next_weekly_expiry(expiries):
+    valid_expiries = sorted(exp for exp in expiries if pd.notna(exp))
+    if not valid_expiries:
+        return None
+
+    now_ist = datetime.now(IST)
+    week_monday = now_ist.date() - timedelta(days=now_ist.weekday())
+    target_tuesday = week_monday + timedelta(days=8)
+
+    for expiry in valid_expiries:
+        if expiry.date() >= target_tuesday:
+            return expiry
+
+    return None
+
+
+def get_sensex_next_weekly_expiry(expiries):
+    valid_expiries = sorted(exp for exp in expiries if pd.notna(exp))
+    if not valid_expiries:
+        return None
+
+    now_ist = datetime.now(IST)
+    days_since_wednesday = (now_ist.weekday() - 2) % 7
+    cycle_wednesday = now_ist.date() - timedelta(days=days_since_wednesday)
+    target_thursday = cycle_wednesday + timedelta(days=8)
+
+    for expiry in valid_expiries:
+        if expiry.date() >= target_thursday:
+            return expiry
+
+    return None
 
 
 def load_options_data():
@@ -268,10 +372,14 @@ def _get_active_stock_future_contracts():
 
         next_symbol = None
         next_month_label = "Next"
+        next_token = None
+        next_expiry = None
         if not next_futures.empty:
             next_row = next_futures.iloc[0]
             next_symbol = f"NFO:{next_row['tradingsymbol']}"
             next_month_label = _format_month_label(next_row["expiry"])
+            next_token = int(next_row["instrument_token"])
+            next_expiry = next_row["expiry"]
 
         contracts.append(
             {
@@ -282,6 +390,8 @@ def _get_active_stock_future_contracts():
                 "month_label": _format_month_label(current_expiry),
                 "next_symbol": next_symbol,
                 "next_month_label": next_month_label,
+                "next_token": next_token,
+                "next_expiry": next_expiry,
             }
         )
     return contracts
@@ -296,8 +406,19 @@ def get_relevant_options(name, ltp):
     if options.empty:
         return pd.DataFrame()
 
-    monthly_expiry = get_monthly_expiry(options["expiry"].unique())
+    expiries = options["expiry"].unique()
+    monthly_expiry = get_monthly_expiry(expiries)
     selected_expiries = [monthly_expiry] if monthly_expiry is not None else []
+
+    if name == "NIFTY":
+        weekly_expiry = get_nifty_next_weekly_expiry(expiries)
+        if weekly_expiry is not None and weekly_expiry not in selected_expiries:
+            selected_expiries.append(weekly_expiry)
+    elif name == "SENSEX":
+        weekly_expiry = get_sensex_next_weekly_expiry(expiries)
+        if weekly_expiry is not None and weekly_expiry not in selected_expiries:
+            selected_expiries.append(weekly_expiry)
+
     if not selected_expiries:
         return pd.DataFrame()
 
@@ -311,12 +432,25 @@ def get_relevant_options(name, ltp):
     if options.empty:
         return pd.DataFrame()
 
-    strikes = sorted(options["strike"].unique())
-    atm = min(strikes, key=lambda x: abs(x - ltp))
-    idx = strikes.index(atm)
     rng = 15 if is_index_underlying(name) else 6
-    selected = strikes[max(0, idx - rng): idx + rng + 1]
-    return options[options["strike"].isin(selected)].copy()
+    selected_frames = []
+
+    for expiry, expiry_options in options.groupby("expiry"):
+        strikes = sorted(expiry_options["strike"].unique())
+        if not strikes:
+            continue
+
+        atm = min(strikes, key=lambda x: abs(x - ltp))
+        idx = strikes.index(atm)
+        selected = strikes[max(0, idx - rng): idx + rng + 1]
+        selected_frames.append(
+            expiry_options[expiry_options["strike"].isin(selected)].copy()
+        )
+
+    if not selected_frames:
+        return pd.DataFrame()
+
+    return pd.concat(selected_frames, ignore_index=True)
 
 
 def get_strength_label(lots, name="BANKNIFTY"):
@@ -337,6 +471,15 @@ def format_oi_delta(oi_delta):
         return f"{value/100000:.1f}L"
     if value >= 1000:
         return f"{value/1000:.1f}K"
+    return f"{value:.0f}"
+
+
+def format_volume(value):
+    value = float(value or 0)
+    if value >= 1000000:
+        return f"{value / 1000000:.2f}M"
+    if value >= 1000:
+        return f"{value / 1000:.1f}K"
     return f"{value:.0f}"
 
 
@@ -762,18 +905,19 @@ def build_monthly_future_r3_pivot_alerts(kite):
 
 
 def build_stock_future_1hr_s4_alerts(kite):
-    global s4_last_check_time
+    global s4_last_slot
 
     now_ist = datetime.now(IST)
-    if now_ist.weekday() > 4 or now_ist.time() < S4_PIVOT_ALERT_START_TIME:
+    if now_ist.weekday() > 4:
         return []
 
-    if (
-        s4_last_check_time
-        and (now_ist - s4_last_check_time).total_seconds() < S4_PIVOT_CHECK_INTERVAL_SECONDS
-    ):
+    due_slot = get_due_s4_slot(now_ist)
+    if not due_slot:
         return []
-    s4_last_check_time = now_ist
+
+    if s4_last_slot == due_slot:
+        return []
+    s4_last_slot = due_slot
 
     contracts = _get_active_stock_future_contracts()
     if not contracts:
@@ -936,11 +1080,45 @@ def _build_weekly_candles_from_daily(candles):
     return weekly
 
 
+def _get_born_breakout_contracts():
+    contracts = []
+
+    for contract in _get_active_stock_future_contracts():
+        contracts.append(
+            {
+                "name": contract["name"],
+                "symbol": contract["symbol"],
+                "token": contract["token"],
+                "expiry": contract["expiry"],
+                "month_label": contract["month_label"],
+                "series_label": "CURRENT",
+            }
+        )
+
+        if (
+            contract.get("next_symbol")
+            and contract.get("next_token")
+            and pd.notna(contract.get("next_expiry"))
+        ):
+            contracts.append(
+                {
+                    "name": contract["name"],
+                    "symbol": contract["next_symbol"],
+                    "token": contract["next_token"],
+                    "expiry": contract["next_expiry"],
+                    "month_label": contract["next_month_label"],
+                    "series_label": "NEXT",
+                }
+            )
+
+    return contracts
+
+
 def build_weekly_born_breakout_alerts(kite):
     global born_breakout_last_check_time
 
     now_ist = datetime.now(IST)
-    if now_ist.weekday() > 4 or now_ist.time() < BORN_BREAKOUT_ALERT_START_TIME:
+    if now_ist.weekday() > 4 or not in_born_breakout_window(now_ist):
         return []
 
     if (
@@ -951,7 +1129,7 @@ def build_weekly_born_breakout_alerts(kite):
         return []
     born_breakout_last_check_time = now_ist
 
-    contracts = _get_active_stock_future_contracts()
+    contracts = _get_born_breakout_contracts()
     if not contracts:
         return []
 
@@ -1008,9 +1186,10 @@ def build_weekly_born_breakout_alerts(kite):
         alerts.append(
             f"🚨 WEEKLY BORN BREAKOUT\n\n"
             f"Symbol: {symbol}\n"
+            f"Contract: {contract['series_label']} {contract['month_label']} FUT\n"
             f"Born Week: {born['week_start'].strftime('%d-%m-%Y')}\n"
             f"Born High: {born_high:.2f}\n"
-            f"Current {contract['month_label']} Fut: {ltp:.2f}\n"
+            f"{contract['month_label']} Fut: {ltp:.2f}\n"
             f"Break Above: {break_price:.2f} ({break_pct:+.2f}%)\n"
             f"Expiry: {expiry.strftime('%d-%m-%Y')}\n"
             f"TIME: {now_ist.strftime('%H:%M:%S')} IST"
@@ -1097,7 +1276,7 @@ def build_breakout_reversal_alerts(kite):
     Detects 30m/1h breakout reversal pattern on stock futures.
 
     Pattern (per timeframe):
-    - Volume sequence: v1>25k, v2>v1, v3>v2, v4>v3, and reversal v5 is the highest in lookback
+    - Volume sequence: v1>50k, v2>v1, v3>v2, v4>v3, and reversal v5 is the highest in lookback
     - Bullish: 4 candles with lower lows, then reversal candle breaks prev high and closes near its high
     - Bearish: 4 candles with higher highs, then reversal candle breaks prev low and closes near its low
     Alerts are rate-limited and sent once per symbol+timeframe per day.
@@ -1226,6 +1405,156 @@ def build_breakout_reversal_alerts(kite):
     return alerts
 
 
+def build_30m_future_volume_blast_alerts(kite):
+    global volume_blast_last_slot
+
+    now_ist = datetime.now(IST)
+    if now_ist.weekday() > 4:
+        return []
+
+    due_slot = get_due_volume_blast_slot(now_ist)
+    if not due_slot:
+        return []
+
+    if volume_blast_last_slot == due_slot:
+        return []
+    volume_blast_last_slot = due_slot
+
+    contracts = _get_active_stock_future_contracts()
+    if not contracts:
+        return []
+
+    alerts = []
+    lookback = (
+        VOLUME_BLAST_LOOKAHEAD_CANDLES
+        + VOLUME_BLAST_PREVIOUS_QUIET_CANDLES
+        + 15
+    )
+
+    for contract in contracts:
+        symbol = contract["symbol"]
+        token = int(contract["token"])
+
+        candles = _get_last_completed_candles(
+            kite,
+            token,
+            "30minute",
+            30,
+            now_ist,
+            lookback=lookback,
+        )
+
+        if len(candles) < 2:
+            continue
+        latest_completed_time = candles[-1].get("date")
+
+        for i, base in enumerate(candles[:-1]):
+            if i < VOLUME_BLAST_PREVIOUS_QUIET_CANDLES:
+                continue
+
+            previous_candles = candles[i - VOLUME_BLAST_PREVIOUS_QUIET_CANDLES:i]
+            previous_high_volume = any(
+                float(c.get("volume", 0) or 0) >= VOLUME_BLAST_MIN_VOLUME
+                for c in previous_candles
+            )
+            if previous_high_volume:
+                continue
+
+            base_volume = float(base.get("volume", 0) or 0)
+            if base_volume < VOLUME_BLAST_MIN_VOLUME:
+                continue
+
+            base_high = float(base.get("high", 0) or 0)
+            base_low = float(base.get("low", 0) or 0)
+            if base_high <= 0 or base_low <= 0:
+                continue
+
+            base_time = base.get("date")
+            if base_time is None:
+                continue
+
+            watch_end = min(i + 1 + VOLUME_BLAST_LOOKAHEAD_CANDLES, len(candles))
+
+            for break_index in range(i + 1, watch_end):
+                break_candle = candles[break_index]
+                break_close = float(break_candle.get("close", 0) or 0)
+                if break_close <= 0:
+                    continue
+
+                break_time = break_candle.get("date")
+                break_time_txt = (
+                    break_time.astimezone(IST).strftime("%H:%M")
+                    if hasattr(break_time, "astimezone")
+                    else str(break_time)
+                )
+                base_time_txt = (
+                    base_time.astimezone(IST).strftime("%H:%M")
+                    if hasattr(base_time, "astimezone")
+                    else str(base_time)
+                )
+
+                direction = None
+                level = None
+                if break_close > base_high:
+                    direction = "BULLISH"
+                    level = base_high
+                elif break_close < base_low:
+                    direction = "BEARISH"
+                    level = base_low
+
+                if not direction:
+                    continue
+
+                confirm_index = break_index + 1
+                if confirm_index >= len(candles):
+                    break
+
+                confirm_candle = candles[confirm_index]
+                confirm_time = confirm_candle.get("date")
+                if confirm_time != latest_completed_time:
+                    break
+
+                confirm_high = float(confirm_candle.get("high", 0) or 0)
+                confirm_low = float(confirm_candle.get("low", 0) or 0)
+                time_txt = (
+                    confirm_time.astimezone(IST).strftime("%H:%M")
+                    if hasattr(confirm_time, "astimezone")
+                    else now_ist.strftime("%H:%M")
+                )
+                if direction == "BULLISH":
+                    confirmed = confirm_high > break_close
+                    confirm_value = confirm_high
+                else:
+                    confirmed = confirm_low < break_close
+                    confirm_value = confirm_low
+
+                if not confirmed:
+                    break
+
+                alert_key = (
+                    f"VOL_BLAST_30M:{symbol}:"
+                    f"{base_time_txt}:{direction}:"
+                    f"{now_ist.date().isoformat()}"
+                )
+                if alert_key in volume_blast_alert_store:
+                    break
+
+                volume_blast_alert_store[alert_key] = now_ist
+                alerts.append(
+                    f"🚨 30MIN FUTURE VOLUME BLAST {direction}\n"
+                    f"Symbol: {symbol}\n"
+                    f"Blast Candle: {base_time_txt} | Vol {format_volume(base_volume)}\n"
+                    f"High: {base_high:.2f} | Low: {base_low:.2f}\n"
+                    f"Break Candle: {break_time_txt} | Close {break_close:.2f} | Level {level:.2f}\n"
+                    f"Confirm Cross: {confirm_value:.2f}\n"
+                    f"Watch: next {VOLUME_BLAST_LOOKAHEAD_CANDLES} candles | Previous {VOLUME_BLAST_PREVIOUS_QUIET_CANDLES} below {format_volume(VOLUME_BLAST_MIN_VOLUME)}\n"
+                    f"TIME: {time_txt} IST"
+                )
+                break
+
+    return alerts
+
+
 def process_future_burst(symbol, name, ltp, oi, alerts_list):
     if not is_burst_underlying(name):
         return
@@ -1310,12 +1639,18 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list):
         if prev_oi > 0:
             tick_lots = int(abs(curr_oi - prev_oi) / lot_size)
             if tick_lots >= threshold and t_int not in active_watches:
+                expiry_text = (
+                    row["expiry"].strftime("%d-%m-%Y")
+                    if pd.notna(row.get("expiry"))
+                    else "NA"
+                )
                 active_watches[t_int] = {
                     "start_oi": prev_oi,
                     "start_price": prev_price,
                     "end_time": now + timedelta(seconds=15),
                     "symbol": row["tradingsymbol"],
                     "underlying": name,
+                    "expiry_text": expiry_text,
                 }
 
         if t_int in active_watches:
@@ -1330,6 +1665,7 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list):
                     p_icon = "▲" if p_chg >= 0 else "▼"
                     alerts_list.append(
                         f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n"
+                        f"EXPIRY: {watch.get('expiry_text', 'NA')}\n"
                         f"━━━━━━━━━━━━━━━\n"
                         f"LOTS: {final_lots}\nPRICE: {ltp:.2f} ({p_icon})\nFUTURE PRICE: {u_ltp:.2f}\n"
                         f"━━━━━━━━━━━━━━━\n"
@@ -1403,5 +1739,6 @@ def calculate_heatmap(kite):
     gap_alerts.extend(build_monthly_future_r3_pivot_alerts(kite))
     gap_alerts.extend(build_stock_future_1hr_s4_alerts(kite))
     gap_alerts.extend(build_breakout_reversal_alerts(kite))
+    gap_alerts.extend(build_30m_future_volume_blast_alerts(kite))
     gap_alerts.extend(build_weekly_born_breakout_alerts(kite))
     return 0, "", bn_alerts, stock_alerts, gap_alerts
