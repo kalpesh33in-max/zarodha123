@@ -1,7 +1,6 @@
 import threading
 import os
 import time
-import schedule
 import requests
 from flask import Flask, request
 from datetime import datetime
@@ -77,8 +76,7 @@ def update_instruments():
             with open("instruments.csv", "wb") as f:
                 f.write(r.content)
             print("Instruments updated.")
-            # Make sure this URL is correct for your Railway deployment
-            send_telegram_message("✅ Instruments Updated. Please log in to start scanner: https://your-app-url.up.railway.app/login")
+            send_telegram_message("✅ Instruments Updated Successfully.")
     except Exception as e:
         print(f"Update Error: {e}")
 
@@ -91,13 +89,18 @@ def morning_task():
 
 def run_scheduler_loop():
     print("Background Scheduler Active.")
-    schedule.every().monday.at("08:30").do(morning_task)
-    schedule.every().tuesday.at("08:30").do(morning_task)
-    schedule.every().wednesday.at("08:30").do(morning_task)
-    schedule.every().thursday.at("08:30").do(morning_task)
-    schedule.every().friday.at("08:30").do(morning_task)
+    last_instrument_update_date = None
+    update_time = datetime.strptime("08:30", "%H:%M").time()
+
     while True:
-        schedule.run_pending()
+        now = datetime.now(IST)
+        if (
+            now.weekday() <= 4
+            and now.time() >= update_time
+            and last_instrument_update_date != now.date()
+        ):
+            morning_task()
+            last_instrument_update_date = now.date()
         time.sleep(10)
 
 # --- Gunicorn Hooks / App Initialization ---

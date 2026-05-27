@@ -16,13 +16,14 @@ LOT_SIZES = {
     "RELIANCE": 500,
 }
 
-INDEX_BURST_NAMES = {"BANKNIFTY", "NIFTY"}
+INDEX_BURST_NAMES = {"BANKNIFTY", "NIFTY", "MIDCPNIFTY"}
 STOCK_BURST_NAMES = set()
 BURST_TRACK_NAMES = [
     "BANKNIFTY",
+    "MIDCPNIFTY",
     "NIFTY",
 ]
-BURST_THRESHOLD_LOTS = 300
+BURST_THRESHOLD_LOTS = 100
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 INDEX_FUTURE_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "SENSEX50"}
 
@@ -193,39 +194,6 @@ def get_monthly_expiry(expiries, rollover_days=1):
     if future_monthlies:
         return future_monthlies[0]
     return ordered_monthlies[-1]
-
-
-def get_nifty_next_weekly_expiry(expiries):
-    valid_expiries = sorted(exp for exp in expiries if pd.notna(exp))
-    if not valid_expiries:
-        return None
-
-    now_ist = datetime.now(IST)
-    week_monday = now_ist.date() - timedelta(days=now_ist.weekday())
-    target_tuesday = week_monday + timedelta(days=8)
-
-    for expiry in valid_expiries:
-        if expiry.date() >= target_tuesday:
-            return expiry
-
-    return None
-
-
-def get_sensex_next_weekly_expiry(expiries):
-    valid_expiries = sorted(exp for exp in expiries if pd.notna(exp))
-    if not valid_expiries:
-        return None
-
-    now_ist = datetime.now(IST)
-    days_since_wednesday = (now_ist.weekday() - 2) % 7
-    cycle_wednesday = now_ist.date() - timedelta(days=days_since_wednesday)
-    target_thursday = cycle_wednesday + timedelta(days=8)
-
-    for expiry in valid_expiries:
-        if expiry.date() >= target_thursday:
-            return expiry
-
-    return None
 
 
 def load_options_data():
@@ -406,18 +374,8 @@ def get_relevant_options(name, ltp):
     if options.empty:
         return pd.DataFrame()
 
-    expiries = options["expiry"].unique()
-    monthly_expiry = get_monthly_expiry(expiries)
+    monthly_expiry = get_monthly_expiry(options["expiry"].unique())
     selected_expiries = [monthly_expiry] if monthly_expiry is not None else []
-
-    if name == "NIFTY":
-        weekly_expiry = get_nifty_next_weekly_expiry(expiries)
-        if weekly_expiry is not None and weekly_expiry not in selected_expiries:
-            selected_expiries.append(weekly_expiry)
-    elif name == "SENSEX":
-        weekly_expiry = get_sensex_next_weekly_expiry(expiries)
-        if weekly_expiry is not None and weekly_expiry not in selected_expiries:
-            selected_expiries.append(weekly_expiry)
 
     if not selected_expiries:
         return pd.DataFrame()
