@@ -16,11 +16,10 @@ LOT_SIZES = {
     "RELIANCE": 500,
 }
 
-INDEX_BURST_NAMES = {"BANKNIFTY", "NIFTY", "MIDCPNIFTY"}
+INDEX_BURST_NAMES = {"BANKNIFTY", "NIFTY"}
 STOCK_BURST_NAMES = set()
 BURST_TRACK_NAMES = [
     "BANKNIFTY",
-    "MIDCPNIFTY",
     "NIFTY",
 ]
 BURST_THRESHOLD_LOTS = 100
@@ -52,6 +51,7 @@ _last_logged_expiry = {}
 
 IST = ZoneInfo("Asia/Kolkata")
 MONTHLY_FUTURE_GAP_THRESHOLD_PCT = 2.0
+MONTHLY_FUTURE_NEXT_GAP_MAX_PCT = 0.5
 MONTHLY_FUTURE_GAP_START_TIME = datetime.strptime("09:15", "%H:%M").time()
 GAP_ALERT_COOLDOWN_SECONDS = 3600
 R3_PIVOT_ALERT_START_TIME = datetime.strptime("09:15", "%H:%M").time()
@@ -508,7 +508,10 @@ def build_monthly_future_gap_alerts(kite):
         if next_future_price > 0:
             next_gap_pct = ((next_future_price - future_price) / future_price) * 100
 
-        if abs(gap_pct) < MONTHLY_FUTURE_GAP_THRESHOLD_PCT:
+        if gap_pct < MONTHLY_FUTURE_GAP_THRESHOLD_PCT:
+            continue
+
+        if next_gap_pct is None or next_gap_pct >= MONTHLY_FUTURE_NEXT_GAP_MAX_PCT:
             continue
 
         last_sent = gap_alert_store.get(future_symbol)
