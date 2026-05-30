@@ -76,6 +76,11 @@ def get_symbol_quotes(symbols, max_age_seconds=15):
     return fresh
 
 
+def get_ws_status():
+    with _cache_lock:
+        return dict(_meta)
+
+
 class FlowEngine:
     def __init__(self, kite, access_token=None, tokens=None):
         self.kite = kite
@@ -83,9 +88,14 @@ class FlowEngine:
         self._started = False
         self._lock = threading.Lock()
         self._tokens = list(tokens or [])
+        self._static_tokens = tokens is not None
+        self._base_tokens = set()
+        self._option_tokens = set()
         self._symbol_by_token = {}
         self._access_token_override = access_token
         self._auth_failed = False
+        self._refresh_thread = None
+        self._refresh_seconds = 60
 
     def start(self):
         with self._lock:
@@ -98,7 +108,7 @@ class FlowEngine:
                 print("WebSocket collector not started: access token missing.")
                 return False
 
-            tokens, symbol_by_token = self._build_subscription_map()
+            tokens, symbol_by_token, base_tokens, option_tokens = self._build_subscription_map()
             if not tokens:
                 print("WebSocket collector not started: no tokens selected.")
                 return False
@@ -107,6 +117,8 @@ class FlowEngine:
                 self._symbol_by_token = symbol_by_token
             if tokens:
                 self._tokens = tokens
+            self._base_tokens = set(base_tokens)
+            self._option_tokens = set(option_tokens)
             self._auth_failed = False
             self.kws = KiteTicker(API_KEY, access_token)
             self.kws.on_connect = self.on_connect
@@ -117,26 +129,37 @@ class FlowEngine:
             self.kws.on_noreconnect = self.on_noreconnect
             self.kws.connect(threaded=True)
             self._started = True
+            self._start_refresh_thread()
             print(f"WebSocket collector started with {len(tokens)} subscriptions.")
             return True
 
     def _build_subscription_map(self):
-        from heatmap_engine import BURST_TRACK_NAMES, get_bank_futures, get_relevant_options, load_futures_data, load_options_data
+        from heatmap_engine import (
+            BURST_OPTION_STRIKE_RANGE,
+            BURST_TRACK_NAMES,
+            _get_active_stock_future_contracts,
+            get_bank_futures,
+            get_relevant_options,
+            load_futures_data,
+            load_options_data,
+        )
 
-        if self._tokens:
-            return self._tokens, self._symbol_by_token
+        if self._static_tokens and self._tokens:
+            return self._tokens, self._symbol_by_token, set(self._tokens), set()
 
         symbol_by_token = {}
         tokens = set()
+        base_tokens = set()
+        option_tokens = set()
 
         futures = load_futures_data()
         options = load_options_data()
         if futures is None or futures.empty or options is None or options.empty:
-            return [], {}
+            return [], {}, set(), set()
 
         fut_symbols = get_bank_futures(self.kite)
         if not fut_symbols:
-            return [], {}
+            return [], {}, set(), set()
 
         # Exact prefix match to avoid substring collisions (e.g. "NIFTY" vs "BANKNIFTY").
         fut_by_name = {}
@@ -149,9 +172,11 @@ class FlowEngine:
                 if tsym.startswith(name):
                     fut_by_name[name] = sym
 
-        symbol_quotes = {}
+        symbol_quotes = get_symbol_quotes(fut_symbols, max_age_seconds=60)
+        missing_fut_symbols = [symbol for symbol in fut_symbols if symbol not in symbol_quotes]
         try:
-            symbol_quotes = self.kite.quote(fut_symbols + [INDEX_SYMBOL])
+            if missing_fut_symbols:
+                symbol_quotes.update(self.kite.quote(missing_fut_symbols))
         except Exception as e:
             print(f"WebSocket bootstrap quote failed: {e}")
 
@@ -162,6 +187,7 @@ class FlowEngine:
                 continue
             token = int(rows.iloc[0]["instrument_token"])
             tokens.add(token)
+            base_tokens.add(token)
             symbol_by_token[token] = symbol
 
         index_rows = self._load_index_rows()
@@ -169,7 +195,34 @@ class FlowEngine:
             row = index_rows.iloc[0]
             index_token = int(row["instrument_token"])
             tokens.add(index_token)
+            base_tokens.add(index_token)
             symbol_by_token[index_token] = INDEX_SYMBOL
+
+        equity_rows = self._load_equity_rows()
+        equity_token_by_symbol = {}
+        if equity_rows is not None and not equity_rows.empty:
+            for _, row in equity_rows.iterrows():
+                equity_token_by_symbol[str(row["tradingsymbol"])] = int(row["instrument_token"])
+
+        for contract in _get_active_stock_future_contracts():
+            token = int(contract["token"])
+            tokens.add(token)
+            base_tokens.add(token)
+            symbol_by_token[token] = contract["symbol"]
+
+            next_token = contract.get("next_token")
+            next_symbol = contract.get("next_symbol")
+            if next_token and next_symbol:
+                next_token = int(next_token)
+                tokens.add(next_token)
+                base_tokens.add(next_token)
+                symbol_by_token[next_token] = next_symbol
+
+            spot_token = equity_token_by_symbol.get(contract["name"])
+            if spot_token:
+                tokens.add(spot_token)
+                base_tokens.add(spot_token)
+                symbol_by_token[spot_token] = f"NSE:{contract['name']}"
 
         for name in BURST_TRACK_NAMES:
             base_symbol = fut_by_name.get(name, "")
@@ -177,14 +230,16 @@ class FlowEngine:
             if u_ltp <= 0:
                 continue
 
-            df = get_relevant_options(name, u_ltp)
+            df = get_relevant_options(name, u_ltp, strike_range=BURST_OPTION_STRIKE_RANGE)
             if df.empty:
                 continue
 
             for token in df["instrument_token"].tolist():
-                tokens.add(int(token))
+                token = int(token)
+                tokens.add(token)
+                option_tokens.add(token)
 
-        return sorted(tokens), symbol_by_token
+        return sorted(tokens), symbol_by_token, base_tokens, option_tokens
 
     def _load_index_rows(self):
         try:
@@ -200,18 +255,83 @@ class FlowEngine:
         ]
         return rows if not rows.empty else None
 
+    def _load_equity_rows(self):
+        try:
+            df = pd.read_csv("instruments.csv")
+        except Exception as e:
+            print(f"Error loading equity rows for websocket: {e}")
+            return None
+
+        rows = df[
+            (df["segment"] == "NSE")
+            & (df["exchange"] == "NSE")
+            & (df["instrument_type"] == "EQ")
+        ]
+        return rows if not rows.empty else None
+
+    def _start_refresh_thread(self):
+        if self._static_tokens or (self._refresh_thread and self._refresh_thread.is_alive()):
+            return
+
+        self._refresh_thread = threading.Thread(
+            target=self._refresh_subscription_loop,
+            daemon=True,
+        )
+        self._refresh_thread.start()
+
+    def _refresh_subscription_loop(self):
+        while True:
+            time.sleep(self._refresh_seconds)
+            if not self._started or self._auth_failed:
+                continue
+            try:
+                self.refresh_subscriptions()
+            except Exception as e:
+                print(f"WebSocket subscription refresh error: {e}")
+
+    def refresh_subscriptions(self):
+        tokens, symbol_by_token, base_tokens, option_tokens = self._build_subscription_map()
+        if not tokens:
+            print("WebSocket refresh skipped: no subscription tokens selected.")
+            return
+
+        new_tokens = set(tokens)
+        old_tokens = set(self._tokens)
+
+        add_tokens = sorted(new_tokens - old_tokens)
+        remove_tokens = sorted(old_tokens - new_tokens)
+
+        self._symbol_by_token = symbol_by_token
+        self._tokens = sorted(new_tokens)
+        self._base_tokens = set(base_tokens)
+        self._option_tokens = set(option_tokens)
+
+        if add_tokens and self.kws:
+            self._subscribe_tokens(self.kws, add_tokens)
+            print(f"WebSocket added {len(add_tokens)} refreshed subscriptions.")
+
+        if remove_tokens and self.kws and hasattr(self.kws, "unsubscribe"):
+            chunk_size = 3000
+            for i in range(0, len(remove_tokens), chunk_size):
+                self.kws.unsubscribe(remove_tokens[i:i + chunk_size])
+            print(f"WebSocket removed {len(remove_tokens)} stale subscriptions.")
+
+    def _subscribe_tokens(self, ws, tokens):
+        chunk_size = 3000
+        token_list = list(tokens)
+        for i in range(0, len(token_list), chunk_size):
+            chunk = token_list[i:i + chunk_size]
+            ws.subscribe(chunk)
+            ws.set_mode(ws.MODE_FULL, chunk)
+            time.sleep(0.2)
+
     def on_connect(self, ws, response):
         mark_connected(True)
         self._auth_failed = False
         if not self._tokens:
             return
 
-        chunk_size = 3000
-        for i in range(0, len(self._tokens), chunk_size):
-            chunk = self._tokens[i:i + chunk_size]
-            ws.subscribe(chunk)
-            ws.set_mode(ws.MODE_FULL, chunk)
-            time.sleep(0.2)
+        self._subscribe_tokens(ws, self._tokens)
 
     def on_ticks(self, ws, ticks):
         now = time.time()

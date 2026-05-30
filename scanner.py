@@ -1,70 +1,212 @@
-import pandas as pd
+import itertools
+import queue
+import threading
 import time
-from heatmap_engine import calculate_heatmap
-from telegram_utils import send_telegram_message
-from env_config import TELE_CHAT_ID_BN, TELE_CHAT_ID_STOCKS, TELE_TOKEN_BN, TELE_TOKEN_STOCKS, TELE_TOKEN_VELOCITY, TELE_CHAT_ID_VELOCITY
-
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from env_config import TELE_CHAT_ID_BN, TELE_TOKEN_BN
+from heatmap_engine import (
+    calculate_burst_alerts,
+    calculate_gap_alerts,
+    calculate_historical_alerts,
+)
+from telegram_utils import send_telegram_message
+from websocket_flow import get_ws_status
+
+
 IST = ZoneInfo("Asia/Kolkata")
-SCAN_INTERVAL_SECONDS = 5
+BURST_SCAN_INTERVAL_SECONDS = 1
+GAP_BATCH_INTERVAL_SECONDS = 30
+HISTORICAL_SCAN_INTERVAL_SECONDS = 30
+WS_HEARTBEAT_INTERVAL_SECONDS = 30
+WS_STALE_SECONDS = 60
+WS_ALERT_COOLDOWN_SECONDS = 300
+ERROR_ALERT_COOLDOWN_SECONDS = 300
 SILENT_LOG_INTERVAL_SECONDS = 300
+
+PRIORITY_BURST = 1
+PRIORITY_GAP = 2
+PRIORITY_HISTORICAL = 3
+PRIORITY_STATUS = 4
+
+
+class TelegramDispatcher:
+    def __init__(self):
+        self._queue = queue.PriorityQueue()
+        self._counter = itertools.count()
+        self._thread = None
+
+    def start(self, stop_event):
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(
+            target=self._worker,
+            args=(stop_event,),
+            daemon=True,
+        )
+        self._thread.start()
+
+    def send(self, priority, message, chat_id=None, token=None):
+        self._queue.put((priority, next(self._counter), message, chat_id, token))
+
+    def _worker(self, stop_event):
+        while not stop_event.is_set():
+            try:
+                priority, _, message, chat_id, token = self._queue.get(timeout=1)
+            except queue.Empty:
+                continue
+
+            try:
+                send_telegram_message(message, chat_id=chat_id, token=token)
+            except Exception as e:
+                print(f"Telegram send failed at priority {priority}: {e}")
+            finally:
+                self._queue.task_done()
+
+
+def _is_market_open(now):
+    start_time = datetime.strptime("09:00", "%H:%M").time()
+    end_time = datetime.strptime("15:30", "%H:%M").time()
+    return now.weekday() <= 4 and start_time <= now.time() <= end_time
+
+
+def _wait(stop_event, seconds):
+    return stop_event.wait(seconds)
+
+
+def _send_error(dispatcher, label, error, state):
+    now_ts = time.time()
+    if now_ts - state.get("last_error_alert", 0) < ERROR_ALERT_COOLDOWN_SECONDS:
+        return
+    state["last_error_alert"] = now_ts
+    dispatcher.send(PRIORITY_STATUS, f"{label} Error: {error}")
+
+
+def _burst_loop(kite, dispatcher, stop_event):
+    state = {}
+    while not stop_event.is_set():
+        now = datetime.now(IST)
+        if _is_market_open(now):
+            try:
+                bn_alerts, stock_alerts = calculate_burst_alerts(kite)
+
+                for alert in bn_alerts:
+                    dispatcher.send(
+                        PRIORITY_BURST,
+                        alert,
+                        chat_id=TELE_CHAT_ID_BN,
+                        token=TELE_TOKEN_BN,
+                    )
+                for alert in stock_alerts:
+                    dispatcher.send(
+                        PRIORITY_BURST,
+                        alert,
+                        chat_id=TELE_CHAT_ID_BN,
+                        token=TELE_TOKEN_BN,
+                    )
+            except Exception as e:
+                print(f"Error in burst scanner loop: {e}")
+                _send_error(dispatcher, "Burst Scanner", e, state)
+
+        if _wait(stop_event, BURST_SCAN_INTERVAL_SECONDS):
+            break
+
+
+def _gap_loop(kite, dispatcher, stop_event):
+    state = {}
+    batch_index = 0
+    while not stop_event.is_set():
+        now = datetime.now(IST)
+        if _is_market_open(now):
+            try:
+                alerts = calculate_gap_alerts(
+                    kite,
+                    batch_index=batch_index,
+                    max_quote_symbols=500,
+                )
+                batch_index += 1
+                for alert in alerts:
+                    dispatcher.send(PRIORITY_GAP, alert)
+            except Exception as e:
+                print(f"Error in gap scanner loop: {e}")
+                _send_error(dispatcher, "Gap Scanner", e, state)
+
+        if _wait(stop_event, GAP_BATCH_INTERVAL_SECONDS):
+            break
+
+
+def _historical_loop(kite, dispatcher, stop_event):
+    state = {}
+    while not stop_event.is_set():
+        now = datetime.now(IST)
+        if _is_market_open(now):
+            try:
+                alerts = calculate_historical_alerts(kite)
+                for alert in alerts:
+                    dispatcher.send(PRIORITY_HISTORICAL, alert)
+            except Exception as e:
+                print(f"Error in historical scanner loop: {e}")
+                _send_error(dispatcher, "Historical Scanner", e, state)
+
+        if _wait(stop_event, HISTORICAL_SCAN_INTERVAL_SECONDS):
+            break
+
+
+def _websocket_heartbeat_loop(dispatcher, stop_event):
+    last_alert_time = 0.0
+    while not stop_event.is_set():
+        now = datetime.now(IST)
+        if _is_market_open(now):
+            status = get_ws_status()
+            connected = status.get("connected", False)
+            last_tick_time = status.get("last_tick_time", 0.0)
+            age = time.time() - last_tick_time if last_tick_time else None
+            stale = age is not None and age > WS_STALE_SECONDS
+            if (not connected or stale) and time.time() - last_alert_time >= WS_ALERT_COOLDOWN_SECONDS:
+                last_alert_time = time.time()
+                if stale:
+                    message = f"WebSocket stale: no tick for {age:.0f}s"
+                else:
+                    message = "WebSocket disconnected"
+                dispatcher.send(PRIORITY_STATUS, message)
+
+        if _wait(stop_event, WS_HEARTBEAT_INTERVAL_SECONDS):
+            break
 
 
 def run_scanner(kite, stop_event=None):
+    if stop_event is None:
+        stop_event = threading.Event()
 
-    print("Scanner session initialized. Sending status to Telegram...")
-    send_telegram_message("✅ *Kite Scanner Login Successful!* Waiting for market hours (09:00 AM) to send reports...")
+    print("Scanner session initialized. Starting priority scanner loops...")
+    dispatcher = TelegramDispatcher()
+    dispatcher.start(stop_event)
+    dispatcher.send(
+        PRIORITY_STATUS,
+        "✅ *Kite Scanner Login Successful!* Priority scanner started. Burst alerts are highest priority.",
+    )
+
+    threads = [
+        threading.Thread(target=_burst_loop, args=(kite, dispatcher, stop_event), daemon=True),
+        threading.Thread(target=_gap_loop, args=(kite, dispatcher, stop_event), daemon=True),
+        threading.Thread(target=_historical_loop, args=(kite, dispatcher, stop_event), daemon=True),
+        threading.Thread(target=_websocket_heartbeat_loop, args=(dispatcher, stop_event), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
 
     last_silent_log_time = 0.0
-
-    while stop_event is None or not stop_event.is_set():
-
-        # Use IST timezone
-        now = datetime.now(IST)
-        now_time = now.time()
-        start_time = datetime.strptime("09:00", "%H:%M").time()
-        end_time = datetime.strptime("15:30", "%H:%M").time()
-
-        if start_time <= now_time <= end_time and now.weekday() <= 4:
-
-            try:
-                score, report, bn_alerts, stock_alerts, gap_alerts = calculate_heatmap(kite)
-
-                # Alerts are checked on the scanner loop cadence.
-                # ALL Alerts now go to the BANK NIFTY channel as requested
-                if bn_alerts:
-                    print(f"Sending {len(bn_alerts)} Bank Nifty Alerts...")
-                    for alert in bn_alerts:
-                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_BN, token=TELE_TOKEN_BN)
-
-                if stock_alerts:
-                    print(f"Sending {len(stock_alerts)} Bank Stock Alerts...")
-                    for alert in stock_alerts:
-                        send_telegram_message(alert, chat_id=TELE_CHAT_ID_BN, token=TELE_TOKEN_BN)
-
-                if gap_alerts:
-                    print(f"Sending {len(gap_alerts)} May Future Gap Reports...")
-                    for alert in gap_alerts:
-                        send_telegram_message(alert)
-
-            except Exception as e:
-                print(f"Error in scanner loop: {e}")
-                send_telegram_message(f"Scanner Error: {e}")
-
-        else:
-            # Avoid spamming logs when the market is closed.
-            now_ts = now.timestamp()
-            if now_ts - last_silent_log_time >= SILENT_LOG_INTERVAL_SECONDS:
-                print(f"[{now.strftime('%H:%M:%S')}] Outside trading session (weekend/market closed). Scanner is silent.")
-                last_silent_log_time = now_ts
-
-        if stop_event:
-            if stop_event.wait(SCAN_INTERVAL_SECONDS):
+    try:
+        while not stop_event.is_set():
+            now = datetime.now(IST)
+            if not _is_market_open(now):
+                now_ts = now.timestamp()
+                if now_ts - last_silent_log_time >= SILENT_LOG_INTERVAL_SECONDS:
+                    print(f"[{now.strftime('%H:%M:%S')}] Outside trading session. Priority scanner is silent.")
+                    last_silent_log_time = now_ts
+            if _wait(stop_event, 5):
                 break
-        else:
-            time.sleep(SCAN_INTERVAL_SECONDS)
-
-    print("Scanner loop stopped.")
-    send_telegram_message("🛑 *Market Scanner Process Ended.*")
+    finally:
+        print("Scanner loop stopped.")
+        send_telegram_message("🛑 *Market Scanner Process Ended.*")
