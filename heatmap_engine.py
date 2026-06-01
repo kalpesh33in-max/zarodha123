@@ -390,6 +390,22 @@ def get_active_future(name):
     return f"{exchange}:{tradingsymbol}"
 
 
+def get_future_expiry_text(symbol):
+    df = load_futures_data()
+    if df is None or df.empty or not symbol:
+        return ""
+
+    tradingsymbol = symbol.split(":", 1)[1] if ":" in symbol else symbol
+    rows = df[df["tradingsymbol"] == tradingsymbol]
+    if rows.empty:
+        return ""
+
+    expiry = rows.iloc[0].get("expiry")
+    if pd.isna(expiry):
+        return ""
+    return expiry.strftime("%d-%m-%Y") if hasattr(expiry, "strftime") else str(expiry)
+
+
 def get_symbol_quotes_with_fallback(kite, symbols, max_age_seconds=15):
     data = get_symbol_quotes(symbols, max_age_seconds=max_age_seconds)
     missing = [symbol for symbol in symbols if symbol not in data]
@@ -1792,6 +1808,7 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list):
                 "end_time": now + timedelta(seconds=15),
                 "symbol": symbol,
                 "name": name,
+                "expiry_text": get_future_expiry_text(symbol) if is_mcx_underlying(name) else "",
             }
 
     if key in active_watches:
@@ -1804,8 +1821,14 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list):
                 strength = get_strength_label(final_lots, watch["name"])
                 action = classify_action(watch["symbol"], oi_chg, p_chg)
                 p_icon = "▲" if p_chg >= 0 else "▼"
+                expiry_line = (
+                    f"EXPIRY: {watch['expiry_text']}\n"
+                    if watch.get("expiry_text")
+                    else ""
+                )
                 alerts_list.append(
                     f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n"
+                    f"{expiry_line}"
                     f"━━━━━━━━━━━━━━━\n"
                     f"LOTS: {final_lots}\nPRICE: {ltp:.2f} ({p_icon})\nFUTURE PRICE: {ltp:.2f}\n"
                     f"━━━━━━━━━━━━━━━\n"
