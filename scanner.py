@@ -14,7 +14,7 @@ from heatmap_engine import (
     is_burst_session_open,
 )
 from telegram_utils import send_telegram_message
-from websocket_flow import get_ws_status, restart_active_flow_engine
+from websocket_flow import get_ws_status
 
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -24,7 +24,6 @@ HISTORICAL_SCAN_INTERVAL_SECONDS = 30
 WS_HEARTBEAT_INTERVAL_SECONDS = 30
 WS_STALE_SECONDS = 60
 WS_ALERT_COOLDOWN_SECONDS = 300
-WS_RESTART_COOLDOWN_SECONDS = 120
 BURST_FALLBACK_STATUS_COOLDOWN_SECONDS = 300
 ERROR_ALERT_COOLDOWN_SECONDS = 300
 SILENT_LOG_INTERVAL_SECONDS = 300
@@ -175,7 +174,6 @@ def _historical_loop(kite, dispatcher, stop_event):
 
 def _websocket_heartbeat_loop(dispatcher, stop_event):
     last_alert_time = 0.0
-    last_restart_time = 0.0
     while not stop_event.is_set():
         now = datetime.now(IST)
         if is_burst_session_open(now):
@@ -190,15 +188,12 @@ def _websocket_heartbeat_loop(dispatcher, stop_event):
             else:
                 message = "WebSocket disconnected"
 
-            restart_note = ""
-            if problem and time.time() - last_restart_time >= WS_RESTART_COOLDOWN_SECONDS:
-                last_restart_time = time.time()
-                restarted = restart_active_flow_engine(reason=message)
-                restart_note = " Restart attempted." if restarted else " Restart skipped: no active engine."
-
             if problem and time.time() - last_alert_time >= WS_ALERT_COOLDOWN_SECONDS:
                 last_alert_time = time.time()
-                dispatcher.send(PRIORITY_STATUS, f"{message}.{restart_note}")
+                dispatcher.send(
+                    PRIORITY_STATUS,
+                    f"{message}. Burst REST fallback remains active; process restart is required to recreate KiteTicker.",
+                )
 
         if _wait(stop_event, WS_HEARTBEAT_INTERVAL_SECONDS):
             break
@@ -213,7 +208,7 @@ def run_scanner(kite, stop_event=None):
     dispatcher.start(stop_event)
     dispatcher.send(
         PRIORITY_STATUS,
-        "✅ *Kite Scanner Login Successful!* Priority scanner started. Burst alerts are highest priority. NSE burst: 09:00-15:29, MCX burst: 15:30-23:30. WebSocket recovery and burst REST fallback are enabled.",
+        "✅ *Kite Scanner Login Successful!* Priority scanner started. Burst alerts are highest priority. NSE burst: 09:00-15:29, MCX burst: 15:30-23:30. Burst REST fallback is enabled.",
     )
 
     threads = [
