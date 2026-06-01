@@ -25,6 +25,7 @@ BURST_TRACK_NAMES = [
 ]
 BURST_OPTION_STRIKE_RANGE = 30
 BURST_THRESHOLD_LOTS = 100
+BURST_REST_FALLBACK_CACHE_SECONDS = int(os.getenv("BURST_REST_FALLBACK_CACHE_SECONDS", "3"))
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 INDEX_FUTURE_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "SENSEX50"}
 
@@ -51,6 +52,13 @@ _options_df = None
 _futures_df = None
 _last_logged_expiry = {}
 _historical_cache = {}
+_burst_rest_symbol_cache = {"ts": 0.0, "data": {}}
+_burst_rest_option_cache = {"ts": 0.0, "data": {}}
+_burst_quote_status = {
+    "source": "none",
+    "detail": "",
+    "ts": 0.0,
+}
 
 IST = ZoneInfo("Asia/Kolkata")
 MONTHLY_FUTURE_GAP_THRESHOLD_PCT = 2.0
@@ -349,6 +357,55 @@ def get_option_quotes_with_fallback(kite, tokens, max_age_seconds=15):
             data.update({str(key): value for key, value in fresh.items()})
         except Exception as e:
             print(f"Fallback option quote error: {e}")
+    return data
+
+
+def _set_burst_quote_status(source, detail=""):
+    _burst_quote_status["source"] = source
+    _burst_quote_status["detail"] = detail
+    _burst_quote_status["ts"] = time.time()
+
+
+def get_burst_quote_status():
+    return dict(_burst_quote_status)
+
+
+def _cache_has_keys(cache, keys):
+    data = cache.get("data") or {}
+    return all(key in data for key in keys)
+
+
+def _get_burst_symbol_quotes_with_fallback(kite, symbols):
+    now = time.time()
+    keys = list(dict.fromkeys(symbols))
+    if (
+        now - _burst_rest_symbol_cache.get("ts", 0.0) <= BURST_REST_FALLBACK_CACHE_SECONDS
+        and _cache_has_keys(_burst_rest_symbol_cache, keys)
+    ):
+        data = _burst_rest_symbol_cache["data"]
+        return {key: data[key] for key in keys}
+
+    data = get_symbol_quotes_with_fallback(kite, keys)
+    if data:
+        _burst_rest_symbol_cache["ts"] = now
+        _burst_rest_symbol_cache["data"] = dict(data)
+    return data
+
+
+def _get_burst_option_quotes_with_fallback(kite, tokens):
+    now = time.time()
+    keys = [str(int(token)) for token in tokens]
+    if (
+        now - _burst_rest_option_cache.get("ts", 0.0) <= BURST_REST_FALLBACK_CACHE_SECONDS
+        and _cache_has_keys(_burst_rest_option_cache, keys)
+    ):
+        data = _burst_rest_option_cache["data"]
+        return {key: data[key] for key in keys}
+
+    data = get_option_quotes_with_fallback(kite, tokens)
+    if data:
+        _burst_rest_option_cache["ts"] = now
+        _burst_rest_option_cache["data"] = dict(data)
     return data
 
 
@@ -1769,13 +1826,21 @@ def _map_tracked_futures_by_name(fut_symbols):
 def calculate_burst_alerts(kite):
     fut_symbols = get_bank_futures(kite)
     symbols = fut_symbols + [INDEX_SYMBOL]
+    fut_by_name = _map_tracked_futures_by_name(fut_symbols)
+
+    quote_source = "websocket"
     data = get_symbol_quotes_ws_only(symbols, max_age_seconds=15)
+    missing_futures = [symbol for symbol in fut_symbols if symbol not in data]
+    if not data or missing_futures:
+        data = _get_burst_symbol_quotes_with_fallback(kite, symbols)
+        quote_source = "rest_fallback"
+
     if not data:
+        _set_burst_quote_status("none", "no future quotes")
         return [], []
 
     bn_alerts = []
     stock_alerts = []
-    fut_by_name = _map_tracked_futures_by_name(fut_symbols)
 
     all_opt_tokens = []
     underlying_map = {}
@@ -1791,6 +1856,20 @@ def calculate_burst_alerts(kite):
         all_opt_tokens.extend(df["instrument_token"].tolist())
 
     opt_quotes = get_option_quotes_ws_only(all_opt_tokens, max_age_seconds=15)
+    missing_option_tokens = [
+        token for token in all_opt_tokens
+        if str(int(token)) not in opt_quotes
+    ]
+    if all_opt_tokens and (quote_source == "rest_fallback" or missing_option_tokens):
+        fallback_opt_quotes = _get_burst_option_quotes_with_fallback(kite, all_opt_tokens)
+        if fallback_opt_quotes:
+            opt_quotes.update(fallback_opt_quotes)
+            quote_source = "rest_fallback"
+
+    _set_burst_quote_status(
+        quote_source,
+        f"futures={len(data)} options={len(opt_quotes)}",
+    )
 
     for name in BURST_TRACK_NAMES:
         sym = fut_by_name.get(name)

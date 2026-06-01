@@ -10,9 +10,10 @@ from heatmap_engine import (
     calculate_burst_alerts,
     calculate_gap_alerts,
     calculate_historical_alerts,
+    get_burst_quote_status,
 )
 from telegram_utils import send_telegram_message
-from websocket_flow import get_ws_status
+from websocket_flow import get_ws_status, restart_active_flow_engine
 
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -22,6 +23,8 @@ HISTORICAL_SCAN_INTERVAL_SECONDS = 30
 WS_HEARTBEAT_INTERVAL_SECONDS = 30
 WS_STALE_SECONDS = 60
 WS_ALERT_COOLDOWN_SECONDS = 300
+WS_RESTART_COOLDOWN_SECONDS = 120
+BURST_FALLBACK_STATUS_COOLDOWN_SECONDS = 300
 ERROR_ALERT_COOLDOWN_SECONDS = 300
 SILENT_LOG_INTERVAL_SECONDS = 300
 
@@ -90,6 +93,18 @@ def _burst_loop(kite, dispatcher, stop_event):
         if _is_market_open(now):
             try:
                 bn_alerts, stock_alerts = calculate_burst_alerts(kite)
+                quote_status = get_burst_quote_status()
+                if (
+                    quote_status.get("source") == "rest_fallback"
+                    and time.time() - state.get("last_rest_fallback_alert", 0)
+                    >= BURST_FALLBACK_STATUS_COOLDOWN_SECONDS
+                ):
+                    state["last_rest_fallback_alert"] = time.time()
+                    dispatcher.send(
+                        PRIORITY_STATUS,
+                        "Burst scanner using REST fallback because WebSocket ticks are not fresh. "
+                        f"{quote_status.get('detail', '')}",
+                    )
 
                 for alert in bn_alerts:
                     dispatcher.send(
@@ -155,6 +170,7 @@ def _historical_loop(kite, dispatcher, stop_event):
 
 def _websocket_heartbeat_loop(dispatcher, stop_event):
     last_alert_time = 0.0
+    last_restart_time = 0.0
     while not stop_event.is_set():
         now = datetime.now(IST)
         if _is_market_open(now):
@@ -163,13 +179,21 @@ def _websocket_heartbeat_loop(dispatcher, stop_event):
             last_tick_time = status.get("last_tick_time", 0.0)
             age = time.time() - last_tick_time if last_tick_time else None
             stale = age is not None and age > WS_STALE_SECONDS
-            if (not connected or stale) and time.time() - last_alert_time >= WS_ALERT_COOLDOWN_SECONDS:
+            problem = not connected or stale
+            if stale:
+                message = f"WebSocket stale: no tick for {age:.0f}s"
+            else:
+                message = "WebSocket disconnected"
+
+            restart_note = ""
+            if problem and time.time() - last_restart_time >= WS_RESTART_COOLDOWN_SECONDS:
+                last_restart_time = time.time()
+                restarted = restart_active_flow_engine(reason=message)
+                restart_note = " Restart attempted." if restarted else " Restart skipped: no active engine."
+
+            if problem and time.time() - last_alert_time >= WS_ALERT_COOLDOWN_SECONDS:
                 last_alert_time = time.time()
-                if stale:
-                    message = f"WebSocket stale: no tick for {age:.0f}s"
-                else:
-                    message = "WebSocket disconnected"
-                dispatcher.send(PRIORITY_STATUS, message)
+                dispatcher.send(PRIORITY_STATUS, f"{message}.{restart_note}")
 
         if _wait(stop_event, WS_HEARTBEAT_INTERVAL_SECONDS):
             break
@@ -184,7 +208,7 @@ def run_scanner(kite, stop_event=None):
     dispatcher.start(stop_event)
     dispatcher.send(
         PRIORITY_STATUS,
-        "✅ *Kite Scanner Login Successful!* Priority scanner started. Burst alerts are highest priority.",
+        "✅ *Kite Scanner Login Successful!* Priority scanner started. Burst alerts are highest priority. WebSocket recovery and burst REST fallback are enabled.",
     )
 
     threads = [

@@ -16,6 +16,8 @@ _meta = {
     "connected": False,
     "last_tick_time": 0.0,
 }
+_active_engine = None
+_active_engine_lock = threading.Lock()
 
 
 def mark_connected(is_connected):
@@ -81,6 +83,17 @@ def get_ws_status():
         return dict(_meta)
 
 
+def restart_active_flow_engine(reason="manual"):
+    with _active_engine_lock:
+        engine = _active_engine
+
+    if engine is None:
+        print(f"WebSocket restart skipped: no active FlowEngine ({reason}).")
+        return False
+
+    return engine.restart(reason=reason)
+
+
 class FlowEngine:
     def __init__(self, kite, access_token=None, tokens=None):
         self.kite = kite
@@ -129,9 +142,41 @@ class FlowEngine:
             self.kws.on_noreconnect = self.on_noreconnect
             self.kws.connect(threaded=True)
             self._started = True
+            self._register_active_engine()
             self._start_refresh_thread()
             print(f"WebSocket collector started with {len(tokens)} subscriptions.")
             return True
+
+    def restart(self, reason="manual"):
+        with self._lock:
+            print(f"Restarting WebSocket collector: {reason}")
+            old_ws = self.kws
+            self.kws = None
+            self._started = False
+            self._auth_failed = False
+            mark_connected(False)
+
+        self._close_socket(old_ws)
+        return self.start()
+
+    def _register_active_engine(self):
+        global _active_engine
+        with _active_engine_lock:
+            _active_engine = self
+
+    def _close_socket(self, ws):
+        if not ws:
+            return
+
+        for method_name in ("stop", "close"):
+            method = getattr(ws, method_name, None)
+            if not method:
+                continue
+            try:
+                method()
+                return
+            except Exception as e:
+                print(f"WebSocket {method_name} during restart failed: {e}")
 
     def _build_subscription_map(self):
         from heatmap_engine import (
