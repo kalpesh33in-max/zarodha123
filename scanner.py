@@ -11,6 +11,7 @@ from heatmap_engine import (
     calculate_gap_alerts,
     calculate_historical_alerts,
     get_burst_quote_status,
+    is_burst_session_open,
 )
 from telegram_utils import send_telegram_message
 from websocket_flow import get_ws_status, restart_active_flow_engine
@@ -74,6 +75,10 @@ def _is_market_open(now):
     return now.weekday() <= 4 and start_time <= now.time() <= end_time
 
 
+def _is_any_scanner_session(now):
+    return _is_market_open(now) or is_burst_session_open(now)
+
+
 def _wait(stop_event, seconds):
     return stop_event.wait(seconds)
 
@@ -90,7 +95,7 @@ def _burst_loop(kite, dispatcher, stop_event):
     state = {}
     while not stop_event.is_set():
         now = datetime.now(IST)
-        if _is_market_open(now):
+        if is_burst_session_open(now):
             try:
                 bn_alerts, stock_alerts = calculate_burst_alerts(kite)
                 quote_status = get_burst_quote_status()
@@ -173,7 +178,7 @@ def _websocket_heartbeat_loop(dispatcher, stop_event):
     last_restart_time = 0.0
     while not stop_event.is_set():
         now = datetime.now(IST)
-        if _is_market_open(now):
+        if is_burst_session_open(now):
             status = get_ws_status()
             connected = status.get("connected", False)
             last_tick_time = status.get("last_tick_time", 0.0)
@@ -208,7 +213,7 @@ def run_scanner(kite, stop_event=None):
     dispatcher.start(stop_event)
     dispatcher.send(
         PRIORITY_STATUS,
-        "✅ *Kite Scanner Login Successful!* Priority scanner started. Burst alerts are highest priority. WebSocket recovery and burst REST fallback are enabled.",
+        "✅ *Kite Scanner Login Successful!* Priority scanner started. Burst alerts are highest priority. NSE burst: 09:00-15:29, MCX burst: 15:30-23:30. WebSocket recovery and burst REST fallback are enabled.",
     )
 
     threads = [
@@ -224,7 +229,7 @@ def run_scanner(kite, stop_event=None):
     try:
         while not stop_event.is_set():
             now = datetime.now(IST)
-            if not _is_market_open(now):
+            if not _is_any_scanner_session(now):
                 now_ts = now.timestamp()
                 if now_ts - last_silent_log_time >= SILENT_LOG_INTERVAL_SECONDS:
                     print(f"[{now.strftime('%H:%M:%S')}] Outside trading session. Priority scanner is silent.")

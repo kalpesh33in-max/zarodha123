@@ -180,10 +180,10 @@ class FlowEngine:
 
     def _build_subscription_map(self):
         from heatmap_engine import (
-            BURST_OPTION_STRIKE_RANGE,
-            BURST_TRACK_NAMES,
             _get_active_stock_future_contracts,
-            get_bank_futures,
+            get_burst_futures,
+            get_burst_option_strike_range,
+            get_burst_subscription_names,
             get_relevant_options,
             load_futures_data,
             load_options_data,
@@ -202,9 +202,8 @@ class FlowEngine:
         if futures is None or futures.empty or options is None or options.empty:
             return [], {}, set(), set()
 
-        fut_symbols = get_bank_futures(self.kite)
-        if not fut_symbols:
-            return [], {}, set(), set()
+        burst_names = get_burst_subscription_names()
+        fut_symbols = get_burst_futures(self.kite, burst_names)
 
         # Exact prefix match to avoid substring collisions (e.g. "NIFTY" vs "BANKNIFTY").
         fut_by_name = {}
@@ -213,7 +212,7 @@ class FlowEngine:
             if len(parts) != 2:
                 continue
             tsym = parts[1]
-            for name in BURST_TRACK_NAMES:
+            for name in burst_names:
                 if tsym.startswith(name):
                     fut_by_name[name] = sym
 
@@ -269,13 +268,13 @@ class FlowEngine:
                 base_tokens.add(spot_token)
                 symbol_by_token[spot_token] = f"NSE:{contract['name']}"
 
-        for name in BURST_TRACK_NAMES:
+        for name in burst_names:
             base_symbol = fut_by_name.get(name, "")
             u_ltp = symbol_quotes.get(base_symbol, {}).get("last_price", 0)
             if u_ltp <= 0:
                 continue
 
-            df = get_relevant_options(name, u_ltp, strike_range=BURST_OPTION_STRIKE_RANGE)
+            df = get_relevant_options(name, u_ltp, strike_range=get_burst_option_strike_range(name))
             if df.empty:
                 continue
 

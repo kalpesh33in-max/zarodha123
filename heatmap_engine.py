@@ -15,16 +15,26 @@ LOT_SIZES = {
     "HDFCBANK": 550,
     "ICICIBANK": 700,
     "RELIANCE": 500,
+    "CRUDEOIL": 1,
+    "NATURALGAS": 1,
 }
 
 INDEX_BURST_NAMES = {"BANKNIFTY", "NIFTY"}
 STOCK_BURST_NAMES = set()
-BURST_TRACK_NAMES = [
+NSE_BURST_TRACK_NAMES = [
     "BANKNIFTY",
     "NIFTY",
 ]
+MCX_BURST_TRACK_NAMES = [
+    "CRUDEOIL",
+    "NATURALGAS",
+]
+MCX_BURST_NAMES = set(MCX_BURST_TRACK_NAMES)
+BURST_TRACK_NAMES = NSE_BURST_TRACK_NAMES
 BURST_OPTION_STRIKE_RANGE = 30
+MCX_BURST_OPTION_STRIKE_RANGE = int(os.getenv("MCX_BURST_OPTION_STRIKE_RANGE", "20"))
 BURST_THRESHOLD_LOTS = 100
+MCX_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_BURST_THRESHOLD_LOTS", str(BURST_THRESHOLD_LOTS)))
 BURST_REST_FALLBACK_CACHE_SECONDS = int(os.getenv("BURST_REST_FALLBACK_CACHE_SECONDS", "3"))
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 INDEX_FUTURE_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "SENSEX50"}
@@ -59,8 +69,13 @@ _burst_quote_status = {
     "detail": "",
     "ts": 0.0,
 }
+_last_burst_session = None
 
 IST = ZoneInfo("Asia/Kolkata")
+NSE_BURST_START_TIME = datetime.strptime("09:00", "%H:%M").time()
+NSE_BURST_END_TIME = datetime.strptime("15:30", "%H:%M").time()
+MCX_BURST_START_TIME = datetime.strptime("15:30", "%H:%M").time()
+MCX_BURST_END_TIME = datetime.strptime("23:30:59", "%H:%M:%S").time()
 MONTHLY_FUTURE_GAP_THRESHOLD_PCT = 2.0
 MONTHLY_FUTURE_NEXT_GAP_MAX_PCT = 0.5
 MONTHLY_FUTURE_GAP_START_TIME = datetime.strptime("09:15", "%H:%M").time()
@@ -134,12 +149,66 @@ def is_index_underlying(name):
     return name in INDEX_BURST_NAMES
 
 
+def is_mcx_underlying(name):
+    return name in MCX_BURST_NAMES
+
+
 def is_burst_underlying(name):
-    return name in INDEX_BURST_NAMES or name in STOCK_BURST_NAMES
+    return name in INDEX_BURST_NAMES or name in STOCK_BURST_NAMES or is_mcx_underlying(name)
 
 
 def get_burst_threshold(name):
+    if is_mcx_underlying(name):
+        return MCX_BURST_THRESHOLD_LOTS
     return BURST_THRESHOLD_LOTS
+
+
+def get_burst_option_strike_range(name):
+    if is_mcx_underlying(name):
+        return MCX_BURST_OPTION_STRIKE_RANGE
+    return BURST_OPTION_STRIKE_RANGE
+
+
+def get_burst_session(now_ist=None):
+    now_ist = now_ist or datetime.now(IST)
+    if now_ist.weekday() > 4:
+        return None
+
+    t = now_ist.time()
+    if NSE_BURST_START_TIME <= t < NSE_BURST_END_TIME:
+        return "nse"
+    if MCX_BURST_START_TIME <= t <= MCX_BURST_END_TIME:
+        return "mcx"
+    return None
+
+
+def is_burst_session_open(now_ist=None):
+    return get_burst_session(now_ist) is not None
+
+
+def get_active_burst_names(now_ist=None):
+    session = get_burst_session(now_ist)
+    if session == "mcx":
+        return list(MCX_BURST_TRACK_NAMES)
+    if session == "nse":
+        return list(NSE_BURST_TRACK_NAMES)
+    return []
+
+
+def get_burst_subscription_names(now_ist=None):
+    now_ist = now_ist or datetime.now(IST)
+    active_names = get_active_burst_names(now_ist)
+    if active_names:
+        return active_names
+
+    if now_ist.weekday() <= 4:
+        t = now_ist.time()
+        if t < NSE_BURST_START_TIME:
+            return list(NSE_BURST_TRACK_NAMES)
+        if NSE_BURST_END_TIME <= t < MCX_BURST_START_TIME:
+            return list(MCX_BURST_TRACK_NAMES)
+
+    return list(NSE_BURST_TRACK_NAMES)
 
 
 def non_burst_alerts_paused_today():
@@ -251,7 +320,7 @@ def load_options_data():
     if _options_df is None:
         try:
             df = pd.read_csv("instruments.csv")
-            _options_df = df[df["segment"].isin(["NFO-OPT", "BFO-OPT"])].copy()
+            _options_df = df[df["segment"].isin(["NFO-OPT", "BFO-OPT", "MCX-OPT"])].copy()
             expiry = pd.to_datetime(_options_df["expiry"], format="%Y-%m-%d", errors="coerce")
             if expiry.isna().mean() > 0.05:
                 expiry = pd.to_datetime(_options_df["expiry"], dayfirst=True, errors="coerce")
@@ -433,18 +502,23 @@ def get_historical_data_cached(kite, token, from_time, to_time, interval):
     return candles
 
 
-def get_bank_futures(kite):
+def get_burst_futures(kite, names=None):
+    names = list(names or get_burst_subscription_names())
     symbols = []
-    for name in BURST_TRACK_NAMES:
+    for name in names:
         sym = get_active_future(name)
         if sym:
             symbols.append(sym)
-    summary_key = "future_summary"
+    summary_key = f"future_summary:{','.join(names)}"
     summary_text = ", ".join(symbols) if symbols else "none"
     if _last_logged_expiry.get(summary_key) != summary_text:
         print(f"Selected tracked futures: {summary_text}")
         _last_logged_expiry[summary_key] = summary_text
     return symbols
+
+
+def get_bank_futures(kite):
+    return get_burst_futures(kite, NSE_BURST_TRACK_NAMES)
 
 
 def _format_month_label(expiry):
@@ -547,6 +621,15 @@ def get_relevant_options(name, ltp, strike_range=None):
 
 
 def get_strength_label(lots, name="BANKNIFTY"):
+    if is_mcx_underlying(name):
+        if lots >= 400:
+            return "🚀 MCX BLAST 🚀"
+        if lots >= 300:
+            return "🌟 MCX AWESOME"
+        if lots >= 200:
+            return "✅ MCX VERY GOOD"
+        return "⚡ MCX GOOD"
+
     if lots >= 400:
         return "🚀 BLAST 🚀"
     if lots >= 300:
@@ -1810,23 +1893,46 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list):
             history.pop(0)
 
 
-def _map_tracked_futures_by_name(fut_symbols):
+def _map_tracked_futures_by_name(fut_symbols, names=None):
+    names = list(names or BURST_TRACK_NAMES)
     fut_by_name = {}
     for sym in fut_symbols:
         try:
             tsym = sym.split(":", 1)[1]
         except Exception:
             continue
-        for name in BURST_TRACK_NAMES:
+        for name in names:
             if tsym.startswith(name):
                 fut_by_name[name] = sym
     return fut_by_name
 
 
+def _reset_burst_state_if_session_changed(session):
+    global _last_burst_session
+    if _last_burst_session == session:
+        return
+
+    option_history.clear()
+    active_watches.clear()
+    day_open_oi_store.clear()
+    _last_burst_session = session
+    print(f"Burst state reset for {session.upper()} session.")
+
+
 def calculate_burst_alerts(kite):
-    fut_symbols = get_bank_futures(kite)
-    symbols = fut_symbols + [INDEX_SYMBOL]
-    fut_by_name = _map_tracked_futures_by_name(fut_symbols)
+    session = get_burst_session()
+    track_names = get_active_burst_names()
+    if not track_names:
+        _set_burst_quote_status("inactive", "burst session closed")
+        return [], []
+
+    _reset_burst_state_if_session_changed(session)
+
+    fut_symbols = get_burst_futures(kite, track_names)
+    symbols = list(fut_symbols)
+    if session == "nse":
+        symbols.append(INDEX_SYMBOL)
+    fut_by_name = _map_tracked_futures_by_name(fut_symbols, track_names)
 
     quote_source = "websocket"
     data = get_symbol_quotes_ws_only(symbols, max_age_seconds=15)
@@ -1844,12 +1950,12 @@ def calculate_burst_alerts(kite):
 
     all_opt_tokens = []
     underlying_map = {}
-    for name in BURST_TRACK_NAMES:
+    for name in track_names:
         base_symbol = fut_by_name.get(name, "")
         u_ltp = data.get(base_symbol, {}).get("last_price", 0)
         if u_ltp <= 0:
             continue
-        df = get_relevant_options(name, u_ltp, strike_range=BURST_OPTION_STRIKE_RANGE)
+        df = get_relevant_options(name, u_ltp, strike_range=get_burst_option_strike_range(name))
         if df.empty:
             continue
         underlying_map[name] = (df, u_ltp)
@@ -1868,10 +1974,10 @@ def calculate_burst_alerts(kite):
 
     _set_burst_quote_status(
         quote_source,
-        f"futures={len(data)} options={len(opt_quotes)}",
+        f"session={session} futures={len(data)} options={len(opt_quotes)}",
     )
 
-    for name in BURST_TRACK_NAMES:
+    for name in track_names:
         sym = fut_by_name.get(name)
         if not sym or sym not in data:
             continue
