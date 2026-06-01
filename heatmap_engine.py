@@ -1,4 +1,5 @@
 import os
+import time
 import pandas as pd
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -22,6 +23,7 @@ BURST_TRACK_NAMES = [
     "BANKNIFTY",
     "NIFTY",
 ]
+BURST_OPTION_STRIKE_RANGE = 30
 BURST_THRESHOLD_LOTS = 100
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 INDEX_FUTURE_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "SENSEX50"}
@@ -48,6 +50,7 @@ born_breakout_alert_store = {}
 _options_df = None
 _futures_df = None
 _last_logged_expiry = {}
+_historical_cache = {}
 
 IST = ZoneInfo("Asia/Kolkata")
 MONTHLY_FUTURE_GAP_THRESHOLD_PCT = 2.0
@@ -313,12 +316,24 @@ def get_active_future(name):
 def get_symbol_quotes_with_fallback(kite, symbols, max_age_seconds=15):
     data = get_symbol_quotes(symbols, max_age_seconds=max_age_seconds)
     missing = [symbol for symbol in symbols if symbol not in data]
-    if missing:
+    for i in range(0, len(missing), 500):
+        chunk = missing[i:i + 500]
+        if not chunk:
+            continue
         try:
-            data.update(kite.quote(missing))
+            data.update(kite.quote(chunk))
         except Exception as e:
             print(f"Fallback symbol quote error: {e}")
     return data
+
+
+def get_symbol_quotes_ws_only(symbols, max_age_seconds=15):
+    return get_symbol_quotes(symbols, max_age_seconds=max_age_seconds)
+
+
+def get_option_quotes_ws_only(tokens, max_age_seconds=15):
+    token_strings = [str(int(token)) for token in tokens]
+    return get_token_quotes(token_strings, max_age_seconds=max_age_seconds)
 
 
 def get_option_quotes_with_fallback(kite, tokens, max_age_seconds=15):
@@ -335,6 +350,30 @@ def get_option_quotes_with_fallback(kite, tokens, max_age_seconds=15):
         except Exception as e:
             print(f"Fallback option quote error: {e}")
     return data
+
+
+def get_historical_data_cached(kite, token, from_time, to_time, interval):
+    key = (
+        int(token),
+        interval,
+        int(from_time.timestamp()) if hasattr(from_time, "timestamp") else str(from_time),
+        int(to_time.timestamp()) if hasattr(to_time, "timestamp") else str(to_time),
+    )
+    cached = _historical_cache.get(key)
+    if cached:
+        return cached["candles"]
+
+    candles = kite.historical_data(token, from_time, to_time, interval)
+    if len(_historical_cache) > 5000:
+        oldest_keys = sorted(
+            _historical_cache,
+            key=lambda item: _historical_cache[item]["ts"],
+        )[:500]
+        for old_key in oldest_keys:
+            _historical_cache.pop(old_key, None)
+
+    _historical_cache[key] = {"ts": time.time(), "candles": candles}
+    return candles
 
 
 def get_bank_futures(kite):
@@ -404,7 +443,7 @@ def _get_active_stock_future_contracts():
     return contracts
 
 
-def get_relevant_options(name, ltp):
+def get_relevant_options(name, ltp, strike_range=None):
     df = load_options_data()
     if df is None or df.empty:
         return pd.DataFrame()
@@ -429,7 +468,7 @@ def get_relevant_options(name, ltp):
     if options.empty:
         return pd.DataFrame()
 
-    rng = 15 if is_index_underlying(name) else 6
+    rng = strike_range if strike_range is not None else (15 if is_index_underlying(name) else 6)
     selected_frames = []
 
     for expiry, expiry_options in options.groupby("expiry"):
@@ -501,7 +540,7 @@ def _format_gap_signal(gap_pct):
     return "FUTURE ABOVE SPOT" if gap_pct > 0 else "FUTURE BELOW SPOT"
 
 
-def build_monthly_future_gap_alerts(kite):
+def build_monthly_future_gap_alerts(kite, batch_index=None, max_quote_symbols=None):
     now_ist = datetime.now(IST)
     if now_ist.weekday() > 4 or now_ist.time() < MONTHLY_FUTURE_GAP_START_TIME:
         return []
@@ -521,6 +560,25 @@ def build_monthly_future_gap_alerts(kite):
         )
         for contract in future_contracts
     ]
+
+    if max_quote_symbols and max_quote_symbols > 0:
+        batches = []
+        current_batch = []
+        current_symbol_count = 0
+        for pair in symbol_pairs:
+            next_symbol = pair[4]
+            pair_symbol_count = 2 + (1 if next_symbol else 0)
+            if current_batch and current_symbol_count + pair_symbol_count > max_quote_symbols:
+                batches.append(current_batch)
+                current_batch = []
+                current_symbol_count = 0
+            current_batch.append(pair)
+            current_symbol_count += pair_symbol_count
+        if current_batch:
+            batches.append(current_batch)
+
+        if batch_index is not None and batches:
+            symbol_pairs = batches[batch_index % len(batches)]
 
     quote_symbols = []
     for _, spot_symbol, future_symbol, _, next_symbol, _ in symbol_pairs:
@@ -636,7 +694,7 @@ def _get_r3_for_interval(kite, token, interval, interval_minutes, now_ist):
     from_time = now_ist.replace(hour=9, minute=0, second=0, microsecond=0)
     to_time = now_ist
     try:
-        candles = kite.historical_data(token, from_time, to_time, interval)
+        candles = get_historical_data_cached(kite, token, from_time, to_time, interval)
     except Exception as e:
         print(f"R3 historical data error for {token} {interval}: {e}")
         return None
@@ -670,7 +728,7 @@ def _get_previous_day_r3_for_interval(kite, token, interval, interval_minutes, n
     from_time = datetime.combine(prev_day, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
     to_time = datetime.combine(prev_day, datetime.strptime("15:30", "%H:%M").time(), tzinfo=IST)
     try:
-        candles = kite.historical_data(token, from_time, to_time, interval)
+        candles = get_historical_data_cached(kite, token, from_time, to_time, interval)
     except Exception as e:
         print(f"Previous day R3 historical data error for {token} {interval}: {e}")
         return None
@@ -764,7 +822,13 @@ def build_monthly_future_r3_pivot_alerts(kite):
                 from_time = datetime.combine(prev_day, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
                 to_time = datetime.combine(prev_day, datetime.strptime("15:30", "%H:%M").time(), tzinfo=IST)
             try:
-                candles = kite.historical_data(contract["token"], from_time, to_time, kite_interval)
+                candles = get_historical_data_cached(
+                    kite,
+                    contract["token"],
+                    from_time,
+                    to_time,
+                    kite_interval,
+                )
             except Exception as e:
                 print(f"Previous session candle fetch error for {contract['token']} {kite_interval}: {e}")
                 continue
@@ -946,7 +1010,13 @@ def build_stock_future_1hr_s4_alerts(kite):
             continue
 
         try:
-            candles = kite.historical_data(contract["token"], from_time, to_time, "60minute")
+            candles = get_historical_data_cached(
+                kite,
+                contract["token"],
+                from_time,
+                to_time,
+                "60minute",
+            )
         except Exception as e:
             print(f"S4 previous week candle fetch error for {contract['token']}: {e}")
             continue
@@ -1148,7 +1218,13 @@ def build_weekly_born_breakout_alerts(kite):
         from_time = datetime.combine(from_date, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
 
         try:
-            candles = kite.historical_data(contract["token"], from_time, now_ist, "day")
+            candles = get_historical_data_cached(
+                kite,
+                contract["token"],
+                from_time,
+                now_ist,
+                "day",
+            )
         except Exception as e:
             print(f"Born breakout historical data error for {contract['token']}: {e}")
             continue
@@ -1245,7 +1321,7 @@ def _get_last_completed_candles(kite, token, interval, interval_minutes, now_ist
     from_time = datetime.combine(start_day, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
     to_time = now_ist
     try:
-        candles = kite.historical_data(token, from_time, to_time, interval)
+        candles = get_historical_data_cached(kite, token, from_time, to_time, interval)
     except Exception as e:
         print(f"Breakout historical data error for {token} {interval}: {e}")
         return []
@@ -1677,6 +1753,84 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list):
             history.pop(0)
 
 
+def _map_tracked_futures_by_name(fut_symbols):
+    fut_by_name = {}
+    for sym in fut_symbols:
+        try:
+            tsym = sym.split(":", 1)[1]
+        except Exception:
+            continue
+        for name in BURST_TRACK_NAMES:
+            if tsym.startswith(name):
+                fut_by_name[name] = sym
+    return fut_by_name
+
+
+def calculate_burst_alerts(kite):
+    fut_symbols = get_bank_futures(kite)
+    symbols = fut_symbols + [INDEX_SYMBOL]
+    data = get_symbol_quotes_ws_only(symbols, max_age_seconds=15)
+    if not data:
+        return [], []
+
+    bn_alerts = []
+    stock_alerts = []
+    fut_by_name = _map_tracked_futures_by_name(fut_symbols)
+
+    all_opt_tokens = []
+    underlying_map = {}
+    for name in BURST_TRACK_NAMES:
+        base_symbol = fut_by_name.get(name, "")
+        u_ltp = data.get(base_symbol, {}).get("last_price", 0)
+        if u_ltp <= 0:
+            continue
+        df = get_relevant_options(name, u_ltp, strike_range=BURST_OPTION_STRIKE_RANGE)
+        if df.empty:
+            continue
+        underlying_map[name] = (df, u_ltp)
+        all_opt_tokens.extend(df["instrument_token"].tolist())
+
+    opt_quotes = get_option_quotes_ws_only(all_opt_tokens, max_age_seconds=15)
+
+    for name in BURST_TRACK_NAMES:
+        sym = fut_by_name.get(name)
+        if not sym or sym not in data:
+            continue
+
+        d = data[sym]
+        ltp = d["last_price"]
+        oi = d.get("oi", 0)
+        target_alerts = bn_alerts if is_index_underlying(name) else stock_alerts
+
+        process_future_burst(sym, name, ltp, oi, target_alerts)
+        process_option_logic(name, underlying_map.get(name, (pd.DataFrame(), 0)), opt_quotes, target_alerts)
+
+    return bn_alerts, stock_alerts
+
+
+def calculate_gap_alerts(kite, batch_index=0, max_quote_symbols=500):
+    if non_burst_alerts_paused_today():
+        return []
+    return build_monthly_future_gap_alerts(
+        kite,
+        batch_index=batch_index,
+        max_quote_symbols=max_quote_symbols,
+    )
+
+
+def calculate_historical_alerts(kite):
+    if non_burst_alerts_paused_today():
+        return []
+
+    alerts = []
+    alerts.extend(build_monthly_future_r3_pivot_alerts(kite))
+    alerts.extend(build_stock_future_1hr_s4_alerts(kite))
+    alerts.extend(build_breakout_reversal_alerts(kite))
+    alerts.extend(build_30m_future_volume_blast_alerts(kite))
+    alerts.extend(build_weekly_born_breakout_alerts(kite))
+    return alerts
+
+
 def calculate_heatmap(kite):
     fut_symbols = get_bank_futures(kite)
     symbols = fut_symbols + [INDEX_SYMBOL]
@@ -1688,17 +1842,7 @@ def calculate_heatmap(kite):
     stock_alerts = []
     gap_alerts = []
 
-    # Map tracked future symbols by underlying name using an exact prefix match on tradingsymbol.
-    # This avoids substring collisions (e.g. "NIFTY" matching "BANKNIFTY").
-    fut_by_name = {}
-    for sym in fut_symbols:
-        try:
-            tsym = sym.split(":", 1)[1]
-        except Exception:
-            continue
-        for name in BURST_TRACK_NAMES:
-            if tsym.startswith(name):
-                fut_by_name[name] = sym
+    fut_by_name = _map_tracked_futures_by_name(fut_symbols)
 
     all_opt_tokens = []
     underlying_map = {}
