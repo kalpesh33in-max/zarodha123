@@ -69,6 +69,7 @@ _burst_quote_status = {
     "detail": "",
     "ts": 0.0,
 }
+_burst_monitor_status = {}
 _last_burst_session = None
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -453,6 +454,16 @@ def _set_burst_quote_status(source, detail=""):
 
 def get_burst_quote_status():
     return dict(_burst_quote_status)
+
+
+def _set_burst_monitor_status(status):
+    _burst_monitor_status.clear()
+    _burst_monitor_status.update(status)
+    _burst_monitor_status["ts"] = time.time()
+
+
+def get_burst_monitor_status():
+    return dict(_burst_monitor_status)
 
 
 def _cache_has_keys(cache, keys):
@@ -1785,7 +1796,7 @@ def build_30m_future_volume_blast_alerts(kite):
     return alerts
 
 
-def process_future_burst(symbol, name, ltp, oi, alerts_list):
+def process_future_burst(symbol, name, ltp, oi, alerts_list, stats=None):
     if not is_burst_underlying(name):
         return
 
@@ -1799,8 +1810,18 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list):
     prev_oi = history[-1]["oi"] if history else 0
     prev_price = history[-1]["price"] if history else 0
 
+    if stats is not None:
+        stats["future_quotes"] = stats.get("future_quotes", 0) + 1
+        if oi > 0:
+            stats["future_oi_quotes"] = stats.get("future_oi_quotes", 0) + 1
+
     if prev_oi > 0:
         tick_lots = int(abs(oi - prev_oi) / lot_size)
+        if stats is not None:
+            stats["max_future_tick_lots"] = max(
+                stats.get("max_future_tick_lots", 0),
+                tick_lots,
+            )
         if tick_lots >= threshold and key not in active_watches:
             active_watches[key] = {
                 "start_oi": prev_oi,
@@ -1842,7 +1863,7 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list):
         history.pop(0)
 
 
-def process_option_logic(name, underlying_data, option_quotes, alerts_list):
+def process_option_logic(name, underlying_data, option_quotes, alerts_list, stats=None):
     if not is_burst_underlying(name):
         return
 
@@ -1864,6 +1885,11 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list):
         ltp = q.get("last_price", 0)
         t_int = int(row["instrument_token"])
 
+        if stats is not None:
+            stats["option_quotes"] = stats.get("option_quotes", 0) + 1
+            if curr_oi > 0:
+                stats["option_oi_quotes"] = stats.get("option_oi_quotes", 0) + 1
+
         if t_int not in day_open_oi_store:
             day_open_oi_store[t_int] = curr_oi
 
@@ -1875,6 +1901,11 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list):
 
         if prev_oi > 0:
             tick_lots = int(abs(curr_oi - prev_oi) / lot_size)
+            if stats is not None:
+                stats["max_option_tick_lots"] = max(
+                    stats.get("max_option_tick_lots", 0),
+                    tick_lots,
+                )
             if tick_lots >= threshold and t_int not in active_watches:
                 expiry_text = (
                     row["expiry"].strftime("%d-%m-%Y")
@@ -1966,10 +1997,32 @@ def calculate_burst_alerts(kite):
 
     if not data:
         _set_burst_quote_status("none", "no future quotes")
+        _set_burst_monitor_status({
+            "session": session,
+            "names": ",".join(track_names),
+            "source": "none",
+            "reason": "no future quotes",
+            "threshold": max(get_burst_threshold(name) for name in track_names),
+        })
         return [], []
 
     bn_alerts = []
     stock_alerts = []
+    stats = {
+        "session": session,
+        "names": ",".join(track_names),
+        "source": quote_source,
+        "threshold": max(get_burst_threshold(name) for name in track_names),
+        "future_symbols": len(fut_symbols),
+        "future_quotes": 0,
+        "future_oi_quotes": 0,
+        "option_tokens": 0,
+        "option_quotes": 0,
+        "option_oi_quotes": 0,
+        "max_future_tick_lots": 0,
+        "max_option_tick_lots": 0,
+        "reason": "",
+    }
 
     all_opt_tokens = []
     underlying_map = {}
@@ -1983,6 +2036,7 @@ def calculate_burst_alerts(kite):
             continue
         underlying_map[name] = (df, u_ltp)
         all_opt_tokens.extend(df["instrument_token"].tolist())
+    stats["option_tokens"] = len(all_opt_tokens)
 
     opt_quotes = get_option_quotes_ws_only(all_opt_tokens, max_age_seconds=15)
     missing_option_tokens = [
@@ -1994,6 +2048,7 @@ def calculate_burst_alerts(kite):
         if fallback_opt_quotes:
             opt_quotes.update(fallback_opt_quotes)
             quote_source = "rest_fallback"
+            stats["source"] = quote_source
 
     _set_burst_quote_status(
         quote_source,
@@ -2010,8 +2065,24 @@ def calculate_burst_alerts(kite):
         oi = d.get("oi", 0)
         target_alerts = bn_alerts if is_index_underlying(name) else stock_alerts
 
-        process_future_burst(sym, name, ltp, oi, target_alerts)
-        process_option_logic(name, underlying_map.get(name, (pd.DataFrame(), 0)), opt_quotes, target_alerts)
+        process_future_burst(sym, name, ltp, oi, target_alerts, stats=stats)
+        process_option_logic(
+            name,
+            underlying_map.get(name, (pd.DataFrame(), 0)),
+            opt_quotes,
+            target_alerts,
+            stats=stats,
+        )
+
+    if stats["future_quotes"] == 0:
+        stats["reason"] = "no current future quote"
+    elif stats["future_oi_quotes"] == 0 and stats["option_oi_quotes"] == 0:
+        stats["reason"] = "OI missing/zero in quotes"
+    elif max(stats["max_future_tick_lots"], stats["max_option_tick_lots"]) < stats["threshold"]:
+        stats["reason"] = "OI move below threshold"
+    else:
+        stats["reason"] = "watching 15-second confirmation"
+    _set_burst_monitor_status(stats)
 
     return bn_alerts, stock_alerts
 

@@ -10,6 +10,7 @@ from heatmap_engine import (
     calculate_burst_alerts,
     calculate_gap_alerts,
     calculate_historical_alerts,
+    get_burst_monitor_status,
     get_burst_quote_status,
     is_burst_session_open,
 )
@@ -25,6 +26,7 @@ WS_HEARTBEAT_INTERVAL_SECONDS = 30
 WS_STALE_SECONDS = 60
 WS_ALERT_COOLDOWN_SECONDS = 300
 BURST_FALLBACK_STATUS_COOLDOWN_SECONDS = 300
+MCX_MONITOR_STATUS_COOLDOWN_SECONDS = 900
 ERROR_ALERT_COOLDOWN_SECONDS = 300
 SILENT_LOG_INTERVAL_SECONDS = 300
 
@@ -98,6 +100,7 @@ def _burst_loop(kite, dispatcher, stop_event):
             try:
                 bn_alerts, stock_alerts = calculate_burst_alerts(kite)
                 quote_status = get_burst_quote_status()
+                monitor_status = get_burst_monitor_status()
                 if (
                     quote_status.get("source") == "rest_fallback"
                     and time.time() - state.get("last_rest_fallback_alert", 0)
@@ -108,6 +111,29 @@ def _burst_loop(kite, dispatcher, stop_event):
                         PRIORITY_STATUS,
                         "Burst scanner using REST fallback because WebSocket ticks are not fresh. "
                         f"{quote_status.get('detail', '')}",
+                    )
+
+                if (
+                    monitor_status.get("session") == "mcx"
+                    and not bn_alerts
+                    and not stock_alerts
+                    and time.time() - state.get("last_mcx_monitor_alert", 0)
+                    >= MCX_MONITOR_STATUS_COOLDOWN_SECONDS
+                ):
+                    state["last_mcx_monitor_alert"] = time.time()
+                    dispatcher.send(
+                        PRIORITY_STATUS,
+                        "MCX burst monitor active: "
+                        f"{monitor_status.get('names', '')} | "
+                        f"source={monitor_status.get('source', '')} | "
+                        f"futures={monitor_status.get('future_quotes', 0)}/{monitor_status.get('future_symbols', 0)} "
+                        f"oi={monitor_status.get('future_oi_quotes', 0)} | "
+                        f"options={monitor_status.get('option_quotes', 0)}/{monitor_status.get('option_tokens', 0)} "
+                        f"oi={monitor_status.get('option_oi_quotes', 0)} | "
+                        f"max move fut/opt={monitor_status.get('max_future_tick_lots', 0)}/"
+                        f"{monitor_status.get('max_option_tick_lots', 0)} lots | "
+                        f"threshold={monitor_status.get('threshold', 0)} | "
+                        f"reason={monitor_status.get('reason', '')}",
                     )
 
                 for alert in bn_alerts:
