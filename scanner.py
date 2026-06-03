@@ -1,4 +1,5 @@
 import itertools
+import os
 import queue
 import threading
 import time
@@ -29,6 +30,18 @@ BURST_FALLBACK_STATUS_COOLDOWN_SECONDS = 300
 MCX_MONITOR_STATUS_COOLDOWN_SECONDS = 900
 ERROR_ALERT_COOLDOWN_SECONDS = 300
 SILENT_LOG_INTERVAL_SECONDS = 300
+
+
+def _env_flag(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.lower() in ("true", "1", "yes", "on")
+
+
+SEND_WS_HEARTBEAT_STATUS = _env_flag("SEND_WS_HEARTBEAT_STATUS", False)
+SEND_REST_FALLBACK_STATUS = _env_flag("SEND_REST_FALLBACK_STATUS", False)
+SEND_MCX_MONITOR_STATUS = _env_flag("SEND_MCX_MONITOR_STATUS", False)
 
 PRIORITY_BURST = 1
 PRIORITY_GAP = 2
@@ -107,11 +120,14 @@ def _burst_loop(kite, dispatcher, stop_event):
                     >= BURST_FALLBACK_STATUS_COOLDOWN_SECONDS
                 ):
                     state["last_rest_fallback_alert"] = time.time()
-                    dispatcher.send(
-                        PRIORITY_STATUS,
+                    message = (
                         "Burst scanner using REST fallback because WebSocket ticks are not fresh. "
-                        f"{quote_status.get('detail', '')}",
+                        f"{quote_status.get('detail', '')}"
                     )
+                    if SEND_REST_FALLBACK_STATUS:
+                        dispatcher.send(PRIORITY_STATUS, message)
+                    else:
+                        print(message)
 
                 if (
                     monitor_status.get("session") == "mcx"
@@ -121,8 +137,7 @@ def _burst_loop(kite, dispatcher, stop_event):
                     >= MCX_MONITOR_STATUS_COOLDOWN_SECONDS
                 ):
                     state["last_mcx_monitor_alert"] = time.time()
-                    dispatcher.send(
-                        PRIORITY_STATUS,
+                    message = (
                         "MCX burst monitor active: "
                         f"{monitor_status.get('names', '')} | "
                         f"source={monitor_status.get('source', '')} | "
@@ -133,8 +148,12 @@ def _burst_loop(kite, dispatcher, stop_event):
                         f"max move fut/opt={monitor_status.get('max_future_tick_lots', 0)}/"
                         f"{monitor_status.get('max_option_tick_lots', 0)} lots | "
                         f"threshold={monitor_status.get('threshold', 0)} | "
-                        f"reason={monitor_status.get('reason', '')}",
+                        f"reason={monitor_status.get('reason', '')}"
                     )
+                    if SEND_MCX_MONITOR_STATUS:
+                        dispatcher.send(PRIORITY_STATUS, message)
+                    else:
+                        print(message)
 
                 for alert in bn_alerts:
                     dispatcher.send(
@@ -216,10 +235,14 @@ def _websocket_heartbeat_loop(dispatcher, stop_event):
 
             if problem and time.time() - last_alert_time >= WS_ALERT_COOLDOWN_SECONDS:
                 last_alert_time = time.time()
-                dispatcher.send(
-                    PRIORITY_STATUS,
-                    f"{message}. Burst REST fallback remains active; process restart is required to recreate KiteTicker.",
+                message = (
+                    f"{message}. Burst REST fallback remains active; "
+                    "process restart is required to recreate KiteTicker."
                 )
+                if SEND_WS_HEARTBEAT_STATUS:
+                    dispatcher.send(PRIORITY_STATUS, message)
+                else:
+                    print(message)
 
         if _wait(stop_event, WS_HEARTBEAT_INTERVAL_SECONDS):
             break
