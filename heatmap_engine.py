@@ -49,6 +49,8 @@ r3_watch_last_sent_time = None
 s4_alert_store = {}
 s4_state_store = {}
 s4_last_slot = None
+first_5m_mismatch_scan_dates = set()
+first_5m_mismatch_last_scan_time = None
 
 # Breakout reversal scanner state
 breakout_last_check = {"30minute": None, "60minute": None}
@@ -143,6 +145,10 @@ VOLUME_BLAST_CHECK_TIMES = [
     )
 ]
 VOLUME_BLAST_CHECK_WINDOW_SECONDS = 120
+FIRST_5M_MISMATCH_CANDLE_START_TIME = datetime.strptime("09:15", "%H:%M").time()
+FIRST_5M_MISMATCH_SCAN_START_TIME = datetime.strptime("09:20", "%H:%M").time()
+FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT = float(os.getenv("FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT", "1.0"))
+FIRST_5M_MISMATCH_RETRY_SECONDS = 120
 NON_BURST_ALERT_PAUSE_DATES = {"2026-05-26"}
 
 
@@ -599,6 +605,245 @@ def _get_active_stock_future_contracts():
             }
         )
     return contracts
+
+
+def _get_active_index_future_contracts():
+    futures = load_futures_data()
+    if futures is None or futures.empty:
+        return []
+
+    index_futures = futures[
+        (futures["name"].isin(INDEX_FUTURE_NAMES))
+        & (futures["segment"].str.contains("-FUT", na=False))
+    ].copy()
+    if index_futures.empty:
+        return []
+
+    index_futures = index_futures.sort_values(["name", "expiry", "tradingsymbol"])
+    contracts = []
+    for name, rows in index_futures.groupby("name"):
+        preferred_expiry = get_monthly_expiry(rows["expiry"].unique())
+        if preferred_expiry is None:
+            continue
+
+        selected = rows[rows["expiry"] == preferred_expiry]
+        if selected.empty:
+            continue
+
+        row = selected.iloc[0]
+        exchange = str(row.get("exchange", "") or "").strip() or "NFO"
+        contracts.append(
+            {
+                "name": name,
+                "symbol": f"{exchange}:{row['tradingsymbol']}",
+                "token": int(row["instrument_token"]),
+                "expiry": row["expiry"],
+                "month_label": _format_month_label(row["expiry"]),
+                "kind": "INDEX FUTURE",
+            }
+        )
+    return contracts
+
+
+def _get_first_5m_future_contracts():
+    contracts = []
+    seen_symbols = set()
+
+    for contract in _get_active_index_future_contracts():
+        symbol = contract["symbol"]
+        if symbol in seen_symbols:
+            continue
+        seen_symbols.add(symbol)
+        contracts.append(contract)
+
+    for contract in _get_active_stock_future_contracts():
+        symbol = contract["symbol"]
+        if symbol in seen_symbols:
+            continue
+        seen_symbols.add(symbol)
+        item = dict(contract)
+        item["kind"] = "STOCK FUTURE"
+        contracts.append(item)
+
+    return contracts
+
+
+def _candle_color(open_price, close_price):
+    if close_price > open_price:
+        return "GREEN"
+    if close_price < open_price:
+        return "RED"
+    return None
+
+
+def _volume_candle_color(previous_close, close_price):
+    if close_price > previous_close:
+        return "GREEN"
+    if close_price < previous_close:
+        return "RED"
+    return None
+
+
+def _get_first_5m_candle(kite, token, now_ist):
+    session_start = datetime.combine(
+        now_ist.date(),
+        FIRST_5M_MISMATCH_CANDLE_START_TIME,
+        tzinfo=IST,
+    )
+    session_end = session_start + timedelta(minutes=5)
+    try:
+        candles = kite.historical_data(token, session_start, session_end, "5minute")
+    except Exception as e:
+        print(f"First 5m historical data error for {token}: {e}")
+        return None
+
+    for candle in candles:
+        candle_time = candle.get("date")
+        if hasattr(candle_time, "astimezone"):
+            candle_time = candle_time.astimezone(IST)
+        if (
+            candle_time
+            and candle_time.date() == now_ist.date()
+            and candle_time.time() == FIRST_5M_MISMATCH_CANDLE_START_TIME
+        ):
+            return candle
+
+    for candle in candles:
+        candle_time = candle.get("date")
+        if hasattr(candle_time, "astimezone"):
+            candle_time = candle_time.astimezone(IST)
+        if candle_time and candle_time.date() == now_ist.date():
+            return candle
+
+    return None
+
+
+def build_first_5m_future_volume_mismatch_alerts(kite):
+    global first_5m_mismatch_last_scan_time
+
+    now_ist = datetime.now(IST)
+    if now_ist.weekday() > 4 or now_ist.time() < FIRST_5M_MISMATCH_SCAN_START_TIME:
+        return []
+
+    scan_date = now_ist.date().isoformat()
+    if scan_date in first_5m_mismatch_scan_dates:
+        return []
+
+    if (
+        first_5m_mismatch_last_scan_time
+        and (now_ist - first_5m_mismatch_last_scan_time).total_seconds()
+        < FIRST_5M_MISMATCH_RETRY_SECONDS
+    ):
+        return []
+    first_5m_mismatch_last_scan_time = now_ist
+
+    contracts = _get_first_5m_future_contracts()
+    if not contracts:
+        return []
+
+    symbols = [contract["symbol"] for contract in contracts]
+    data = get_symbol_quotes_with_fallback(kite, symbols)
+    if not data:
+        return []
+
+    candidates = []
+    for contract in contracts:
+        quote = data.get(contract["symbol"], {})
+        ohlc = quote.get("ohlc") or {}
+        previous_close = float(ohlc.get("close", 0) or 0)
+        day_open = float(ohlc.get("open", 0) or 0)
+        if previous_close <= 0 or day_open <= 0:
+            continue
+
+        rough_gap_pct = ((day_open - previous_close) / previous_close) * 100
+        if abs(rough_gap_pct) < FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT:
+            continue
+
+        item = dict(contract)
+        item["previous_close"] = previous_close
+        candidates.append(item)
+
+    if not candidates:
+        first_5m_mismatch_scan_dates.add(scan_date)
+        return []
+
+    rows = []
+    processed_candles = 0
+    for contract in candidates:
+        candle = _get_first_5m_candle(kite, contract["token"], now_ist)
+        if not candle:
+            continue
+        processed_candles += 1
+
+        previous_close = float(contract["previous_close"])
+        open_price = float(candle.get("open", 0) or 0)
+        high = float(candle.get("high", 0) or 0)
+        low = float(candle.get("low", 0) or 0)
+        close = float(candle.get("close", 0) or 0)
+        volume = float(candle.get("volume", 0) or 0)
+        if previous_close <= 0 or open_price <= 0 or close <= 0:
+            continue
+
+        gap_pct = ((open_price - previous_close) / previous_close) * 100
+        if abs(gap_pct) < FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT:
+            continue
+
+        price_color = _candle_color(open_price, close)
+        volume_color = _volume_candle_color(previous_close, close)
+        if not price_color or not volume_color or price_color == volume_color:
+            continue
+
+        rows.append(
+            {
+                "name": contract["name"],
+                "symbol": contract["symbol"],
+                "kind": contract["kind"],
+                "month_label": contract["month_label"],
+                "previous_close": previous_close,
+                "open": open_price,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": volume,
+                "gap_pct": gap_pct,
+                "price_color": price_color,
+                "volume_color": volume_color,
+            }
+        )
+
+    if processed_candles == 0:
+        return []
+
+    first_5m_mismatch_scan_dates.add(scan_date)
+    if not rows:
+        return []
+
+    rows.sort(key=lambda item: abs(item["gap_pct"]), reverse=True)
+    alerts = []
+    chunk_size = 20
+    for i in range(0, len(rows), chunk_size):
+        chunk = rows[i:i + chunk_size]
+        body_lines = []
+        for item in chunk:
+            gap_label = "GAP UP" if item["gap_pct"] > 0 else "GAP DOWN"
+            body_lines.append(
+                f"{item['name']} {item['month_label']} FUT ({item['kind']}): "
+                f"{gap_label} {item['gap_pct']:+.2f}% | "
+                f"Prev Close {item['previous_close']:.2f} | "
+                f"5m O/H/L/C {item['open']:.2f}/{item['high']:.2f}/"
+                f"{item['low']:.2f}/{item['close']:.2f} | "
+                f"Vol {format_volume(item['volume'])} | "
+                f"Price {item['price_color']} vs Volume {item['volume_color']}"
+            )
+
+        body = "\n".join(body_lines)
+        alerts.append(
+            "FIRST 5M GAP VOLUME MISMATCH\n\n"
+            f"{body}\n\n"
+            f"TIME: {now_ist.strftime('%H:%M:%S')} IST"
+        )
+
+    return alerts
 
 
 def get_relevant_options(name, ltp, strike_range=None):
@@ -2102,6 +2347,7 @@ def calculate_historical_alerts(kite):
         return []
 
     alerts = []
+    alerts.extend(build_first_5m_future_volume_mismatch_alerts(kite))
     alerts.extend(build_monthly_future_r3_pivot_alerts(kite))
     alerts.extend(build_stock_future_1hr_s4_alerts(kite))
     alerts.extend(build_breakout_reversal_alerts(kite))
