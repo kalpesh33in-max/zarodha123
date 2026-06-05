@@ -34,7 +34,7 @@ BURST_TRACK_NAMES = NSE_BURST_TRACK_NAMES
 BURST_OPTION_STRIKE_RANGE = 30
 MCX_BURST_OPTION_STRIKE_RANGE = int(os.getenv("MCX_BURST_OPTION_STRIKE_RANGE", "20"))
 BURST_THRESHOLD_LOTS = 100
-MCX_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_BURST_THRESHOLD_LOTS", "50"))
+MCX_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_BURST_THRESHOLD_LOTS", "100"))
 BURST_REST_FALLBACK_CACHE_SECONDS = int(os.getenv("BURST_REST_FALLBACK_CACHE_SECONDS", "3"))
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 INDEX_FUTURE_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "SENSEX50"}
@@ -97,14 +97,14 @@ S4_PIVOT_CHECK_TIMES = [
 ]
 S4_PIVOT_CHECK_WINDOW_SECONDS = 120
 BORN_BREAKOUT_MORNING_START_TIME = datetime.strptime("09:00", "%H:%M").time()
-BORN_BREAKOUT_MORNING_END_TIME = datetime.strptime("09:30", "%H:%M").time()
-BORN_BREAKOUT_AFTERNOON_START_TIME = datetime.strptime("15:00", "%H:%M").time()
+BORN_BREAKOUT_MORNING_END_TIME = datetime.strptime("09:20", "%H:%M").time()
+BORN_BREAKOUT_AFTERNOON_START_TIME = datetime.strptime("15:15", "%H:%M").time()
 BORN_BREAKOUT_AFTERNOON_END_TIME = datetime.strptime("15:30", "%H:%M").time()
 BORN_BREAKOUT_CHECK_INTERVAL_SECONDS = 1800
 BORN_BREAKOUT_LOOKBACK_DAYS = 180
 # Pause non-burst reports only for this date. They resume automatically the next day.
 BREAKOUT_MIN_FIRST_VOLUME = 50000
-VOLUME_BLAST_MIN_VOLUME = int(os.getenv("VOLUME_BLAST_MIN_VOLUME", "500000"))
+VOLUME_BLAST_MIN_VOLUME = int(os.getenv("VOLUME_BLAST_MIN_VOLUME", "1000000"))
 VOLUME_BLAST_LOOKAHEAD_CANDLES = int(os.getenv("VOLUME_BLAST_LOOKAHEAD_CANDLES", "20"))
 VOLUME_BLAST_PREVIOUS_QUIET_CANDLES = int(os.getenv("VOLUME_BLAST_PREVIOUS_QUIET_CANDLES", "10"))
 BREAKOUT_REVERSAL_CHECK_TIMES = [
@@ -148,6 +148,7 @@ VOLUME_BLAST_CHECK_WINDOW_SECONDS = 120
 FIRST_5M_MISMATCH_CANDLE_START_TIME = datetime.strptime("09:15", "%H:%M").time()
 FIRST_5M_MISMATCH_SCAN_START_TIME = datetime.strptime("09:20", "%H:%M").time()
 FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT = float(os.getenv("FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT", "1.0"))
+FIRST_5M_MISMATCH_MIN_VOLUME = int(os.getenv("FIRST_5M_MISMATCH_MIN_VOLUME", "100000"))
 FIRST_5M_MISMATCH_RETRY_SECONDS = 120
 NON_BURST_ALERT_PAUSE_DATES = {"2026-05-26"}
 
@@ -783,6 +784,8 @@ def build_first_5m_future_volume_mismatch_alerts(kite):
         volume = float(candle.get("volume", 0) or 0)
         if previous_close <= 0 or open_price <= 0 or close <= 0:
             continue
+        if volume <= FIRST_5M_MISMATCH_MIN_VOLUME:
+            continue
 
         gap_pct = ((open_price - previous_close) / previous_close) * 100
         if abs(gap_pct) < FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT:
@@ -827,11 +830,8 @@ def build_first_5m_future_volume_mismatch_alerts(kite):
         for item in chunk:
             gap_label = "GAP UP" if item["gap_pct"] > 0 else "GAP DOWN"
             body_lines.append(
-                f"{item['name']} {item['month_label']} FUT ({item['kind']}): "
+                f"{item['name']} {item['month_label']} FUT: "
                 f"{gap_label} {item['gap_pct']:+.2f}% | "
-                f"Prev Close {item['previous_close']:.2f} | "
-                f"5m O/H/L/C {item['open']:.2f}/{item['high']:.2f}/"
-                f"{item['low']:.2f}/{item['close']:.2f} | "
                 f"Vol {format_volume(item['volume'])} | "
                 f"Price {item['price_color']} vs Volume {item['volume_color']}"
             )
@@ -839,8 +839,7 @@ def build_first_5m_future_volume_mismatch_alerts(kite):
         body = "\n".join(body_lines)
         alerts.append(
             "FIRST 5M GAP VOLUME MISMATCH\n\n"
-            f"{body}\n\n"
-            f"TIME: {now_ist.strftime('%H:%M:%S')} IST"
+            f"{body}"
         )
 
     return alerts
@@ -1947,7 +1946,7 @@ def build_30m_future_volume_blast_alerts(kite):
                 continue
 
             base_volume = float(base.get("volume", 0) or 0)
-            if base_volume < VOLUME_BLAST_MIN_VOLUME:
+            if base_volume <= VOLUME_BLAST_MIN_VOLUME:
                 continue
 
             base_high = float(base.get("high", 0) or 0)
@@ -2343,11 +2342,24 @@ def calculate_gap_alerts(kite, batch_index=0, max_quote_symbols=500):
 
 
 def calculate_historical_alerts(kite):
+    alerts = []
+    alerts.extend(calculate_first_5m_alerts(kite))
+    alerts.extend(calculate_other_historical_alerts(kite))
+    return alerts
+
+
+def calculate_first_5m_alerts(kite):
+    if non_burst_alerts_paused_today():
+        return []
+
+    return build_first_5m_future_volume_mismatch_alerts(kite)
+
+
+def calculate_other_historical_alerts(kite):
     if non_burst_alerts_paused_today():
         return []
 
     alerts = []
-    alerts.extend(build_first_5m_future_volume_mismatch_alerts(kite))
     alerts.extend(build_monthly_future_r3_pivot_alerts(kite))
     alerts.extend(build_stock_future_1hr_s4_alerts(kite))
     alerts.extend(build_breakout_reversal_alerts(kite))
