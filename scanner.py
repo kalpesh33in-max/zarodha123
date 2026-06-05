@@ -27,6 +27,7 @@ HISTORICAL_SCAN_INTERVAL_SECONDS = 30
 WS_HEARTBEAT_INTERVAL_SECONDS = 30
 WS_STALE_SECONDS = 60
 WS_ALERT_COOLDOWN_SECONDS = 300
+WS_STARTUP_GRACE_SECONDS = 30
 BURST_FALLBACK_STATUS_COOLDOWN_SECONDS = 300
 MCX_MONITOR_STATUS_COOLDOWN_SECONDS = 900
 ERROR_ALERT_COOLDOWN_SECONDS = 300
@@ -224,6 +225,7 @@ def _historical_loop(kite, dispatcher, stop_event):
 
 
 def _websocket_heartbeat_loop(dispatcher, stop_event):
+    started_at = time.time()
     last_alert_time = 0.0
     while not stop_event.is_set():
         now = datetime.now(IST)
@@ -231,6 +233,16 @@ def _websocket_heartbeat_loop(dispatcher, stop_event):
             status = get_ws_status()
             connected = status.get("connected", False)
             last_tick_time = status.get("last_tick_time", 0.0)
+            waiting_for_first_tick = (
+                not connected
+                and not last_tick_time
+                and time.time() - started_at < WS_STARTUP_GRACE_SECONDS
+            )
+            if waiting_for_first_tick:
+                if _wait(stop_event, WS_HEARTBEAT_INTERVAL_SECONDS):
+                    break
+                continue
+
             age = time.time() - last_tick_time if last_tick_time else None
             stale = age is not None and age > WS_STALE_SECONDS
             problem = not connected or stale

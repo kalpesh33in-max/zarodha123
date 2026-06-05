@@ -372,8 +372,10 @@ class FlowEngine:
         mark_connected(True)
         self._auth_failed = False
         if not self._tokens:
+            print("WebSocket connected, but no tokens are selected.")
             return
 
+        print(f"WebSocket connected. Subscribing {len(self._tokens)} tokens.")
         self._subscribe_tokens(ws, self._tokens)
 
     def on_ticks(self, ws, ticks):
