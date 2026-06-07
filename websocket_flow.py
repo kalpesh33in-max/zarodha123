@@ -5,6 +5,7 @@ import pandas as pd
 from kiteconnect import KiteTicker
 
 from env_config import API_KEY
+from kite_rate_limiter import kite_quote
 
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 
@@ -218,7 +219,7 @@ class FlowEngine:
         missing_fut_symbols = [symbol for symbol in fut_symbols if symbol not in symbol_quotes]
         try:
             if missing_fut_symbols:
-                symbol_quotes.update(self.kite.quote(missing_fut_symbols))
+                symbol_quotes.update(kite_quote(self.kite, missing_fut_symbols))
         except Exception as e:
             print(f"WebSocket bootstrap quote failed: {e}")
 

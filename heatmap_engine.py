@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from kite_rate_limiter import kite_historical_data, kite_quote
 from websocket_flow import get_symbol_quotes, get_token_quotes
 
 LOT_SIZES = {
@@ -51,6 +52,8 @@ s4_state_store = {}
 s4_last_slot = None
 first_5m_mismatch_scan_dates = set()
 first_5m_mismatch_last_scan_time = None
+previous_day_mismatch_scan_dates = set()
+weekly_mismatch_scan_weeks = set()
 
 # Breakout reversal scanner state
 breakout_last_check = {"30minute": None, "60minute": None}
@@ -150,6 +153,14 @@ FIRST_5M_MISMATCH_SCAN_START_TIME = datetime.strptime("09:20", "%H:%M").time()
 FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT = float(os.getenv("FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT", "1.0"))
 FIRST_5M_MISMATCH_MIN_VOLUME = int(os.getenv("FIRST_5M_MISMATCH_MIN_VOLUME", "100000"))
 FIRST_5M_MISMATCH_RETRY_SECONDS = 120
+PREVIOUS_DAY_MISMATCH_SCAN_START_TIME = datetime.strptime("09:20", "%H:%M").time()
+PREVIOUS_DAY_MISMATCH_SCAN_END_TIME = datetime.strptime("10:00", "%H:%M").time()
+PREVIOUS_DAY_MISMATCH_MIN_VOLUME = int(os.getenv("PREVIOUS_DAY_MISMATCH_MIN_VOLUME", "100000"))
+PREVIOUS_DAY_MISMATCH_LOOKBACK_DAYS = int(os.getenv("PREVIOUS_DAY_MISMATCH_LOOKBACK_DAYS", "20"))
+WEEKLY_MISMATCH_SCAN_START_TIME = datetime.strptime("09:35", "%H:%M").time()
+WEEKLY_MISMATCH_SCAN_END_TIME = datetime.strptime("10:30", "%H:%M").time()
+WEEKLY_MISMATCH_MIN_VOLUME = int(os.getenv("WEEKLY_MISMATCH_MIN_VOLUME", "500000"))
+WEEKLY_MISMATCH_LOOKBACK_DAYS = int(os.getenv("WEEKLY_MISMATCH_LOOKBACK_DAYS", "100"))
 NON_BURST_ALERT_PAUSE_DATES = {"2026-05-26"}
 
 
@@ -422,7 +433,7 @@ def get_symbol_quotes_with_fallback(kite, symbols, max_age_seconds=15):
         if not chunk:
             continue
         try:
-            data.update(kite.quote(chunk))
+            data.update(kite_quote(kite, chunk))
         except Exception as e:
             print(f"Fallback symbol quote error: {e}")
     return data
@@ -446,7 +457,7 @@ def get_option_quotes_with_fallback(kite, tokens, max_age_seconds=15):
         if not chunk:
             continue
         try:
-            fresh = kite.quote(chunk)
+            fresh = kite_quote(kite, chunk)
             data.update({str(key): value for key, value in fresh.items()})
         except Exception as e:
             print(f"Fallback option quote error: {e}")
@@ -523,7 +534,7 @@ def get_historical_data_cached(kite, token, from_time, to_time, interval):
     if cached:
         return cached["candles"]
 
-    candles = kite.historical_data(token, from_time, to_time, interval)
+    candles = kite_historical_data(kite, token, from_time, to_time, interval)
     if len(_historical_cache) > 5000:
         oldest_keys = sorted(
             _historical_cache,
@@ -693,7 +704,7 @@ def _get_first_5m_candle(kite, token, now_ist):
     )
     session_end = session_start + timedelta(minutes=5)
     try:
-        candles = kite.historical_data(token, session_start, session_end, "5minute")
+        candles = kite_historical_data(kite, token, session_start, session_end, "5minute")
     except Exception as e:
         print(f"First 5m historical data error for {token}: {e}")
         return None
@@ -1132,6 +1143,258 @@ def _get_previous_trading_day(now_ist):
     while day.weekday() > 4:
         day -= timedelta(days=1)
     return day
+
+
+def _is_scan_window_open(now_ist, start_time, end_time):
+    return start_time <= now_ist.time() <= end_time
+
+
+def _get_candle_day(candle):
+    candle_time = candle.get("date")
+    if candle_time is None:
+        return None
+    if hasattr(candle_time, "astimezone"):
+        return candle_time.astimezone(IST).date()
+    if hasattr(candle_time, "date"):
+        return candle_time.date()
+    return None
+
+
+def _get_recent_daily_candles_until(kite, token, through_day, lookback_days, label):
+    from_day = through_day - timedelta(days=lookback_days)
+    from_time = datetime.combine(
+        from_day,
+        datetime.strptime("09:15", "%H:%M").time(),
+        tzinfo=IST,
+    )
+    to_time = datetime.combine(
+        through_day,
+        datetime.strptime("15:30", "%H:%M").time(),
+        tzinfo=IST,
+    )
+    try:
+        return get_historical_data_cached(kite, token, from_time, to_time, "day")
+    except Exception as e:
+        print(f"{label} daily historical data error for {token}: {e}")
+        return []
+
+
+def _completed_daily_candles_through(candles, through_day):
+    completed = []
+    for candle in candles:
+        candle_day = _get_candle_day(candle)
+        if candle_day and candle_day <= through_day:
+            completed.append(candle)
+    return sorted(completed, key=lambda item: item.get("date"))
+
+
+def _build_volume_mismatch_messages(title, rows, now_ist):
+    if not rows:
+        return []
+
+    rows.sort(
+        key=lambda item: (
+            item.get("period_sort", ""),
+            float(item.get("volume", 0) or 0),
+            abs(float(item.get("change_pct", 0) or 0)),
+        ),
+        reverse=True,
+    )
+
+    alerts = []
+    chunk_size = 20
+    for i in range(0, len(rows), chunk_size):
+        chunk = rows[i:i + chunk_size]
+        body_lines = []
+        for item in chunk:
+            body_lines.append(
+                f"{item['name']} {item['month_label']} FUT: "
+                f"{item['period_text']} | "
+                f"Price {item['price_color']} vs Ref {item['reference_color']} | "
+                f"O {item['open']:.2f} H {item['high']:.2f} "
+                f"L {item['low']:.2f} C {item['close']:.2f} | "
+                f"Ref Close {item['reference_close']:.2f} "
+                f"({item['change_pct']:+.2f}%) | "
+                f"Vol {format_volume(item['volume'])}"
+            )
+
+        alerts.append(
+            f"{title}\n\n"
+            f"{chr(10).join(body_lines)}\n\n"
+            f"TIME: {now_ist.strftime('%H:%M:%S')} IST"
+        )
+    return alerts
+
+
+def build_previous_day_future_volume_mismatch_alerts(kite):
+    now_ist = datetime.now(IST)
+    if now_ist.weekday() > 4:
+        return []
+    if not _is_scan_window_open(
+        now_ist,
+        PREVIOUS_DAY_MISMATCH_SCAN_START_TIME,
+        PREVIOUS_DAY_MISMATCH_SCAN_END_TIME,
+    ):
+        return []
+
+    scan_date = now_ist.date().isoformat()
+    if scan_date in previous_day_mismatch_scan_dates:
+        return []
+
+    target_day = _get_previous_trading_day(now_ist)
+    contracts = _get_active_stock_future_contracts()
+    if not contracts:
+        previous_day_mismatch_scan_dates.add(scan_date)
+        return []
+
+    lookback_days = PREVIOUS_DAY_MISMATCH_LOOKBACK_DAYS
+    if now_ist.weekday() == 0:
+        lookback_days = max(lookback_days, WEEKLY_MISMATCH_LOOKBACK_DAYS)
+
+    rows = []
+    for contract in contracts:
+        candles = _get_recent_daily_candles_until(
+            kite,
+            contract["token"],
+            target_day,
+            lookback_days,
+            "Previous day mismatch",
+        )
+        completed = _completed_daily_candles_through(candles, target_day)
+        if len(completed) < 2:
+            continue
+
+        previous_candle = completed[-2]
+        candle = completed[-1]
+        candle_day = _get_candle_day(candle)
+        if not candle_day:
+            continue
+
+        previous_close = float(previous_candle.get("close", 0) or 0)
+        open_price = float(candle.get("open", 0) or 0)
+        high = float(candle.get("high", 0) or 0)
+        low = float(candle.get("low", 0) or 0)
+        close = float(candle.get("close", 0) or 0)
+        volume = float(candle.get("volume", 0) or 0)
+        if previous_close <= 0 or open_price <= 0 or close <= 0:
+            continue
+        if volume < PREVIOUS_DAY_MISMATCH_MIN_VOLUME:
+            continue
+
+        price_color = _candle_color(open_price, close)
+        reference_color = _volume_candle_color(previous_close, close)
+        if not price_color or not reference_color or price_color == reference_color:
+            continue
+
+        rows.append(
+            {
+                "name": contract["name"],
+                "month_label": contract["month_label"],
+                "period_text": candle_day.strftime("%d-%m-%Y"),
+                "period_sort": candle_day.isoformat(),
+                "open": open_price,
+                "high": high,
+                "low": low,
+                "close": close,
+                "reference_close": previous_close,
+                "change_pct": ((close - previous_close) / previous_close) * 100,
+                "volume": volume,
+                "price_color": price_color,
+                "reference_color": reference_color,
+            }
+        )
+
+    previous_day_mismatch_scan_dates.add(scan_date)
+    return _build_volume_mismatch_messages(
+        "PREVIOUS DAY FUTURE VOLUME MISMATCH",
+        rows,
+        now_ist,
+    )
+
+
+def build_weekly_future_volume_mismatch_alerts(kite):
+    now_ist = datetime.now(IST)
+    if now_ist.weekday() != 0:
+        return []
+    if not _is_scan_window_open(
+        now_ist,
+        WEEKLY_MISMATCH_SCAN_START_TIME,
+        WEEKLY_MISMATCH_SCAN_END_TIME,
+    ):
+        return []
+
+    week_id = f"{now_ist.isocalendar().year}-W{now_ist.isocalendar().week:02d}"
+    if week_id in weekly_mismatch_scan_weeks:
+        return []
+
+    previous_week_end = now_ist.date() - timedelta(days=3)
+    contracts = _get_active_stock_future_contracts()
+    if not contracts:
+        weekly_mismatch_scan_weeks.add(week_id)
+        return []
+
+    rows = []
+    for contract in contracts:
+        candles = _get_recent_daily_candles_until(
+            kite,
+            contract["token"],
+            previous_week_end,
+            WEEKLY_MISMATCH_LOOKBACK_DAYS,
+            "Weekly mismatch",
+        )
+        completed = _completed_daily_candles_through(candles, previous_week_end)
+        if len(completed) < 10:
+            continue
+
+        weekly = _build_weekly_candles_from_daily(completed)
+        if len(weekly) < 2:
+            continue
+
+        previous_week = weekly[-2]
+        week = weekly[-1]
+        reference_close = float(previous_week.get("close", 0) or 0)
+        open_price = float(week.get("open", 0) or 0)
+        high = float(week.get("high", 0) or 0)
+        low = float(week.get("low", 0) or 0)
+        close = float(week.get("close", 0) or 0)
+        volume = float(week.get("volume", 0) or 0)
+        if reference_close <= 0 or open_price <= 0 or close <= 0:
+            continue
+        if volume < WEEKLY_MISMATCH_MIN_VOLUME:
+            continue
+
+        price_color = _candle_color(open_price, close)
+        reference_color = _volume_candle_color(reference_close, close)
+        if not price_color or not reference_color or price_color == reference_color:
+            continue
+
+        week_start = week.get("week_start")
+        week_end = week.get("last_date")
+        period_text = f"{week_start.strftime('%d-%m-%Y')} to {week_end.strftime('%d-%m-%Y')}"
+        rows.append(
+            {
+                "name": contract["name"],
+                "month_label": contract["month_label"],
+                "period_text": period_text,
+                "period_sort": week_start.isoformat(),
+                "open": open_price,
+                "high": high,
+                "low": low,
+                "close": close,
+                "reference_close": reference_close,
+                "change_pct": ((close - reference_close) / reference_close) * 100,
+                "volume": volume,
+                "price_color": price_color,
+                "reference_color": reference_color,
+            }
+        )
+
+    weekly_mismatch_scan_weeks.add(week_id)
+    return _build_volume_mismatch_messages(
+        "WEEKLY FUTURE VOLUME MISMATCH",
+        rows,
+        now_ist,
+    )
 
 
 def _get_previous_day_r3_for_interval(kite, token, interval, interval_minutes, now_ist):
@@ -2360,6 +2623,8 @@ def calculate_other_historical_alerts(kite):
         return []
 
     alerts = []
+    alerts.extend(build_previous_day_future_volume_mismatch_alerts(kite))
+    alerts.extend(build_weekly_future_volume_mismatch_alerts(kite))
     alerts.extend(build_monthly_future_r3_pivot_alerts(kite))
     alerts.extend(build_stock_future_1hr_s4_alerts(kite))
     alerts.extend(build_breakout_reversal_alerts(kite))
