@@ -338,7 +338,7 @@ def load_options_data():
     global _options_df
     if _options_df is None:
         try:
-            df = pd.read_csv("instruments.csv")
+            df = pd.read_csv("instruments.csv", low_memory=False)
             _options_df = df[df["segment"].isin(["NFO-OPT", "BFO-OPT", "MCX-OPT"])].copy()
             expiry = pd.to_datetime(_options_df["expiry"], format="%Y-%m-%d", errors="coerce")
             if expiry.isna().mean() > 0.05:
@@ -353,7 +353,7 @@ def load_futures_data():
     global _futures_df
     if _futures_df is None:
         try:
-            df = pd.read_csv("instruments.csv")
+            df = pd.read_csv("instruments.csv", low_memory=False)
             _futures_df = df[df["segment"].str.contains("-FUT", na=False)].copy()
             expiry = pd.to_datetime(_futures_df["expiry"], format="%Y-%m-%d", errors="coerce")
             if expiry.isna().mean() > 0.05:

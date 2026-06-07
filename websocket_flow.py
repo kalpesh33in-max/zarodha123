@@ -107,6 +107,8 @@ class FlowEngine:
         self._auth_failed = False
         self._refresh_thread = None
         self._refresh_seconds = 60
+        self._index_rows = None
+        self._equity_rows = None
 
     def start(self):
         with self._lock:
@@ -286,8 +288,11 @@ class FlowEngine:
         return sorted(tokens), symbol_by_token, base_tokens, option_tokens
 
     def _load_index_rows(self):
+        if self._index_rows is not None:
+            return self._index_rows
+
         try:
-            df = pd.read_csv("instruments.csv")
+            df = pd.read_csv("instruments.csv", low_memory=False)
         except Exception as e:
             print(f"Error loading index rows for websocket: {e}")
             return None
@@ -297,11 +302,15 @@ class FlowEngine:
             & (df["exchange"] == "NSE")
             & (df["tradingsymbol"] == "NIFTY BANK")
         ]
-        return rows if not rows.empty else None
+        self._index_rows = rows if not rows.empty else None
+        return self._index_rows
 
     def _load_equity_rows(self):
+        if self._equity_rows is not None:
+            return self._equity_rows
+
         try:
-            df = pd.read_csv("instruments.csv")
+            df = pd.read_csv("instruments.csv", low_memory=False)
         except Exception as e:
             print(f"Error loading equity rows for websocket: {e}")
             return None
@@ -311,7 +320,8 @@ class FlowEngine:
             & (df["exchange"] == "NSE")
             & (df["instrument_type"] == "EQ")
         ]
-        return rows if not rows.empty else None
+        self._equity_rows = rows if not rows.empty else None
+        return self._equity_rows
 
     def _start_refresh_thread(self):
         if self._static_tokens or (self._refresh_thread and self._refresh_thread.is_alive()):
