@@ -701,6 +701,23 @@ def _volume_candle_color(previous_close, close_price):
     return None
 
 
+def _open_extreme_label(open_price, high, low):
+    try:
+        open_price = float(open_price or 0)
+        high = float(high or 0)
+        low = float(low or 0)
+    except Exception:
+        return ""
+
+    if open_price <= 0 or high <= 0 or low <= 0:
+        return ""
+    if abs(open_price - high) <= 1e-9:
+        return "open=high"
+    if abs(open_price - low) <= 1e-9:
+        return "open=low"
+    return ""
+
+
 def _get_first_5m_candle(kite, token, now_ist):
     session_start = datetime.combine(
         now_ist.date(),
@@ -845,11 +862,14 @@ def build_first_5m_future_volume_mismatch_alerts(kite):
         body_lines = []
         for item in chunk:
             gap_label = "GAP UP" if item["gap_pct"] > 0 else "GAP DOWN"
+            open_extreme = _open_extreme_label(item["open"], item["high"], item["low"])
+            open_extreme_text = f" | {open_extreme}" if open_extreme else ""
             body_lines.append(
                 f"{item['name']} {item['month_label']} FUT: "
                 f"{gap_label} {item['gap_pct']:+.2f}% | "
                 f"Vol {format_volume(item['volume'])} | "
                 f"Price {item['price_color']} vs Volume {item['volume_color']}"
+                f"{open_extreme_text}"
             )
 
         body = "\n".join(body_lines)
@@ -1212,15 +1232,14 @@ def _build_volume_mismatch_messages(title, rows, now_ist):
         chunk = rows[i:i + chunk_size]
         body_lines = []
         for item in chunk:
+            open_extreme = _open_extreme_label(item["open"], item["high"], item["low"])
+            open_extreme_text = f" | {open_extreme}" if open_extreme else ""
             body_lines.append(
                 f"{item['name']} {item['month_label']} FUT: "
                 f"{item['period_text']} | "
-                f"Price {item['price_color']} vs Ref {item['reference_color']} | "
-                f"O {item['open']:.2f} H {item['high']:.2f} "
-                f"L {item['low']:.2f} C {item['close']:.2f} | "
-                f"Ref Close {item['reference_close']:.2f} "
-                f"({item['change_pct']:+.2f}%) | "
-                f"Vol {format_volume(item['volume'])}"
+                f"Vol {format_volume(item['volume'])} | "
+                f"Price {item['price_color']} vs Volume {item['reference_color']}"
+                f"{open_extreme_text}"
             )
 
         alerts.append(
