@@ -55,8 +55,8 @@ s4_state_store = {}
 s4_last_slot = None
 first_5m_mismatch_scan_dates = set()
 first_5m_mismatch_last_scan_time = None
-previous_day_mismatch_scan_dates = set()
-weekly_mismatch_scan_weeks = set()
+daily_mismatch_break_alert_store = {}
+weekly_mismatch_break_alert_store = {}
 
 # Breakout reversal scanner state
 breakout_last_check = {"30minute": None, "60minute": None}
@@ -156,13 +156,8 @@ FIRST_5M_MISMATCH_SCAN_START_TIME = datetime.strptime("09:20", "%H:%M").time()
 FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT = float(os.getenv("FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT", "1.0"))
 FIRST_5M_MISMATCH_MIN_VOLUME = int(os.getenv("FIRST_5M_MISMATCH_MIN_VOLUME", "100000"))
 FIRST_5M_MISMATCH_RETRY_SECONDS = 120
-PREVIOUS_DAY_MISMATCH_SCAN_START_TIME = datetime.strptime("09:20", "%H:%M").time()
-PREVIOUS_DAY_MISMATCH_SCAN_END_TIME = datetime.strptime("10:00", "%H:%M").time()
-PREVIOUS_DAY_MISMATCH_MIN_VOLUME = int(os.getenv("PREVIOUS_DAY_MISMATCH_MIN_VOLUME", "100000"))
+DAILY_WEEKLY_MISMATCH_MIN_VOLUME = int(os.getenv("DAILY_WEEKLY_MISMATCH_MIN_VOLUME", "1000000"))
 PREVIOUS_DAY_MISMATCH_LOOKBACK_DAYS = int(os.getenv("PREVIOUS_DAY_MISMATCH_LOOKBACK_DAYS", "20"))
-WEEKLY_MISMATCH_SCAN_START_TIME = datetime.strptime("09:35", "%H:%M").time()
-WEEKLY_MISMATCH_SCAN_END_TIME = datetime.strptime("10:30", "%H:%M").time()
-WEEKLY_MISMATCH_MIN_VOLUME = int(os.getenv("WEEKLY_MISMATCH_MIN_VOLUME", "500000"))
 WEEKLY_MISMATCH_LOOKBACK_DAYS = int(os.getenv("WEEKLY_MISMATCH_LOOKBACK_DAYS", "100"))
 NON_BURST_ALERT_PAUSE_DATES = {"2026-05-26"}
 
@@ -1250,68 +1245,141 @@ def _build_volume_mismatch_messages(title, rows, now_ist):
     return alerts
 
 
+def _volume_beats_previous(candles, index, lookback=5):
+    if index < lookback:
+        return False, 0
+
+    volume = float(candles[index].get("volume", 0) or 0)
+    previous_volumes = [
+        float(candle.get("volume", 0) or 0)
+        for candle in candles[index - lookback:index]
+    ]
+    if len(previous_volumes) < lookback or volume <= 0:
+        return False, 0
+
+    previous_max = max(previous_volumes)
+    return volume > previous_max, previous_max
+
+
+def _level_was_broken_after(candles, index, direction, high, low):
+    for candle in candles[index + 1:]:
+        candle_high = float(candle.get("high", 0) or 0)
+        candle_low = float(candle.get("low", 0) or 0)
+        if direction == "BREAKOUT" and candle_high > high:
+            return True
+        if direction == "BREAKDOWN" and candle_low < low:
+            return True
+    return False
+
+
+def _build_volume_mismatch_break_messages(title, rows, now_ist):
+    if not rows:
+        return []
+
+    rows.sort(
+        key=lambda item: (
+            item.get("period_sort", ""),
+            float(item.get("volume", 0) or 0),
+        ),
+        reverse=True,
+    )
+
+    alerts = []
+    chunk_size = 20
+    for i in range(0, len(rows), chunk_size):
+        chunk = rows[i:i + chunk_size]
+        body_lines = []
+        for item in chunk:
+            open_extreme = _open_extreme_label(item["open"], item["high"], item["low"])
+            open_extreme_text = f" | {open_extreme}" if open_extreme else ""
+            level_text = (
+                f"Fut {item['ltp']:.2f} > High {item['high']:.2f}"
+                if item["direction"] == "BREAKOUT"
+                else f"Fut {item['ltp']:.2f} < Low {item['low']:.2f}"
+            )
+            body_lines.append(
+                f"{item['name']} {item['month_label']} FUT: "
+                f"Setup {item['period_text']} | "
+                f"{level_text} | "
+                f"Vol {format_volume(item['volume'])} > Prev5 Max {format_volume(item['previous_volume_max'])} | "
+                f"Price {item['price_color']} vs Volume {item['reference_color']}"
+                f"{open_extreme_text}"
+            )
+
+        alerts.append(
+            f"{title}\n\n"
+            f"{chr(10).join(body_lines)}\n\n"
+            f"TIME: {now_ist.strftime('%H:%M:%S')} IST"
+        )
+    return alerts
+
+
 def build_previous_day_future_volume_mismatch_alerts(kite):
     now_ist = datetime.now(IST)
     if now_ist.weekday() > 4:
-        return []
-    if not _is_scan_window_open(
-        now_ist,
-        PREVIOUS_DAY_MISMATCH_SCAN_START_TIME,
-        PREVIOUS_DAY_MISMATCH_SCAN_END_TIME,
-    ):
-        return []
-
-    scan_date = now_ist.date().isoformat()
-    if scan_date in previous_day_mismatch_scan_dates:
         return []
 
     target_day = _get_previous_trading_day(now_ist)
     contracts = _get_active_stock_future_contracts()
     if not contracts:
-        previous_day_mismatch_scan_dates.add(scan_date)
         return []
 
-    lookback_days = PREVIOUS_DAY_MISMATCH_LOOKBACK_DAYS
-    if now_ist.weekday() == 0:
-        lookback_days = max(lookback_days, WEEKLY_MISMATCH_LOOKBACK_DAYS)
+    symbols = [contract["symbol"] for contract in contracts]
+    quote_data = get_symbol_quotes_with_fallback(kite, symbols)
+    if not quote_data:
+        return []
 
-    rows = []
+    lookback_days = max(
+        PREVIOUS_DAY_MISMATCH_LOOKBACK_DAYS,
+        WEEKLY_MISMATCH_LOOKBACK_DAYS,
+        10,
+    )
+
+    breakout_rows = []
+    breakdown_rows = []
     for contract in contracts:
+        ltp = quote_data.get(contract["symbol"], {}).get("last_price", 0)
+        if ltp <= 0:
+            continue
+
         candles = _get_recent_daily_candles_until(
             kite,
             contract["token"],
             target_day,
             lookback_days,
-            "Previous day mismatch",
+            "Daily mismatch breakout",
         )
         completed = _completed_daily_candles_through(candles, target_day)
-        if len(completed) < 2:
+        if len(completed) < 6:
             continue
 
-        previous_candle = completed[-2]
-        candle = completed[-1]
-        candle_day = _get_candle_day(candle)
-        if not candle_day:
-            continue
+        for index in range(5, len(completed)):
+            previous_candle = completed[index - 1]
+            candle = completed[index]
+            candle_day = _get_candle_day(candle)
+            if not candle_day:
+                continue
 
-        previous_close = float(previous_candle.get("close", 0) or 0)
-        open_price = float(candle.get("open", 0) or 0)
-        high = float(candle.get("high", 0) or 0)
-        low = float(candle.get("low", 0) or 0)
-        close = float(candle.get("close", 0) or 0)
-        volume = float(candle.get("volume", 0) or 0)
-        if previous_close <= 0 or open_price <= 0 or close <= 0:
-            continue
-        if volume < PREVIOUS_DAY_MISMATCH_MIN_VOLUME:
-            continue
+            previous_close = float(previous_candle.get("close", 0) or 0)
+            open_price = float(candle.get("open", 0) or 0)
+            high = float(candle.get("high", 0) or 0)
+            low = float(candle.get("low", 0) or 0)
+            close = float(candle.get("close", 0) or 0)
+            volume = float(candle.get("volume", 0) or 0)
+            if previous_close <= 0 or open_price <= 0 or high <= 0 or low <= 0 or close <= 0:
+                continue
+            if volume <= DAILY_WEEKLY_MISMATCH_MIN_VOLUME:
+                continue
+            volume_ok, previous_volume_max = _volume_beats_previous(completed, index)
+            if not volume_ok:
+                continue
 
-        price_color = _candle_color(open_price, close)
-        reference_color = _volume_candle_color(previous_close, close)
-        if not price_color or not reference_color or price_color == reference_color:
-            continue
+            price_color = _candle_color(open_price, close)
+            reference_color = _volume_candle_color(previous_close, close)
+            if not price_color or not reference_color or price_color == reference_color:
+                continue
 
-        rows.append(
-            {
+            base_row = {
                 "name": contract["name"],
                 "month_label": contract["month_label"],
                 "period_text": candle_day.strftime("%d-%m-%Y"),
@@ -1320,83 +1388,118 @@ def build_previous_day_future_volume_mismatch_alerts(kite):
                 "high": high,
                 "low": low,
                 "close": close,
-                "reference_close": previous_close,
-                "change_pct": ((close - previous_close) / previous_close) * 100,
                 "volume": volume,
+                "previous_volume_max": previous_volume_max,
                 "price_color": price_color,
                 "reference_color": reference_color,
+                "ltp": ltp,
             }
-        )
 
-    previous_day_mismatch_scan_dates.add(scan_date)
-    return _build_volume_mismatch_messages(
-        "PREVIOUS DAY FUTURE VOLUME MISMATCH",
-        rows,
-        now_ist,
+            for direction, target_rows in (
+                ("BREAKOUT", breakout_rows),
+                ("BREAKDOWN", breakdown_rows),
+            ):
+                if direction == "BREAKOUT" and ltp <= high:
+                    continue
+                if direction == "BREAKDOWN" and ltp >= low:
+                    continue
+                if _level_was_broken_after(completed, index, direction, high, low):
+                    continue
+
+                alert_key = (
+                    f"DAILY_VM_BREAK:{contract['symbol']}:"
+                    f"{candle_day.isoformat()}:{direction}:{now_ist.date().isoformat()}"
+                )
+                if alert_key in daily_mismatch_break_alert_store:
+                    continue
+
+                daily_mismatch_break_alert_store[alert_key] = now_ist
+                row = dict(base_row)
+                row["direction"] = direction
+                target_rows.append(row)
+
+    alerts = []
+    alerts.extend(
+        _build_volume_mismatch_break_messages(
+            "DAILY FUTURE VOLUME MISMATCH BREAKOUT",
+            breakout_rows,
+            now_ist,
+        )
     )
+    alerts.extend(
+        _build_volume_mismatch_break_messages(
+            "DAILY FUTURE VOLUME MISMATCH BREAKDOWN",
+            breakdown_rows,
+            now_ist,
+        )
+    )
+    return alerts
 
 
 def build_weekly_future_volume_mismatch_alerts(kite):
     now_ist = datetime.now(IST)
-    if now_ist.weekday() != 0:
-        return []
-    if not _is_scan_window_open(
-        now_ist,
-        WEEKLY_MISMATCH_SCAN_START_TIME,
-        WEEKLY_MISMATCH_SCAN_END_TIME,
-    ):
+    if now_ist.weekday() > 4:
         return []
 
-    week_id = f"{now_ist.isocalendar().year}-W{now_ist.isocalendar().week:02d}"
-    if week_id in weekly_mismatch_scan_weeks:
-        return []
-
-    previous_week_end = now_ist.date() - timedelta(days=3)
+    current_week_start = now_ist.date() - timedelta(days=now_ist.weekday())
+    previous_week_end = current_week_start - timedelta(days=3)
     contracts = _get_active_stock_future_contracts()
     if not contracts:
-        weekly_mismatch_scan_weeks.add(week_id)
         return []
 
-    rows = []
+    symbols = [contract["symbol"] for contract in contracts]
+    quote_data = get_symbol_quotes_with_fallback(kite, symbols)
+    if not quote_data:
+        return []
+
+    breakout_rows = []
+    breakdown_rows = []
     for contract in contracts:
+        ltp = quote_data.get(contract["symbol"], {}).get("last_price", 0)
+        if ltp <= 0:
+            continue
+
         candles = _get_recent_daily_candles_until(
             kite,
             contract["token"],
             previous_week_end,
             WEEKLY_MISMATCH_LOOKBACK_DAYS,
-            "Weekly mismatch",
+            "Weekly mismatch breakout",
         )
         completed = _completed_daily_candles_through(candles, previous_week_end)
         if len(completed) < 10:
             continue
 
         weekly = _build_weekly_candles_from_daily(completed)
-        if len(weekly) < 2:
+        if len(weekly) < 6:
             continue
 
-        previous_week = weekly[-2]
-        week = weekly[-1]
-        reference_close = float(previous_week.get("close", 0) or 0)
-        open_price = float(week.get("open", 0) or 0)
-        high = float(week.get("high", 0) or 0)
-        low = float(week.get("low", 0) or 0)
-        close = float(week.get("close", 0) or 0)
-        volume = float(week.get("volume", 0) or 0)
-        if reference_close <= 0 or open_price <= 0 or close <= 0:
-            continue
-        if volume < WEEKLY_MISMATCH_MIN_VOLUME:
-            continue
+        for index in range(5, len(weekly)):
+            previous_week = weekly[index - 1]
+            week = weekly[index]
+            reference_close = float(previous_week.get("close", 0) or 0)
+            open_price = float(week.get("open", 0) or 0)
+            high = float(week.get("high", 0) or 0)
+            low = float(week.get("low", 0) or 0)
+            close = float(week.get("close", 0) or 0)
+            volume = float(week.get("volume", 0) or 0)
+            if reference_close <= 0 or open_price <= 0 or high <= 0 or low <= 0 or close <= 0:
+                continue
+            if volume <= DAILY_WEEKLY_MISMATCH_MIN_VOLUME:
+                continue
+            volume_ok, previous_volume_max = _volume_beats_previous(weekly, index)
+            if not volume_ok:
+                continue
 
-        price_color = _candle_color(open_price, close)
-        reference_color = _volume_candle_color(reference_close, close)
-        if not price_color or not reference_color or price_color == reference_color:
-            continue
+            price_color = _candle_color(open_price, close)
+            reference_color = _volume_candle_color(reference_close, close)
+            if not price_color or not reference_color or price_color == reference_color:
+                continue
 
-        week_start = week.get("week_start")
-        week_end = week.get("last_date")
-        period_text = f"{week_start.strftime('%d-%m-%Y')} to {week_end.strftime('%d-%m-%Y')}"
-        rows.append(
-            {
+            week_start = week.get("week_start")
+            week_end = week.get("last_date")
+            period_text = f"{week_start.strftime('%d-%m-%Y')} to {week_end.strftime('%d-%m-%Y')}"
+            base_row = {
                 "name": contract["name"],
                 "month_label": contract["month_label"],
                 "period_text": period_text,
@@ -1405,20 +1508,52 @@ def build_weekly_future_volume_mismatch_alerts(kite):
                 "high": high,
                 "low": low,
                 "close": close,
-                "reference_close": reference_close,
-                "change_pct": ((close - reference_close) / reference_close) * 100,
                 "volume": volume,
+                "previous_volume_max": previous_volume_max,
                 "price_color": price_color,
                 "reference_color": reference_color,
+                "ltp": ltp,
             }
-        )
 
-    weekly_mismatch_scan_weeks.add(week_id)
-    return _build_volume_mismatch_messages(
-        "WEEKLY FUTURE VOLUME MISMATCH",
-        rows,
-        now_ist,
+            for direction, target_rows in (
+                ("BREAKOUT", breakout_rows),
+                ("BREAKDOWN", breakdown_rows),
+            ):
+                if direction == "BREAKOUT" and ltp <= high:
+                    continue
+                if direction == "BREAKDOWN" and ltp >= low:
+                    continue
+                if _level_was_broken_after(weekly, index, direction, high, low):
+                    continue
+
+                alert_key = (
+                    f"WEEKLY_VM_BREAK:{contract['symbol']}:"
+                    f"{week_start.isoformat()}:{direction}:{current_week_start.isoformat()}"
+                )
+                if alert_key in weekly_mismatch_break_alert_store:
+                    continue
+
+                weekly_mismatch_break_alert_store[alert_key] = now_ist
+                row = dict(base_row)
+                row["direction"] = direction
+                target_rows.append(row)
+
+    alerts = []
+    alerts.extend(
+        _build_volume_mismatch_break_messages(
+            "WEEKLY FUTURE VOLUME MISMATCH BREAKOUT",
+            breakout_rows,
+            now_ist,
+        )
     )
+    alerts.extend(
+        _build_volume_mismatch_break_messages(
+            "WEEKLY FUTURE VOLUME MISMATCH BREAKDOWN",
+            breakdown_rows,
+            now_ist,
+        )
+    )
+    return alerts
 
 
 def _get_previous_day_r3_for_interval(kite, token, interval, interval_minutes, now_ist):
