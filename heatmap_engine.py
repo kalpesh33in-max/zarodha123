@@ -53,16 +53,15 @@ r3_watch_last_sent_time = None
 s4_alert_store = {}
 s4_state_store = {}
 s4_last_slot = None
-first_5m_mismatch_scan_dates = set()
-first_5m_mismatch_last_scan_time = None
+first_15m_mismatch_scan_dates = set()
+first_15m_mismatch_last_scan_time = None
 daily_mismatch_break_alert_store = {}
 weekly_mismatch_break_alert_store = {}
+daily_mismatch_setup_date = None
+daily_mismatch_setup_rows = []
+weekly_mismatch_setup_date = None
+weekly_mismatch_setup_rows = []
 
-# Breakout reversal scanner state
-breakout_last_check = {"30minute": None, "60minute": None}
-breakout_alert_store = {}
-volume_blast_last_slot = None
-volume_blast_alert_store = {}
 born_breakout_last_check_time = None
 born_breakout_alert_store = {}
 
@@ -109,53 +108,12 @@ BORN_BREAKOUT_AFTERNOON_END_TIME = datetime.strptime("15:30", "%H:%M").time()
 BORN_BREAKOUT_CHECK_INTERVAL_SECONDS = 1800
 BORN_BREAKOUT_LOOKBACK_DAYS = 180
 # Pause non-burst reports only for this date. They resume automatically the next day.
-BREAKOUT_MIN_FIRST_VOLUME = 50000
-VOLUME_BLAST_MIN_VOLUME = int(os.getenv("VOLUME_BLAST_MIN_VOLUME", "1000000"))
-VOLUME_BLAST_LOOKAHEAD_CANDLES = int(os.getenv("VOLUME_BLAST_LOOKAHEAD_CANDLES", "20"))
-VOLUME_BLAST_PREVIOUS_QUIET_CANDLES = int(os.getenv("VOLUME_BLAST_PREVIOUS_QUIET_CANDLES", "10"))
-BREAKOUT_REVERSAL_CHECK_TIMES = [
-    datetime.strptime(value, "%H:%M").time()
-    for value in (
-        "09:45",
-        "10:15",
-        "10:45",
-        "11:15",
-        "11:45",
-        "12:15",
-        "12:45",
-        "13:15",
-        "13:45",
-        "14:15",
-        "14:45",
-        "15:15",
-        "15:30",
-    )
-]
-BREAKOUT_REVERSAL_CHECK_WINDOW_SECONDS = 120
-VOLUME_BLAST_CHECK_TIMES = [
-    datetime.strptime(value, "%H:%M").time()
-    for value in (
-        "09:30",
-        "10:00",
-        "10:30",
-        "11:00",
-        "11:30",
-        "12:00",
-        "12:30",
-        "13:00",
-        "13:30",
-        "14:00",
-        "14:30",
-        "15:00",
-        "15:30",
-    )
-]
-VOLUME_BLAST_CHECK_WINDOW_SECONDS = 120
-FIRST_5M_MISMATCH_CANDLE_START_TIME = datetime.strptime("09:15", "%H:%M").time()
-FIRST_5M_MISMATCH_SCAN_START_TIME = datetime.strptime("09:20", "%H:%M").time()
-FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT = float(os.getenv("FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT", "1.0"))
-FIRST_5M_MISMATCH_MIN_VOLUME = int(os.getenv("FIRST_5M_MISMATCH_MIN_VOLUME", "100000"))
-FIRST_5M_MISMATCH_RETRY_SECONDS = 120
+FIRST_15M_MISMATCH_CANDLE_START_TIME = datetime.strptime("09:15", "%H:%M").time()
+FIRST_15M_MISMATCH_SCAN_START_TIME = datetime.strptime("09:30", "%H:%M").time()
+FIRST_15M_MISMATCH_GAP_THRESHOLD_PCT = float(os.getenv("FIRST_15M_MISMATCH_GAP_THRESHOLD_PCT", "1.0"))
+FIRST_15M_MISMATCH_MIN_VOLUME = int(os.getenv("FIRST_15M_MISMATCH_MIN_VOLUME", "100000"))
+FIRST_15M_MISMATCH_RETRY_SECONDS = 120
+FIRST_15M_OPTION_ITM_COUNT = int(os.getenv("FIRST_15M_OPTION_ITM_COUNT", "4"))
 DAILY_WEEKLY_MISMATCH_MIN_VOLUME = int(os.getenv("DAILY_WEEKLY_MISMATCH_MIN_VOLUME", "1000000"))
 PREVIOUS_DAY_MISMATCH_LOOKBACK_DAYS = int(os.getenv("PREVIOUS_DAY_MISMATCH_LOOKBACK_DAYS", "20"))
 WEEKLY_MISMATCH_LOOKBACK_DAYS = int(os.getenv("WEEKLY_MISMATCH_LOOKBACK_DAYS", "100"))
@@ -257,46 +215,6 @@ def get_due_s4_slot(now_ist):
         )
         delta = (current - slot).total_seconds()
         if 0 <= delta <= S4_PIVOT_CHECK_WINDOW_SECONDS:
-            return slot.strftime("%Y-%m-%d %H:%M")
-
-    return None
-
-
-def get_due_volume_blast_slot(now_ist):
-    current = datetime.combine(
-        now_ist.date(),
-        now_ist.time(),
-        tzinfo=IST,
-    )
-
-    for slot_time in VOLUME_BLAST_CHECK_TIMES:
-        slot = datetime.combine(
-            now_ist.date(),
-            slot_time,
-            tzinfo=IST,
-        )
-        delta = (current - slot).total_seconds()
-        if 0 <= delta <= VOLUME_BLAST_CHECK_WINDOW_SECONDS:
-            return slot.strftime("%Y-%m-%d %H:%M")
-
-    return None
-
-
-def get_due_breakout_reversal_slot(now_ist):
-    current = datetime.combine(
-        now_ist.date(),
-        now_ist.time(),
-        tzinfo=IST,
-    )
-
-    for slot_time in BREAKOUT_REVERSAL_CHECK_TIMES:
-        slot = datetime.combine(
-            now_ist.date(),
-            slot_time,
-            tzinfo=IST,
-        )
-        delta = (current - slot).total_seconds()
-        if 0 <= delta <= BREAKOUT_REVERSAL_CHECK_WINDOW_SECONDS:
             return slot.strftime("%Y-%m-%d %H:%M")
 
     return None
@@ -657,7 +575,7 @@ def _get_active_index_future_contracts():
     return contracts
 
 
-def _get_first_5m_future_contracts():
+def _get_first_15m_future_contracts():
     contracts = []
     seen_symbols = set()
 
@@ -713,17 +631,17 @@ def _open_extreme_label(open_price, high, low):
     return ""
 
 
-def _get_first_5m_candle(kite, token, now_ist):
+def _get_first_15m_candle(kite, token, now_ist):
     session_start = datetime.combine(
         now_ist.date(),
-        FIRST_5M_MISMATCH_CANDLE_START_TIME,
+        FIRST_15M_MISMATCH_CANDLE_START_TIME,
         tzinfo=IST,
     )
-    session_end = session_start + timedelta(minutes=5)
+    session_end = session_start + timedelta(minutes=15)
     try:
-        candles = kite_historical_data(kite, token, session_start, session_end, "5minute")
+        candles = kite_historical_data(kite, token, session_start, session_end, "15minute")
     except Exception as e:
-        print(f"First 5m historical data error for {token}: {e}")
+        print(f"First 15m historical data error for {token}: {e}")
         return None
 
     for candle in candles:
@@ -733,7 +651,7 @@ def _get_first_5m_candle(kite, token, now_ist):
         if (
             candle_time
             and candle_time.date() == now_ist.date()
-            and candle_time.time() == FIRST_5M_MISMATCH_CANDLE_START_TIME
+            and candle_time.time() == FIRST_15M_MISMATCH_CANDLE_START_TIME
         ):
             return candle
 
@@ -747,26 +665,160 @@ def _get_first_5m_candle(kite, token, now_ist):
     return None
 
 
-def build_first_5m_future_volume_mismatch_alerts(kite):
-    global first_5m_mismatch_last_scan_time
+def _get_first_15m_candle_context(kite, token, now_ist, label="First 15m"):
+    session_start = datetime.combine(
+        now_ist.date(),
+        FIRST_15M_MISMATCH_CANDLE_START_TIME,
+        tzinfo=IST,
+    )
+    session_end = session_start + timedelta(minutes=15)
+    prev_day = _get_previous_trading_day(now_ist)
+    from_time = datetime.combine(
+        prev_day,
+        datetime.strptime("09:15", "%H:%M").time(),
+        tzinfo=IST,
+    )
+
+    try:
+        candles = get_historical_data_cached(kite, token, from_time, session_end, "15minute")
+    except Exception as e:
+        print(f"{label} historical data error for {token}: {e}")
+        return None
+
+    normalized = []
+    for candle in candles:
+        candle_time = candle.get("date")
+        if candle_time is None:
+            continue
+        if hasattr(candle_time, "astimezone"):
+            candle_time = candle_time.astimezone(IST)
+        normalized.append((candle_time, candle))
+    normalized.sort(key=lambda item: item[0])
+
+    first_index = None
+    for index, (candle_time, _) in enumerate(normalized):
+        if (
+            candle_time.date() == now_ist.date()
+            and candle_time.time() == FIRST_15M_MISMATCH_CANDLE_START_TIME
+        ):
+            first_index = index
+            break
+
+    if first_index is None:
+        return None
+
+    previous = [item[1] for item in normalized[:first_index]][-5:]
+    if len(previous) < 5:
+        return None
+
+    previous_close = float(previous[-1].get("close", 0) or 0)
+    previous_volume_max = max(float(c.get("volume", 0) or 0) for c in previous)
+    return {
+        "candle": normalized[first_index][1],
+        "previous_close": previous_close,
+        "previous_volume_max": previous_volume_max,
+    }
+
+
+def _get_first_15m_itm_options(name, ltp, option_type, count=None):
+    df = load_options_data()
+    if df is None or df.empty or ltp <= 0:
+        return pd.DataFrame()
+
+    options = df[
+        (df["name"] == name)
+        & (df["instrument_type"] == option_type)
+    ].copy()
+    if options.empty:
+        return pd.DataFrame()
+
+    monthly_expiry = get_monthly_expiry(options["expiry"].unique())
+    if monthly_expiry is None:
+        return pd.DataFrame()
+
+    options = options[options["expiry"] == monthly_expiry].copy()
+    if options.empty:
+        return pd.DataFrame()
+
+    if option_type == "CE":
+        options = options[options["strike"] < ltp].sort_values("strike", ascending=False)
+    else:
+        options = options[options["strike"] > ltp].sort_values("strike", ascending=True)
+
+    limit = count if count is not None else FIRST_15M_OPTION_ITM_COUNT
+    return options.head(max(0, int(limit))).copy()
+
+
+def _build_first_15m_option_mismatch_rows(kite, name, ltp, gap_pct, now_ist):
+    option_type = "PE" if gap_pct > 0 else "CE"
+    rows = []
+
+    for _, option in _get_first_15m_itm_options(name, ltp, option_type).iterrows():
+        context = _get_first_15m_candle_context(
+            kite,
+            int(option["instrument_token"]),
+            now_ist,
+            label="First 15m option",
+        )
+        if not context:
+            continue
+
+        candle = context["candle"]
+        previous_close = float(context["previous_close"] or 0)
+        previous_volume_max = float(context["previous_volume_max"] or 0)
+        open_price = float(candle.get("open", 0) or 0)
+        close = float(candle.get("close", 0) or 0)
+        volume = float(candle.get("volume", 0) or 0)
+        if previous_close <= 0 or open_price <= 0 or close <= 0:
+            continue
+        if volume <= FIRST_15M_MISMATCH_MIN_VOLUME or volume <= previous_volume_max:
+            continue
+
+        option_gap_pct = ((open_price - previous_close) / previous_close) * 100
+        if abs(option_gap_pct) < FIRST_15M_MISMATCH_GAP_THRESHOLD_PCT:
+            continue
+
+        price_color = _candle_color(open_price, close)
+        volume_color = _volume_candle_color(previous_close, close)
+        if not price_color or not volume_color or price_color == volume_color:
+            continue
+
+        rows.append(
+            {
+                "symbol": option["tradingsymbol"],
+                "strike": float(option["strike"]),
+                "type": option_type,
+                "gap_pct": option_gap_pct,
+                "volume": volume,
+                "previous_volume_max": previous_volume_max,
+                "price_color": price_color,
+                "volume_color": volume_color,
+            }
+        )
+
+    return rows
+
+
+def build_first_15m_future_volume_mismatch_alerts(kite):
+    global first_15m_mismatch_last_scan_time
 
     now_ist = datetime.now(IST)
-    if now_ist.weekday() > 4 or now_ist.time() < FIRST_5M_MISMATCH_SCAN_START_TIME:
+    if now_ist.weekday() > 4 or now_ist.time() < FIRST_15M_MISMATCH_SCAN_START_TIME:
         return []
 
     scan_date = now_ist.date().isoformat()
-    if scan_date in first_5m_mismatch_scan_dates:
+    if scan_date in first_15m_mismatch_scan_dates:
         return []
 
     if (
-        first_5m_mismatch_last_scan_time
-        and (now_ist - first_5m_mismatch_last_scan_time).total_seconds()
-        < FIRST_5M_MISMATCH_RETRY_SECONDS
+        first_15m_mismatch_last_scan_time
+        and (now_ist - first_15m_mismatch_last_scan_time).total_seconds()
+        < FIRST_15M_MISMATCH_RETRY_SECONDS
     ):
         return []
-    first_5m_mismatch_last_scan_time = now_ist
+    first_15m_mismatch_last_scan_time = now_ist
 
-    contracts = _get_first_5m_future_contracts()
+    contracts = _get_first_15m_future_contracts()
     if not contracts:
         return []
 
@@ -781,48 +833,66 @@ def build_first_5m_future_volume_mismatch_alerts(kite):
         ohlc = quote.get("ohlc") or {}
         previous_close = float(ohlc.get("close", 0) or 0)
         day_open = float(ohlc.get("open", 0) or 0)
+        ltp = float(quote.get("last_price", 0) or day_open)
         if previous_close <= 0 or day_open <= 0:
             continue
 
         rough_gap_pct = ((day_open - previous_close) / previous_close) * 100
-        if abs(rough_gap_pct) < FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT:
+        if abs(rough_gap_pct) < FIRST_15M_MISMATCH_GAP_THRESHOLD_PCT:
             continue
 
         item = dict(contract)
         item["previous_close"] = previous_close
+        item["ltp"] = ltp
         candidates.append(item)
 
     if not candidates:
-        first_5m_mismatch_scan_dates.add(scan_date)
+        first_15m_mismatch_scan_dates.add(scan_date)
         return []
 
     rows = []
     processed_candles = 0
     for contract in candidates:
-        candle = _get_first_5m_candle(kite, contract["token"], now_ist)
-        if not candle:
+        context = _get_first_15m_candle_context(
+            kite,
+            contract["token"],
+            now_ist,
+            label="First 15m future",
+        )
+        if not context:
             continue
         processed_candles += 1
 
+        candle = context["candle"]
         previous_close = float(contract["previous_close"])
+        historical_previous_close = float(context["previous_close"] or 0)
+        previous_volume_max = float(context["previous_volume_max"] or 0)
         open_price = float(candle.get("open", 0) or 0)
         high = float(candle.get("high", 0) or 0)
         low = float(candle.get("low", 0) or 0)
         close = float(candle.get("close", 0) or 0)
         volume = float(candle.get("volume", 0) or 0)
-        if previous_close <= 0 or open_price <= 0 or close <= 0:
+        if previous_close <= 0 or historical_previous_close <= 0 or open_price <= 0 or close <= 0:
             continue
-        if volume <= FIRST_5M_MISMATCH_MIN_VOLUME:
+        if volume <= FIRST_15M_MISMATCH_MIN_VOLUME or volume <= previous_volume_max:
             continue
 
         gap_pct = ((open_price - previous_close) / previous_close) * 100
-        if abs(gap_pct) < FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT:
+        if abs(gap_pct) < FIRST_15M_MISMATCH_GAP_THRESHOLD_PCT:
             continue
 
         price_color = _candle_color(open_price, close)
-        volume_color = _volume_candle_color(previous_close, close)
+        volume_color = _volume_candle_color(historical_previous_close, close)
         if not price_color or not volume_color or price_color == volume_color:
             continue
+
+        option_rows = _build_first_15m_option_mismatch_rows(
+            kite,
+            contract["name"],
+            float(contract.get("ltp", 0) or close),
+            gap_pct,
+            now_ist,
+        )
 
         rows.append(
             {
@@ -836,16 +906,18 @@ def build_first_5m_future_volume_mismatch_alerts(kite):
                 "low": low,
                 "close": close,
                 "volume": volume,
+                "previous_volume_max": previous_volume_max,
                 "gap_pct": gap_pct,
                 "price_color": price_color,
                 "volume_color": volume_color,
+                "option_rows": option_rows,
             }
         )
 
     if processed_candles == 0:
         return []
 
-    first_5m_mismatch_scan_dates.add(scan_date)
+    first_15m_mismatch_scan_dates.add(scan_date)
     if not rows:
         return []
 
@@ -862,14 +934,23 @@ def build_first_5m_future_volume_mismatch_alerts(kite):
             body_lines.append(
                 f"{item['name']} {item['month_label']} FUT: "
                 f"{gap_label} {item['gap_pct']:+.2f}% | "
-                f"Vol {format_volume(item['volume'])} | "
+                f"Vol {format_volume(item['volume'])} > Prev5 Max {format_volume(item['previous_volume_max'])} | "
                 f"Price {item['price_color']} vs Volume {item['volume_color']}"
                 f"{open_extreme_text}"
             )
+            if item.get("option_rows"):
+                body_lines.append("ITM OPTIONS:")
+                for option in item["option_rows"]:
+                    body_lines.append(
+                        f"Strike {option['strike']:.0f} {option['type']} | Symbol: {option['symbol']} | "
+                        f"Gap {option['gap_pct']:+.2f}% | "
+                        f"Vol {format_volume(option['volume'])} > Prev5 Max {format_volume(option['previous_volume_max'])} | "
+                        f"Price {option['price_color']} vs Volume {option['volume_color']}"
+                    )
 
         body = "\n".join(body_lines)
         alerts.append(
-            "FIRST 5M GAP VOLUME MISMATCH\n\n"
+            "FIRST 15M GAP VOLUME MISMATCH\n\n"
             f"{body}"
         )
 
@@ -1314,19 +1395,10 @@ def _build_volume_mismatch_break_messages(title, rows, now_ist):
     return alerts
 
 
-def build_previous_day_future_volume_mismatch_alerts(kite):
-    now_ist = datetime.now(IST)
-    if now_ist.weekday() > 4:
-        return []
-
+def _build_daily_volume_mismatch_setup_rows(kite, now_ist):
     target_day = _get_previous_trading_day(now_ist)
     contracts = _get_active_stock_future_contracts()
     if not contracts:
-        return []
-
-    symbols = [contract["symbol"] for contract in contracts]
-    quote_data = get_symbol_quotes_with_fallback(kite, symbols)
-    if not quote_data:
         return []
 
     lookback_days = max(
@@ -1335,13 +1407,8 @@ def build_previous_day_future_volume_mismatch_alerts(kite):
         10,
     )
 
-    breakout_rows = []
-    breakdown_rows = []
+    setup_rows = []
     for contract in contracts:
-        ltp = quote_data.get(contract["symbol"], {}).get("last_price", 0)
-        if ltp <= 0:
-            continue
-
         candles = _get_recent_daily_candles_until(
             kite,
             contract["token"],
@@ -1392,31 +1459,67 @@ def build_previous_day_future_volume_mismatch_alerts(kite):
                 "previous_volume_max": previous_volume_max,
                 "price_color": price_color,
                 "reference_color": reference_color,
-                "ltp": ltp,
+                "symbol": contract["symbol"],
             }
 
-            for direction, target_rows in (
-                ("BREAKOUT", breakout_rows),
-                ("BREAKDOWN", breakdown_rows),
-            ):
-                if direction == "BREAKOUT" and ltp <= high:
-                    continue
-                if direction == "BREAKDOWN" and ltp >= low:
-                    continue
+            for direction in ("BREAKOUT", "BREAKDOWN"):
                 if _level_was_broken_after(completed, index, direction, high, low):
                     continue
-
-                alert_key = (
-                    f"DAILY_VM_BREAK:{contract['symbol']}:"
-                    f"{candle_day.isoformat()}:{direction}:{now_ist.date().isoformat()}"
-                )
-                if alert_key in daily_mismatch_break_alert_store:
-                    continue
-
-                daily_mismatch_break_alert_store[alert_key] = now_ist
                 row = dict(base_row)
                 row["direction"] = direction
-                target_rows.append(row)
+                setup_rows.append(row)
+
+    return setup_rows
+
+
+def build_previous_day_future_volume_mismatch_alerts(kite):
+    global daily_mismatch_setup_date, daily_mismatch_setup_rows
+
+    now_ist = datetime.now(IST)
+    if now_ist.weekday() > 4:
+        return []
+
+    scan_date = now_ist.date().isoformat()
+    if daily_mismatch_setup_date != scan_date:
+        daily_mismatch_setup_rows = _build_daily_volume_mismatch_setup_rows(kite, now_ist)
+        daily_mismatch_setup_date = scan_date
+        print(f"Daily volume mismatch setup cached: {len(daily_mismatch_setup_rows)} rows")
+
+    if not daily_mismatch_setup_rows:
+        return []
+
+    symbols = sorted({row["symbol"] for row in daily_mismatch_setup_rows})
+    quote_data = get_symbol_quotes_with_fallback(kite, symbols)
+    if not quote_data:
+        return []
+
+    breakout_rows = []
+    breakdown_rows = []
+    for setup in daily_mismatch_setup_rows:
+        ltp = quote_data.get(setup["symbol"], {}).get("last_price", 0)
+        if ltp <= 0:
+            continue
+
+        direction = setup["direction"]
+        if direction == "BREAKOUT" and ltp <= setup["high"]:
+            continue
+        if direction == "BREAKDOWN" and ltp >= setup["low"]:
+            continue
+
+        alert_key = (
+            f"DAILY_VM_BREAK:{setup['symbol']}:"
+            f"{setup['period_sort']}:{direction}:{scan_date}"
+        )
+        if alert_key in daily_mismatch_break_alert_store:
+            continue
+
+        daily_mismatch_break_alert_store[alert_key] = now_ist
+        row = dict(setup)
+        row["ltp"] = ltp
+        if direction == "BREAKOUT":
+            breakout_rows.append(row)
+        else:
+            breakdown_rows.append(row)
 
     alerts = []
     alerts.extend(
@@ -1436,29 +1539,15 @@ def build_previous_day_future_volume_mismatch_alerts(kite):
     return alerts
 
 
-def build_weekly_future_volume_mismatch_alerts(kite):
-    now_ist = datetime.now(IST)
-    if now_ist.weekday() > 4:
-        return []
-
+def _build_weekly_volume_mismatch_setup_rows(kite, now_ist):
     current_week_start = now_ist.date() - timedelta(days=now_ist.weekday())
     previous_week_end = current_week_start - timedelta(days=3)
     contracts = _get_active_stock_future_contracts()
     if not contracts:
         return []
 
-    symbols = [contract["symbol"] for contract in contracts]
-    quote_data = get_symbol_quotes_with_fallback(kite, symbols)
-    if not quote_data:
-        return []
-
-    breakout_rows = []
-    breakdown_rows = []
+    setup_rows = []
     for contract in contracts:
-        ltp = quote_data.get(contract["symbol"], {}).get("last_price", 0)
-        if ltp <= 0:
-            continue
-
         candles = _get_recent_daily_candles_until(
             kite,
             contract["token"],
@@ -1512,31 +1601,68 @@ def build_weekly_future_volume_mismatch_alerts(kite):
                 "previous_volume_max": previous_volume_max,
                 "price_color": price_color,
                 "reference_color": reference_color,
-                "ltp": ltp,
+                "symbol": contract["symbol"],
             }
 
-            for direction, target_rows in (
-                ("BREAKOUT", breakout_rows),
-                ("BREAKDOWN", breakdown_rows),
-            ):
-                if direction == "BREAKOUT" and ltp <= high:
-                    continue
-                if direction == "BREAKDOWN" and ltp >= low:
-                    continue
+            for direction in ("BREAKOUT", "BREAKDOWN"):
                 if _level_was_broken_after(weekly, index, direction, high, low):
                     continue
-
-                alert_key = (
-                    f"WEEKLY_VM_BREAK:{contract['symbol']}:"
-                    f"{week_start.isoformat()}:{direction}:{current_week_start.isoformat()}"
-                )
-                if alert_key in weekly_mismatch_break_alert_store:
-                    continue
-
-                weekly_mismatch_break_alert_store[alert_key] = now_ist
                 row = dict(base_row)
                 row["direction"] = direction
-                target_rows.append(row)
+                setup_rows.append(row)
+
+    return setup_rows
+
+
+def build_weekly_future_volume_mismatch_alerts(kite):
+    global weekly_mismatch_setup_date, weekly_mismatch_setup_rows
+
+    now_ist = datetime.now(IST)
+    if now_ist.weekday() > 4:
+        return []
+
+    scan_date = now_ist.date().isoformat()
+    current_week_start = now_ist.date() - timedelta(days=now_ist.weekday())
+    if weekly_mismatch_setup_date != scan_date:
+        weekly_mismatch_setup_rows = _build_weekly_volume_mismatch_setup_rows(kite, now_ist)
+        weekly_mismatch_setup_date = scan_date
+        print(f"Weekly volume mismatch setup cached: {len(weekly_mismatch_setup_rows)} rows")
+
+    if not weekly_mismatch_setup_rows:
+        return []
+
+    symbols = sorted({row["symbol"] for row in weekly_mismatch_setup_rows})
+    quote_data = get_symbol_quotes_with_fallback(kite, symbols)
+    if not quote_data:
+        return []
+
+    breakout_rows = []
+    breakdown_rows = []
+    for setup in weekly_mismatch_setup_rows:
+        ltp = quote_data.get(setup["symbol"], {}).get("last_price", 0)
+        if ltp <= 0:
+            continue
+
+        direction = setup["direction"]
+        if direction == "BREAKOUT" and ltp <= setup["high"]:
+            continue
+        if direction == "BREAKDOWN" and ltp >= setup["low"]:
+            continue
+
+        alert_key = (
+            f"WEEKLY_VM_BREAK:{setup['symbol']}:"
+            f"{setup['period_sort']}:{direction}:{current_week_start.isoformat()}"
+        )
+        if alert_key in weekly_mismatch_break_alert_store:
+            continue
+
+        weekly_mismatch_break_alert_store[alert_key] = now_ist
+        row = dict(setup)
+        row["ltp"] = ltp
+        if direction == "BREAKOUT":
+            breakout_rows.append(row)
+        else:
+            breakdown_rows.append(row)
 
     alerts = []
     alerts.extend(
@@ -2107,361 +2233,6 @@ def build_weekly_born_breakout_alerts(kite):
     return alerts
 
 
-def _is_close_near_high(candle, top_pct=0.25):
-    try:
-        high = float(candle.get("high", 0) or 0)
-        low = float(candle.get("low", 0) or 0)
-        close = float(candle.get("close", 0) or 0)
-        if high <= low:
-            return False
-        return (high - close) <= (high - low) * float(top_pct)
-    except Exception:
-        return False
-
-
-def _is_close_near_low(candle, bottom_pct=0.25):
-    try:
-        high = float(candle.get("high", 0) or 0)
-        low = float(candle.get("low", 0) or 0)
-        close = float(candle.get("close", 0) or 0)
-        if high <= low:
-            return False
-        return (close - low) <= (high - low) * float(bottom_pct)
-    except Exception:
-        return False
-
-
-def _is_close_near_level_pct(close, level, pct):
-    try:
-        close = float(close or 0)
-        level = float(level or 0)
-        pct = float(pct or 0)
-        if close <= 0 or level <= 0 or pct <= 0:
-            return False
-        return abs(close - level) / level <= (pct / 100.0)
-    except Exception:
-        return False
-
-
-def _get_last_completed_candles(kite, token, interval, interval_minutes, now_ist, lookback=30):
-    # Fetch last two trading days plus current day so 30m/1h patterns have
-    # enough completed candles early in the session.
-    start_day = now_ist.date()
-    for _ in range(2):
-        start_day -= timedelta(days=1)
-        while start_day.weekday() > 4:
-            start_day -= timedelta(days=1)
-    from_time = datetime.combine(start_day, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
-    to_time = now_ist
-    try:
-        candles = get_historical_data_cached(kite, token, from_time, to_time, interval)
-    except Exception as e:
-        print(f"Breakout historical data error for {token} {interval}: {e}")
-        return []
-    if not candles:
-        return []
-    cutoff = now_ist
-    session_close = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
-    if now_ist >= session_close:
-        cutoff = session_close
-    last = _get_latest_completed_candle(candles, interval_minutes, cutoff)
-    if not last:
-        return []
-    last_time = last.get("date")
-    if last_time is None:
-        return []
-    # collect completed candles up to last_time
-    completed = []
-    for c in candles:
-        if c.get("date") is None:
-            continue
-        if c.get("date") <= last_time:
-            completed.append(c)
-    return completed[-lookback:]
-
-
-def build_breakout_reversal_alerts(kite):
-    """
-    Detects 30m/1h breakout reversal pattern on stock futures.
-
-    Pattern (per timeframe):
-    - Volume sequence: v1>50k, v2>v1, v3>v2, v4>v3, and reversal v5 is the highest in lookback
-    - Bullish: 4 candles with lower lows, then reversal candle breaks prev high and closes near its high
-    - Bearish: 4 candles with higher highs, then reversal candle breaks prev low and closes near its low
-    Alerts are rate-limited and sent once per symbol+timeframe per day.
-    """
-    now_ist = datetime.now(IST)
-    if now_ist.weekday() > 4:
-        return []
-
-    due_slot = get_due_breakout_reversal_slot(now_ist)
-    if not due_slot:
-        return []
-
-    alerts = []
-    intervals = [
-        ("30MIN", "30minute", 30),
-        ("1HR", "60minute", 60),
-    ]
-    for label, interval, mins in intervals:
-        if breakout_last_check.get(interval) == due_slot:
-            continue
-        breakout_last_check[interval] = due_slot
-
-        futures = load_stock_futures_data()
-        if futures is None or futures.empty:
-            continue
-
-        # Choose the active (monthly) future per stock name.
-        for name in sorted(set(futures["name"].dropna().tolist())):
-            sym = get_active_future(name)
-            if not sym:
-                continue
-            tradingsymbol = sym.split(":", 1)[1] if ":" in sym else sym
-            rows = futures[futures["tradingsymbol"] == tradingsymbol]
-            if rows.empty:
-                continue
-            token = int(rows.iloc[0]["instrument_token"])
-
-            candles = _get_last_completed_candles(kite, token, interval, mins, now_ist, lookback=30)
-            if len(candles) < 5:
-                continue
-
-            # Use last 5 completed candles for the pattern.
-            c1, c2, c3, c4, c5 = candles[-5], candles[-4], candles[-3], candles[-2], candles[-1]
-            v1 = float(c1.get("volume", 0) or 0)
-            v2 = float(c2.get("volume", 0) or 0)
-            v3 = float(c3.get("volume", 0) or 0)
-            v4 = float(c4.get("volume", 0) or 0)
-            v5 = float(c5.get("volume", 0) or 0)
-            if v1 <= BREAKOUT_MIN_FIRST_VOLUME:
-                continue
-            if not (v2 > v1 and v3 > v2 and v4 > v3):
-                continue
-
-            l1 = float(c1.get("low", 0) or 0)
-            l2 = float(c2.get("low", 0) or 0)
-            l3 = float(c3.get("low", 0) or 0)
-            l4 = float(c4.get("low", 0) or 0)
-            l5 = float(c5.get("low", 0) or 0)
-
-            h1 = float(c1.get("high", 0) or 0)
-            h2 = float(c2.get("high", 0) or 0)
-            h3 = float(c3.get("high", 0) or 0)
-            h4 = float(c4.get("high", 0) or 0)
-            h5 = float(c5.get("high", 0) or 0)
-
-            close1 = float(c1.get("close", 0) or 0)
-            close2 = float(c2.get("close", 0) or 0)
-            close3 = float(c3.get("close", 0) or 0)
-            close4 = float(c4.get("close", 0) or 0)
-            close5 = float(c5.get("close", 0) or 0)
-            # Bullish reversal: 4 lower-lows with rising volume, then a reversal candle that
-            # closes just above the previous candle high (within 0.25%) and is strong (near its high).
-            bullish_ok = (
-                (l2 < l1 and l3 < l2 and l4 < l3)
-                and (close2 < close1 and close3 < close2 and close4 < close3)
-                and (h5 > h4)
-                # Allow close slightly below/above the previous candle high (within 0.25%),
-                # e.g. h4=100, close=99.75 is acceptable.
-                and _is_close_near_level_pct(close5, h4, pct=0.25)
-                and _is_close_near_high(c5, top_pct=0.25)
-            )
-            bearish_ok = (
-                (h2 > h1 and h3 > h2 and h4 > h3)
-                and (close2 > close1 and close3 > close2 and close4 > close3)
-                and (l5 < l4)
-                # Symmetric: close near previous candle low within 0.25%.
-                and _is_close_near_level_pct(close5, l4, pct=0.25)
-                and _is_close_near_low(c5, bottom_pct=0.25)
-            )
-            if not (bullish_ok or bearish_ok):
-                continue
-
-            prev_vol_max = max(float(c.get("volume", 0) or 0) for c in candles[:-1]) if candles[:-1] else 0
-            if v5 <= prev_vol_max:
-                continue
-
-            time5 = c5.get("date")
-            time_txt = time5.astimezone(IST).strftime("%H:%M") if hasattr(time5, "astimezone") else now_ist.strftime("%H:%M")
-
-            if bullish_ok:
-                key = f"BR_BULL_{name}_{label}_{now_ist.date().isoformat()}"
-                if key not in breakout_alert_store:
-                    breakout_alert_store[key] = now_ist
-                    alerts.append(
-                        f"🚨 {label} BULLISH BREAKOUT REVERSAL\n"
-                        f"Symbol: {sym}\n"
-                        f"Close: {close5:.2f} | Break High: {h4:.2f}\n"
-                        f"Vol Seq: {int(v1):,} < {int(v2):,} < {int(v3):,} < {int(v4):,} < {int(v5):,}\n"
-                        f"TIME: {time_txt} IST"
-                    )
-
-            if bearish_ok:
-                key = f"BR_BEAR_{name}_{label}_{now_ist.date().isoformat()}"
-                if key not in breakout_alert_store:
-                    breakout_alert_store[key] = now_ist
-                    alerts.append(
-                        f"🚨 {label} BEAR BREAKOUT REVERSAL\n"
-                        f"Symbol: {sym}\n"
-                        f"Close: {close5:.2f} | Break Low: {l4:.2f}\n"
-                        f"Vol Seq: {int(v1):,} < {int(v2):,} < {int(v3):,} < {int(v4):,} < {int(v5):,}\n"
-                        f"TIME: {time_txt} IST"
-                    )
-
-    return alerts
-
-
-def build_30m_future_volume_blast_alerts(kite):
-    global volume_blast_last_slot
-
-    now_ist = datetime.now(IST)
-    if now_ist.weekday() > 4:
-        return []
-
-    due_slot = get_due_volume_blast_slot(now_ist)
-    if not due_slot:
-        return []
-
-    if volume_blast_last_slot == due_slot:
-        return []
-    volume_blast_last_slot = due_slot
-
-    contracts = _get_active_stock_future_contracts()
-    if not contracts:
-        return []
-
-    alerts = []
-    lookback = (
-        VOLUME_BLAST_LOOKAHEAD_CANDLES
-        + VOLUME_BLAST_PREVIOUS_QUIET_CANDLES
-        + 15
-    )
-
-    for contract in contracts:
-        symbol = contract["symbol"]
-        token = int(contract["token"])
-
-        candles = _get_last_completed_candles(
-            kite,
-            token,
-            "30minute",
-            30,
-            now_ist,
-            lookback=lookback,
-        )
-
-        if len(candles) < 2:
-            continue
-        latest_completed_time = candles[-1].get("date")
-
-        for i, base in enumerate(candles[:-1]):
-            if i < VOLUME_BLAST_PREVIOUS_QUIET_CANDLES:
-                continue
-
-            previous_candles = candles[i - VOLUME_BLAST_PREVIOUS_QUIET_CANDLES:i]
-            previous_high_volume = any(
-                float(c.get("volume", 0) or 0) >= VOLUME_BLAST_MIN_VOLUME
-                for c in previous_candles
-            )
-            if previous_high_volume:
-                continue
-
-            base_volume = float(base.get("volume", 0) or 0)
-            if base_volume <= VOLUME_BLAST_MIN_VOLUME:
-                continue
-
-            base_high = float(base.get("high", 0) or 0)
-            base_low = float(base.get("low", 0) or 0)
-            if base_high <= 0 or base_low <= 0:
-                continue
-
-            base_time = base.get("date")
-            if base_time is None:
-                continue
-
-            watch_end = min(i + 1 + VOLUME_BLAST_LOOKAHEAD_CANDLES, len(candles))
-
-            for break_index in range(i + 1, watch_end):
-                break_candle = candles[break_index]
-                break_close = float(break_candle.get("close", 0) or 0)
-                if break_close <= 0:
-                    continue
-
-                break_time = break_candle.get("date")
-                break_time_txt = (
-                    break_time.astimezone(IST).strftime("%H:%M")
-                    if hasattr(break_time, "astimezone")
-                    else str(break_time)
-                )
-                base_time_txt = (
-                    base_time.astimezone(IST).strftime("%H:%M")
-                    if hasattr(base_time, "astimezone")
-                    else str(base_time)
-                )
-
-                direction = None
-                level = None
-                if break_close > base_high:
-                    direction = "BULLISH"
-                    level = base_high
-                elif break_close < base_low:
-                    direction = "BEARISH"
-                    level = base_low
-
-                if not direction:
-                    continue
-
-                confirm_index = break_index + 1
-                if confirm_index >= len(candles):
-                    break
-
-                confirm_candle = candles[confirm_index]
-                confirm_time = confirm_candle.get("date")
-                if confirm_time != latest_completed_time:
-                    break
-
-                confirm_high = float(confirm_candle.get("high", 0) or 0)
-                confirm_low = float(confirm_candle.get("low", 0) or 0)
-                time_txt = (
-                    confirm_time.astimezone(IST).strftime("%H:%M")
-                    if hasattr(confirm_time, "astimezone")
-                    else now_ist.strftime("%H:%M")
-                )
-                if direction == "BULLISH":
-                    confirmed = confirm_high > break_close
-                    confirm_value = confirm_high
-                else:
-                    confirmed = confirm_low < break_close
-                    confirm_value = confirm_low
-
-                if not confirmed:
-                    break
-
-                alert_key = (
-                    f"VOL_BLAST_30M:{symbol}:"
-                    f"{base_time_txt}:{direction}:"
-                    f"{now_ist.date().isoformat()}"
-                )
-                if alert_key in volume_blast_alert_store:
-                    break
-
-                volume_blast_alert_store[alert_key] = now_ist
-                alerts.append(
-                    f"🚨 30MIN FUTURE VOLUME BLAST {direction}\n"
-                    f"Symbol: {symbol}\n"
-                    f"Blast Candle: {base_time_txt} | Vol {format_volume(base_volume)}\n"
-                    f"High: {base_high:.2f} | Low: {base_low:.2f}\n"
-                    f"Break Candle: {break_time_txt} | Close {break_close:.2f} | Level {level:.2f}\n"
-                    f"Confirm Cross: {confirm_value:.2f}\n"
-                    f"Watch: next {VOLUME_BLAST_LOOKAHEAD_CANDLES} candles | Previous {VOLUME_BLAST_PREVIOUS_QUIET_CANDLES} below {format_volume(VOLUME_BLAST_MIN_VOLUME)}\n"
-                    f"TIME: {time_txt} IST"
-                )
-                break
-
-    return alerts
-
-
 def process_future_burst(symbol, name, ltp, oi, alerts_list, stats=None):
     if not is_burst_underlying(name):
         return
@@ -2765,16 +2536,16 @@ def calculate_gap_alerts(kite, batch_index=0, max_quote_symbols=500):
 
 def calculate_historical_alerts(kite):
     alerts = []
-    alerts.extend(calculate_first_5m_alerts(kite))
+    alerts.extend(calculate_first_15m_alerts(kite))
     alerts.extend(calculate_other_historical_alerts(kite))
     return alerts
 
 
-def calculate_first_5m_alerts(kite):
+def calculate_first_15m_alerts(kite):
     if non_burst_alerts_paused_today():
         return []
 
-    return build_first_5m_future_volume_mismatch_alerts(kite)
+    return build_first_15m_future_volume_mismatch_alerts(kite)
 
 
 def calculate_other_historical_alerts(kite):
@@ -2786,8 +2557,6 @@ def calculate_other_historical_alerts(kite):
     alerts.extend(build_weekly_future_volume_mismatch_alerts(kite))
     alerts.extend(build_monthly_future_r3_pivot_alerts(kite))
     alerts.extend(build_stock_future_1hr_s4_alerts(kite))
-    alerts.extend(build_breakout_reversal_alerts(kite))
-    alerts.extend(build_30m_future_volume_blast_alerts(kite))
     alerts.extend(build_weekly_born_breakout_alerts(kite))
     return alerts
 
@@ -2841,7 +2610,5 @@ def calculate_heatmap(kite):
     gap_alerts = build_monthly_future_gap_alerts(kite)
     gap_alerts.extend(build_monthly_future_r3_pivot_alerts(kite))
     gap_alerts.extend(build_stock_future_1hr_s4_alerts(kite))
-    gap_alerts.extend(build_breakout_reversal_alerts(kite))
-    gap_alerts.extend(build_30m_future_volume_blast_alerts(kite))
     gap_alerts.extend(build_weekly_born_breakout_alerts(kite))
     return 0, "", bn_alerts, stock_alerts, gap_alerts
