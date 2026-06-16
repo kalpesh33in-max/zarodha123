@@ -432,7 +432,11 @@ def get_active_future(name):
     if futures.empty:
         return None
 
-    preferred_expiry = get_monthly_expiry(futures["expiry"].unique())
+    if is_mcx_underlying(name):
+        preferred_expiry = get_next_monthly_expiry(futures["expiry"].unique())
+    else:
+        preferred_expiry = get_monthly_expiry(futures["expiry"].unique())
+
     if preferred_expiry is None:
         return None
 
