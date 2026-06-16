@@ -1072,7 +1072,11 @@ def get_relevant_options(name, ltp, strike_range=None):
     if options.empty:
         return pd.DataFrame()
 
-    monthly_expiry = get_monthly_expiry(options["expiry"].unique())
+    if is_mcx_underlying(name):
+        monthly_expiry = get_next_monthly_expiry(options["expiry"].unique())
+    else:
+        monthly_expiry = get_monthly_expiry(options["expiry"].unique())
+
     selected_expiries = [monthly_expiry] if monthly_expiry is not None else []
 
     if not selected_expiries:
@@ -2717,6 +2721,19 @@ def calculate_heatmap(kite):
         ltp = d["last_price"]
         oi = d.get("oi", 0)
         target_alerts = bn_alerts if is_index_underlying(name) else stock_alerts
+
+        process_future_burst(sym, name, ltp, oi, target_alerts)
+        process_option_logic(name, underlying_map.get(name, (pd.DataFrame(), 0)), opt_quotes, target_alerts)
+
+    if non_burst_alerts_paused_today():
+        return 0, "", bn_alerts, stock_alerts, []
+
+    gap_alerts = build_monthly_future_gap_alerts(kite)
+    gap_alerts.extend(build_stock_future_1hr_s4_alerts(kite))
+    gap_alerts.extend(build_weekly_born_breakout_alerts(kite))
+    return 0, "", bn_alerts, stock_alerts, gap_alerts
+
+_underlying(name) else stock_alerts
 
         process_future_burst(sym, name, ltp, oi, target_alerts)
         process_option_logic(name, underlying_map.get(name, (pd.DataFrame(), 0)), opt_quotes, target_alerts)
