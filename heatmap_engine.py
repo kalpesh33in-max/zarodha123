@@ -64,6 +64,7 @@ NSE_BURST_TRACK_NAMES = [
 ]
 MCX_BURST_TRACK_NAMES = [
     "CRUDEOIL",
+    "CRUDEOILM",
 ]
 MCX_BURST_NAMES = set(MCX_BURST_TRACK_NAMES)
 BURST_TRACK_NAMES = NSE_BURST_TRACK_NAMES
@@ -332,7 +333,68 @@ def load_stock_futures_data():
 def get_spot_symbol(name):
     if name == "BANKNIFTY":
         return INDEX_SYMBOL
+    if is_mcx_underlying(name):
+        return f"MCX:{name}"
     return f"NSE:{name}"
+
+def _get_active_stock_future_contracts():
+    futures = load_stock_futures_data()
+    if futures.empty:
+        return []
+    return futures.to_dict("records")
+
+def _get_all_active_future_contracts():
+    df = load_futures_data()
+    if df is None or df.empty:
+        return []
+    # Include NFO-FUT and MCX-FUT
+    mask = (df["exchange"].isin(["NFO", "MCX"])) & (df["segment"].str.contains("-FUT", na=False))
+    futures = df[mask].copy()
+    if futures.empty:
+        return []
+
+    futures = futures.sort_values(["name", "expiry", "tradingsymbol"])
+    contracts = []
+    for name, rows in futures.groupby("name"):
+        preferred_expiry = get_monthly_expiry(rows["expiry"].unique())
+        if preferred_expiry is None:
+            continue
+
+        selected = rows[rows["expiry"] == preferred_expiry]
+        if selected.empty:
+            continue
+
+        row = selected.iloc[0]
+        current_expiry = row["expiry"]
+        exchange = str(row.get("exchange", "") or "").strip() or "NFO"
+        next_futures = rows[rows["expiry"] > current_expiry]
+
+        next_symbol = None
+        next_month_label = "Next"
+        next_token = None
+        next_expiry = None
+        if not next_futures.empty:
+            next_row = next_futures.iloc[0]
+            next_exchange = str(next_row.get("exchange", "") or "").strip() or "NFO"
+            next_symbol = f"{next_exchange}:{next_row['tradingsymbol']}"
+            next_month_label = _format_month_label(next_row["expiry"])
+            next_token = int(next_row["instrument_token"])
+            next_expiry = next_row["expiry"]
+
+        contracts.append(
+            {
+                "name": name,
+                "symbol": f"{exchange}:{row['tradingsymbol']}",
+                "token": int(row["instrument_token"]),
+                "expiry": current_expiry,
+                "month_label": _format_month_label(current_expiry),
+                "next_symbol": next_symbol,
+                "next_month_label": next_month_label,
+                "next_token": next_token,
+                "next_expiry": next_expiry,
+            }
+        )
+    return contracts
 
 
 def get_active_future(name):
@@ -1103,7 +1165,7 @@ def build_monthly_future_gap_alerts(kite, batch_index=None, max_quote_symbols=No
     if now_ist.weekday() > 4 or now_ist.time() < MONTHLY_FUTURE_GAP_START_TIME:
         return []
 
-    future_contracts = _get_active_stock_future_contracts()
+    future_contracts = _get_all_active_future_contracts()
     if not future_contracts:
         return []
 
@@ -2589,7 +2651,6 @@ def calculate_other_historical_alerts(kite):
     alerts = []
     alerts.extend(build_previous_day_future_volume_mismatch_alerts(kite))
     alerts.extend(build_weekly_future_volume_mismatch_alerts(kite))
-    alerts.extend(build_monthly_future_r3_pivot_alerts(kite))
     alerts.extend(build_stock_future_1hr_s4_alerts(kite))
     alerts.extend(build_weekly_born_breakout_alerts(kite))
     return alerts
@@ -2642,7 +2703,6 @@ def calculate_heatmap(kite):
         return 0, "", bn_alerts, stock_alerts, []
 
     gap_alerts = build_monthly_future_gap_alerts(kite)
-    gap_alerts.extend(build_monthly_future_r3_pivot_alerts(kite))
     gap_alerts.extend(build_stock_future_1hr_s4_alerts(kite))
     gap_alerts.extend(build_weekly_born_breakout_alerts(kite))
     return 0, "", bn_alerts, stock_alerts, gap_alerts

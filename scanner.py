@@ -185,7 +185,7 @@ def _gap_loop(kite, dispatcher, stop_event):
     batch_index = 0
     while not stop_event.is_set():
         now = datetime.now(IST)
-        if _is_market_open(now):
+        if _is_any_scanner_session(now):
             try:
                 alerts = calculate_gap_alerts(
                     kite,
