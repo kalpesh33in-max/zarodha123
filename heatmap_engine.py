@@ -288,6 +288,24 @@ def get_monthly_expiry(expiries, rollover_days=1):
     return ordered_monthlies[-1]
 
 
+def get_next_monthly_expiry(expiries):
+    valid_expiries = sorted(exp for exp in expiries if pd.notna(exp))
+    if not valid_expiries:
+        return None
+
+    now_ist = datetime.now(IST)
+    month_last_expiries = {}
+    for expiry in valid_expiries:
+        month_last_expiries[(int(expiry.year), int(expiry.month))] = expiry
+
+    ordered_monthlies = [month_last_expiries[key] for key in sorted(month_last_expiries)]
+    future_monthlies = [exp for exp in ordered_monthlies if exp.date() >= now_ist.date()]
+
+    if len(future_monthlies) >= 2:
+        return future_monthlies[1]
+    return future_monthlies[0] if future_monthlies else ordered_monthlies[-1]
+
+
 def load_options_data():
     global _options_df
     if _options_df is None:
