@@ -159,6 +159,7 @@ def _burst_loop(kite, dispatcher, stop_event):
                         print(message)
 
                 for alert in bn_alerts:
+                    print(f"DEBUG: Sending BN/Index alert to {TELE_CHAT_ID_BN}")
                     dispatcher.send(
                         PRIORITY_BURST,
                         alert,
@@ -166,6 +167,7 @@ def _burst_loop(kite, dispatcher, stop_event):
                         token=TELE_TOKEN_BN,
                     )
                 for alert in stock_alerts:
+                    print(f"DEBUG: Sending Stock/MCX alert to {TELE_CHAT_ID_BN}")
                     dispatcher.send(
                         PRIORITY_BURST,
                         alert,

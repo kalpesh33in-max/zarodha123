@@ -72,7 +72,7 @@ BURST_OPTION_STRIKE_RANGE = 30
 STOCK_BURST_OPTION_STRIKE_RANGE = int(os.getenv("STOCK_BURST_OPTION_STRIKE_RANGE", "10"))
 MCX_BURST_OPTION_STRIKE_RANGE = int(os.getenv("MCX_BURST_OPTION_STRIKE_RANGE", "10"))
 BURST_THRESHOLD_LOTS = 100
-MCX_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_BURST_THRESHOLD_LOTS", "100"))
+MCX_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_BURST_THRESHOLD_LOTS", "1"))
 BURST_REST_FALLBACK_CACHE_SECONDS = int(os.getenv("BURST_REST_FALLBACK_CACHE_SECONDS", "3"))
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 INDEX_FUTURE_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "SENSEX50"}
@@ -331,8 +331,17 @@ def load_stock_futures_data():
 
 
 def get_spot_symbol(name):
-    if name == "BANKNIFTY":
-        return INDEX_SYMBOL
+    INDEX_SPOT_MAP = {
+        "NIFTY": "NSE:NIFTY 50",
+        "BANKNIFTY": "NSE:NIFTY BANK",
+        "FINNIFTY": "NSE:NIFTY FIN SERVICE",
+        "MIDCPNIFTY": "NSE:NIFTY MID SELECT",
+        "SENSEX": "BSE:SENSEX",
+        "CRUDEOIL": "MCX:MCXCRUDEX",
+        "CRUDEOILM": "MCX:MCXCRUDEX",
+    }
+    if name in INDEX_SPOT_MAP:
+        return INDEX_SPOT_MAP[name]
     if is_mcx_underlying(name):
         return f"MCX:{name}"
     return f"NSE:{name}"
@@ -2518,7 +2527,9 @@ def calculate_burst_alerts(kite):
     fut_symbols = get_burst_futures(kite, track_names)
     symbols = list(fut_symbols)
     if session == "nse":
-        symbols.append(INDEX_SYMBOL)
+        for name in track_names:
+            if is_index_underlying(name):
+                symbols.append(get_spot_symbol(name))
     fut_by_name = _map_tracked_futures_by_name(fut_symbols, track_names)
 
     quote_source = "websocket"
@@ -2658,7 +2669,12 @@ def calculate_other_historical_alerts(kite):
 
 def calculate_heatmap(kite):
     fut_symbols = get_bank_futures(kite)
-    symbols = fut_symbols + [INDEX_SYMBOL]
+    symbols = list(fut_symbols)
+    # Dynamically add spots for tracked indices
+    for name in NSE_BURST_TRACK_NAMES:
+        if is_index_underlying(name):
+            symbols.append(get_spot_symbol(name))
+
     data = get_symbol_quotes_with_fallback(kite, symbols)
     if not data:
         return 0, "", [], [], []
