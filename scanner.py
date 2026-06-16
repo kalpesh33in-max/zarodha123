@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from env_config import TELE_CHAT_ID_BN, TELE_TOKEN_BN
 from heatmap_engine import (
     calculate_burst_alerts,
-    calculate_first_15m_alerts,
+    calculate_first_30m_alerts,
     calculate_gap_alerts,
     calculate_other_historical_alerts,
     get_burst_monitor_status,
@@ -47,7 +47,7 @@ SEND_MCX_MONITOR_STATUS = _env_flag("SEND_MCX_MONITOR_STATUS", False)
 
 PRIORITY_BURST = 1
 PRIORITY_GAP = 2
-PRIORITY_FIRST_15M = 3
+PRIORITY_FIRST_30M = 3
 PRIORITY_HISTORICAL = 4
 PRIORITY_STATUS = 5
 
@@ -208,10 +208,10 @@ def _historical_loop(kite, dispatcher, stop_event):
     while not stop_event.is_set():
         now = datetime.now(IST)
         if _is_market_open(now):
-            try:
-                first_15m_alerts = calculate_first_15m_alerts(kite)
-                for alert in first_15m_alerts:
-                    dispatcher.send(PRIORITY_FIRST_15M, alert)
+            # 2. First 30m Alerts
+            first_30m_alerts = calculate_first_30m_alerts(kite)
+            for alert in first_30m_alerts:
+                dispatcher.send(PRIORITY_FIRST_30M, alert)
 
                 alerts = calculate_other_historical_alerts(kite)
                 for alert in alerts:
