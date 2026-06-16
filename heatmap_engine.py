@@ -86,8 +86,8 @@ r3_watch_last_sent_time = None
 s4_alert_store = {}
 s4_state_store = {}
 s4_last_slot = None
-first_15m_mismatch_scan_dates = set()
-first_15m_mismatch_last_scan_time = None
+first_30m_mismatch_scan_dates = set()
+first_30m_mismatch_last_scan_time = None
 daily_mismatch_break_alert_store = {}
 weekly_mismatch_break_alert_store = {}
 daily_mismatch_setup_date = None
@@ -141,12 +141,12 @@ BORN_BREAKOUT_AFTERNOON_END_TIME = datetime.strptime("15:30", "%H:%M").time()
 BORN_BREAKOUT_CHECK_INTERVAL_SECONDS = 1800
 BORN_BREAKOUT_LOOKBACK_DAYS = 180
 # Pause non-burst reports only for this date. They resume automatically the next day.
-FIRST_15M_MISMATCH_CANDLE_START_TIME = datetime.strptime("09:15", "%H:%M").time()
-FIRST_15M_MISMATCH_SCAN_START_TIME = datetime.strptime("09:30", "%H:%M").time()
-FIRST_15M_MISMATCH_GAP_THRESHOLD_PCT = float(os.getenv("FIRST_15M_MISMATCH_GAP_THRESHOLD_PCT", "1.0"))
-FIRST_15M_MISMATCH_MIN_VOLUME = int(os.getenv("FIRST_15M_MISMATCH_MIN_VOLUME", "100000"))
-FIRST_15M_MISMATCH_RETRY_SECONDS = 120
-FIRST_15M_OPTION_ITM_COUNT = int(os.getenv("FIRST_15M_OPTION_ITM_COUNT", "4"))
+FIRST_30M_MISMATCH_CANDLE_START_TIME = datetime.strptime("09:15", "%H:%M").time()
+FIRST_30M_MISMATCH_SCAN_START_TIME = datetime.strptime("09:45", "%H:%M").time()
+FIRST_30M_MISMATCH_GAP_THRESHOLD_PCT = float(os.getenv("FIRST_30M_MISMATCH_GAP_THRESHOLD_PCT", "1.0"))
+FIRST_30M_MISMATCH_MIN_VOLUME = int(os.getenv("FIRST_30M_MISMATCH_MIN_VOLUME", "100000"))
+FIRST_30M_MISMATCH_RETRY_SECONDS = 120
+FIRST_30M_OPTION_ITM_COUNT = int(os.getenv("FIRST_30M_OPTION_ITM_COUNT", "4"))
 DAILY_WEEKLY_MISMATCH_MIN_VOLUME = int(os.getenv("DAILY_WEEKLY_MISMATCH_MIN_VOLUME", "1000000"))
 PREVIOUS_DAY_MISMATCH_LOOKBACK_DAYS = int(os.getenv("PREVIOUS_DAY_MISMATCH_LOOKBACK_DAYS", "20"))
 WEEKLY_MISMATCH_LOOKBACK_DAYS = int(os.getenv("WEEKLY_MISMATCH_LOOKBACK_DAYS", "100"))
@@ -185,8 +185,10 @@ def get_burst_session(now_ist=None):
         return None
 
     t = now_ist.time()
+    # NSE session ends at 15:30:00
     if NSE_BURST_START_TIME <= t < NSE_BURST_END_TIME:
         return "nse"
+    # MCX session starts at 15:30:00
     if MCX_BURST_START_TIME <= t <= MCX_BURST_END_TIME:
         return "mcx"
     return None
@@ -608,7 +610,7 @@ def _get_active_index_future_contracts():
     return contracts
 
 
-def _get_first_15m_future_contracts():
+def _get_first_30m_future_contracts():
     contracts = []
     seen_symbols = set()
 
@@ -664,17 +666,17 @@ def _open_extreme_label(open_price, high, low):
     return ""
 
 
-def _get_first_15m_candle(kite, token, now_ist):
+def _get_first_30m_candle(kite, token, now_ist):
     session_start = datetime.combine(
         now_ist.date(),
-        FIRST_15M_MISMATCH_CANDLE_START_TIME,
+        FIRST_30M_MISMATCH_CANDLE_START_TIME,
         tzinfo=IST,
     )
-    session_end = session_start + timedelta(minutes=15)
+    session_end = session_start + timedelta(minutes=30)
     try:
-        candles = kite_historical_data(kite, token, session_start, session_end, "15minute")
+        candles = kite_historical_data(kite, token, session_start, session_end, "30minute")
     except Exception as e:
-        print(f"First 15m historical data error for {token}: {e}")
+        print(f"First 30m historical data error for {token}: {e}")
         return None
 
     for candle in candles:
@@ -684,7 +686,7 @@ def _get_first_15m_candle(kite, token, now_ist):
         if (
             candle_time
             and candle_time.date() == now_ist.date()
-            and candle_time.time() == FIRST_15M_MISMATCH_CANDLE_START_TIME
+            and candle_time.time() == FIRST_30M_MISMATCH_CANDLE_START_TIME
         ):
             return candle
 
@@ -698,13 +700,13 @@ def _get_first_15m_candle(kite, token, now_ist):
     return None
 
 
-def _get_first_15m_candle_context(kite, token, now_ist, label="First 15m"):
+def _get_first_30m_candle_context(kite, token, now_ist, label="First 30m"):
     session_start = datetime.combine(
         now_ist.date(),
-        FIRST_15M_MISMATCH_CANDLE_START_TIME,
+        FIRST_30M_MISMATCH_CANDLE_START_TIME,
         tzinfo=IST,
     )
-    session_end = session_start + timedelta(minutes=15)
+    session_end = session_start + timedelta(minutes=30)
     prev_day = _get_previous_trading_day(now_ist)
     from_time = datetime.combine(
         prev_day,
@@ -713,7 +715,7 @@ def _get_first_15m_candle_context(kite, token, now_ist, label="First 15m"):
     )
 
     try:
-        candles = get_historical_data_cached(kite, token, from_time, session_end, "15minute")
+        candles = get_historical_data_cached(kite, token, from_time, session_end, "30minute")
     except Exception as e:
         print(f"{label} historical data error for {token}: {e}")
         return None
@@ -732,7 +734,7 @@ def _get_first_15m_candle_context(kite, token, now_ist, label="First 15m"):
     for index, (candle_time, _) in enumerate(normalized):
         if (
             candle_time.date() == now_ist.date()
-            and candle_time.time() == FIRST_15M_MISMATCH_CANDLE_START_TIME
+            and candle_time.time() == FIRST_30M_MISMATCH_CANDLE_START_TIME
         ):
             first_index = index
             break
@@ -753,7 +755,7 @@ def _get_first_15m_candle_context(kite, token, now_ist, label="First 15m"):
     }
 
 
-def _get_first_15m_itm_options(name, ltp, option_type, count=None):
+def _get_first_30m_itm_options(name, ltp, option_type, count=None):
     df = load_options_data()
     if df is None or df.empty or ltp <= 0:
         return pd.DataFrame()
@@ -778,20 +780,20 @@ def _get_first_15m_itm_options(name, ltp, option_type, count=None):
     else:
         options = options[options["strike"] > ltp].sort_values("strike", ascending=True)
 
-    limit = count if count is not None else FIRST_15M_OPTION_ITM_COUNT
+    limit = count if count is not None else FIRST_30M_OPTION_ITM_COUNT
     return options.head(max(0, int(limit))).copy()
 
 
-def _build_first_15m_option_mismatch_rows(kite, name, ltp, gap_pct, now_ist):
+def _build_first_30m_option_mismatch_rows(kite, name, ltp, gap_pct, now_ist):
     option_type = "PE" if gap_pct > 0 else "CE"
     rows = []
 
-    for _, option in _get_first_15m_itm_options(name, ltp, option_type).iterrows():
-        context = _get_first_15m_candle_context(
+    for _, option in _get_first_30m_itm_options(name, ltp, option_type).iterrows():
+        context = _get_first_30m_candle_context(
             kite,
             int(option["instrument_token"]),
             now_ist,
-            label="First 15m option",
+            label="First 30m option",
         )
         if not context:
             continue
@@ -804,11 +806,11 @@ def _build_first_15m_option_mismatch_rows(kite, name, ltp, gap_pct, now_ist):
         volume = float(candle.get("volume", 0) or 0)
         if previous_close <= 0 or open_price <= 0 or close <= 0:
             continue
-        if volume <= FIRST_15M_MISMATCH_MIN_VOLUME or volume <= previous_volume_max:
+        if volume <= FIRST_30M_MISMATCH_MIN_VOLUME or volume <= previous_volume_max:
             continue
 
         option_gap_pct = ((open_price - previous_close) / previous_close) * 100
-        if abs(option_gap_pct) < FIRST_15M_MISMATCH_GAP_THRESHOLD_PCT:
+        if abs(option_gap_pct) < FIRST_30M_MISMATCH_GAP_THRESHOLD_PCT:
             continue
 
         price_color = _candle_color(open_price, close)
@@ -832,26 +834,26 @@ def _build_first_15m_option_mismatch_rows(kite, name, ltp, gap_pct, now_ist):
     return rows
 
 
-def build_first_15m_future_volume_mismatch_alerts(kite):
-    global first_15m_mismatch_last_scan_time
+def build_first_30m_future_volume_mismatch_alerts(kite):
+    global first_30m_mismatch_last_scan_time
 
     now_ist = datetime.now(IST)
-    if now_ist.weekday() > 4 or now_ist.time() < FIRST_15M_MISMATCH_SCAN_START_TIME:
+    if now_ist.weekday() > 4 or now_ist.time() < FIRST_30M_MISMATCH_SCAN_START_TIME:
         return []
 
     scan_date = now_ist.date().isoformat()
-    if scan_date in first_15m_mismatch_scan_dates:
+    if scan_date in first_30m_mismatch_scan_dates:
         return []
 
     if (
-        first_15m_mismatch_last_scan_time
-        and (now_ist - first_15m_mismatch_last_scan_time).total_seconds()
-        < FIRST_15M_MISMATCH_RETRY_SECONDS
+        first_30m_mismatch_last_scan_time
+        and (now_ist - first_30m_mismatch_last_scan_time).total_seconds()
+        < FIRST_30M_MISMATCH_RETRY_SECONDS
     ):
         return []
-    first_15m_mismatch_last_scan_time = now_ist
+    first_30m_mismatch_last_scan_time = now_ist
 
-    contracts = _get_first_15m_future_contracts()
+    contracts = _get_first_30m_future_contracts()
     if not contracts:
         return []
 
@@ -871,7 +873,7 @@ def build_first_15m_future_volume_mismatch_alerts(kite):
             continue
 
         rough_gap_pct = ((day_open - previous_close) / previous_close) * 100
-        if abs(rough_gap_pct) < FIRST_15M_MISMATCH_GAP_THRESHOLD_PCT:
+        if abs(rough_gap_pct) < FIRST_30M_MISMATCH_GAP_THRESHOLD_PCT:
             continue
 
         item = dict(contract)
@@ -880,17 +882,17 @@ def build_first_15m_future_volume_mismatch_alerts(kite):
         candidates.append(item)
 
     if not candidates:
-        first_15m_mismatch_scan_dates.add(scan_date)
+        first_30m_mismatch_scan_dates.add(scan_date)
         return []
 
     rows = []
     processed_candles = 0
     for contract in candidates:
-        context = _get_first_15m_candle_context(
+        context = _get_first_30m_candle_context(
             kite,
             contract["token"],
             now_ist,
-            label="First 15m future",
+            label="First 30m future",
         )
         if not context:
             continue
@@ -907,11 +909,11 @@ def build_first_15m_future_volume_mismatch_alerts(kite):
         volume = float(candle.get("volume", 0) or 0)
         if previous_close <= 0 or historical_previous_close <= 0 or open_price <= 0 or close <= 0:
             continue
-        if volume <= FIRST_15M_MISMATCH_MIN_VOLUME or volume <= previous_volume_max:
+        if volume <= FIRST_30M_MISMATCH_MIN_VOLUME or volume <= previous_volume_max:
             continue
 
         gap_pct = ((open_price - previous_close) / previous_close) * 100
-        if abs(gap_pct) < FIRST_15M_MISMATCH_GAP_THRESHOLD_PCT:
+        if abs(gap_pct) < FIRST_30M_MISMATCH_GAP_THRESHOLD_PCT:
             continue
 
         price_color = _candle_color(open_price, close)
@@ -919,7 +921,7 @@ def build_first_15m_future_volume_mismatch_alerts(kite):
         if not price_color or not volume_color or price_color == volume_color:
             continue
 
-        option_rows = _build_first_15m_option_mismatch_rows(
+        option_rows = _build_first_30m_option_mismatch_rows(
             kite,
             contract["name"],
             float(contract.get("ltp", 0) or close),
@@ -950,7 +952,7 @@ def build_first_15m_future_volume_mismatch_alerts(kite):
     if processed_candles == 0:
         return []
 
-    first_15m_mismatch_scan_dates.add(scan_date)
+    first_30m_mismatch_scan_dates.add(scan_date)
     if not rows:
         return []
 
@@ -983,7 +985,7 @@ def build_first_15m_future_volume_mismatch_alerts(kite):
 
         body = "\n".join(body_lines)
         alerts.append(
-            "FIRST 15M GAP VOLUME MISMATCH\n\n"
+            "FIRST 30M GAP VOLUME MISMATCH\n\n"
             f"{body}"
         )
 
@@ -1782,7 +1784,6 @@ def build_monthly_future_r3_pivot_alerts(kite):
     # previous trading session, but the H/L/C can differ slightly per timeframe
     # because they are derived from that timeframe's candles.
     intervals = [
-        ("15MIN", "15minute", 15),
         ("1HR", "60minute", 60),
     ]
 
@@ -1834,11 +1835,11 @@ def build_monthly_future_r3_pivot_alerts(kite):
             if high <= 0 or low <= 0 or prev_close <= 0:
                 continue
 
-            # Zerodha Kite "standard" pivots use PP=(H+L+C)/3 and:
-            # R3 = PP + 2*(H-L), S3 = PP - 2*(H-L)
-            # (R3/S3 differ from the classic floor-trader formula.)
+            # Calculate Classic Floor Pivot R3: R3 = High + 2 * (Pivot - Low)
+            # This matches most standard charting platforms and is more reachable than PP + 2*(H-L).
             pivot = (high + low + prev_close) / 3
-            r3 = pivot + (2 * (high - low))
+            r3 = high + (2 * (pivot - low))
+            
             close_diff_pct = ((prev_close - r3) / r3) * 100 if r3 else 0
             diff_pct = ((ltp - r3) / r3) * 100
             matched.append(
@@ -2569,16 +2570,16 @@ def calculate_gap_alerts(kite, batch_index=0, max_quote_symbols=500):
 
 def calculate_historical_alerts(kite):
     alerts = []
-    alerts.extend(calculate_first_15m_alerts(kite))
+    alerts.extend(calculate_first_30m_alerts(kite))
     alerts.extend(calculate_other_historical_alerts(kite))
     return alerts
 
 
-def calculate_first_15m_alerts(kite):
+def calculate_first_30m_alerts(kite):
     if non_burst_alerts_paused_today():
         return []
 
-    return build_first_15m_future_volume_mismatch_alerts(kite)
+    return build_first_30m_future_volume_mismatch_alerts(kite)
 
 
 def calculate_other_historical_alerts(kite):
