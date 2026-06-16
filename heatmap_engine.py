@@ -2732,16 +2732,3 @@ def calculate_heatmap(kite):
     gap_alerts.extend(build_stock_future_1hr_s4_alerts(kite))
     gap_alerts.extend(build_weekly_born_breakout_alerts(kite))
     return 0, "", bn_alerts, stock_alerts, gap_alerts
-
-_underlying(name) else stock_alerts
-
-        process_future_burst(sym, name, ltp, oi, target_alerts)
-        process_option_logic(name, underlying_map.get(name, (pd.DataFrame(), 0)), opt_quotes, target_alerts)
-
-    if non_burst_alerts_paused_today():
-        return 0, "", bn_alerts, stock_alerts, []
-
-    gap_alerts = build_monthly_future_gap_alerts(kite)
-    gap_alerts.extend(build_stock_future_1hr_s4_alerts(kite))
-    gap_alerts.extend(build_weekly_born_breakout_alerts(kite))
-    return 0, "", bn_alerts, stock_alerts, gap_alerts
