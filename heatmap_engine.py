@@ -1169,6 +1169,9 @@ def build_monthly_future_gap_alerts(kite, batch_index=None, max_quote_symbols=No
     if not future_contracts:
         return []
 
+    if batch_index == 0 or batch_index is None:
+        print(f"Gap scanner: found {len(future_contracts)} future contracts for reporting.")
+
     symbol_pairs = [
         (
             contract["name"],
@@ -1226,9 +1229,6 @@ def build_monthly_future_gap_alerts(kite, batch_index=None, max_quote_symbols=No
             next_gap_pct = ((next_future_price - future_price) / future_price) * 100
 
         if abs(gap_pct) < MONTHLY_FUTURE_GAP_THRESHOLD_PCT:
-            continue
-
-        if next_gap_pct is None or abs(next_gap_pct) > MONTHLY_FUTURE_NEXT_GAP_MAX_PCT:
             continue
 
         last_sent = gap_alert_store.get(future_symbol)
