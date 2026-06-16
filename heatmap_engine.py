@@ -72,7 +72,7 @@ BURST_OPTION_STRIKE_RANGE = 30
 STOCK_BURST_OPTION_STRIKE_RANGE = int(os.getenv("STOCK_BURST_OPTION_STRIKE_RANGE", "10"))
 MCX_BURST_OPTION_STRIKE_RANGE = int(os.getenv("MCX_BURST_OPTION_STRIKE_RANGE", "10"))
 BURST_THRESHOLD_LOTS = 100
-MCX_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_BURST_THRESHOLD_LOTS", "1"))
+MCX_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_BURST_THRESHOLD_LOTS", "100"))
 BURST_REST_FALLBACK_CACHE_SECONDS = int(os.getenv("BURST_REST_FALLBACK_CACHE_SECONDS", "3"))
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 INDEX_FUTURE_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "SENSEX50"}
@@ -1174,7 +1174,7 @@ def build_monthly_future_gap_alerts(kite, batch_index=None, max_quote_symbols=No
     if now_ist.weekday() > 4 or now_ist.time() < MONTHLY_FUTURE_GAP_START_TIME:
         return []
 
-    future_contracts = _get_all_active_future_contracts()
+    future_contracts = _get_active_stock_future_contracts()
     if not future_contracts:
         return []
 
@@ -1237,7 +1237,13 @@ def build_monthly_future_gap_alerts(kite, batch_index=None, max_quote_symbols=No
         if next_future_price > 0:
             next_gap_pct = ((next_future_price - future_price) / future_price) * 100
 
+        # Updated Gap Hedge Logic:
+        # 1. Absolute gap between Spot and Future must be GREATER THAN OR EQUAL to 2.0%
+        # 2. Absolute gap between the two Futures (Near vs Next) must be LESS THAN OR EQUAL to 0.5%
         if abs(gap_pct) < MONTHLY_FUTURE_GAP_THRESHOLD_PCT:
+            continue
+
+        if next_gap_pct is None or abs(next_gap_pct) > MONTHLY_FUTURE_NEXT_GAP_MAX_PCT:
             continue
 
         last_sent = gap_alert_store.get(future_symbol)
