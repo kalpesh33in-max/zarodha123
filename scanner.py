@@ -208,10 +208,11 @@ def _historical_loop(kite, dispatcher, stop_event):
     while not stop_event.is_set():
         now = datetime.now(IST)
         if _is_market_open(now):
-            # 2. First 30m Alerts
-            first_30m_alerts = calculate_first_30m_alerts(kite)
-            for alert in first_30m_alerts:
-                dispatcher.send(PRIORITY_FIRST_30M, alert)
+            try:
+                # 2. First 30m Alerts
+                first_30m_alerts = calculate_first_30m_alerts(kite)
+                for alert in first_30m_alerts:
+                    dispatcher.send(PRIORITY_FIRST_30M, alert)
 
                 alerts = calculate_other_historical_alerts(kite)
                 for alert in alerts:
