@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from env_config import TELE_CHAT_ID_BN, TELE_TOKEN_BN
+from env_config import TELE_CHAT_ID_BN, TELE_TOKEN_BN, MATRIX_ROOM_ID_BN
 from heatmap_engine import (
     calculate_burst_alerts,
     calculate_first_30m_alerts,
@@ -17,6 +17,7 @@ from heatmap_engine import (
     is_burst_session_open,
 )
 from telegram_utils import send_telegram_message
+from matrix_utils import send_matrix_message
 from websocket_flow import get_ws_status
 
 
@@ -52,7 +53,7 @@ PRIORITY_HISTORICAL = 4
 PRIORITY_STATUS = 5
 
 
-class TelegramDispatcher:
+class AlertDispatcher:
     def __init__(self):
         self._queue = queue.PriorityQueue()
         self._counter = itertools.count()
@@ -68,22 +69,29 @@ class TelegramDispatcher:
         )
         self._thread.start()
 
-    def send(self, priority, message, chat_id=None, token=None):
-        self._queue.put((priority, next(self._counter), message, chat_id, token))
+    def send(self, priority, message, chat_id=None, token=None, room_id=None):
+        self._queue.put((priority, next(self._counter), message, chat_id, token, room_id))
 
     def _worker(self, stop_event):
         while not stop_event.is_set():
             try:
-                priority, _, message, chat_id, token = self._queue.get(timeout=1)
+                priority, _, message, chat_id, token, room_id = self._queue.get(timeout=1)
             except queue.Empty:
                 continue
 
+            # Send to Telegram
             try:
                 send_telegram_message(message, chat_id=chat_id, token=token)
             except Exception as e:
                 print(f"Telegram send failed at priority {priority}: {e}")
-            finally:
-                self._queue.task_done()
+
+            # Send to Matrix / Element X
+            try:
+                send_matrix_message(message, room_id=room_id)
+            except Exception as e:
+                print(f"Matrix send failed at priority {priority}: {e}")
+
+            self._queue.task_done()
 
 
 def _is_market_open(now):
@@ -165,6 +173,7 @@ def _burst_loop(kite, dispatcher, stop_event):
                         alert,
                         chat_id=TELE_CHAT_ID_BN,
                         token=TELE_TOKEN_BN,
+                        room_id=MATRIX_ROOM_ID_BN,
                     )
                 for alert in stock_alerts:
                     print(f"DEBUG: Sending Stock/MCX alert to {TELE_CHAT_ID_BN}")
@@ -173,6 +182,7 @@ def _burst_loop(kite, dispatcher, stop_event):
                         alert,
                         chat_id=TELE_CHAT_ID_BN,
                         token=TELE_TOKEN_BN,
+                        room_id=MATRIX_ROOM_ID_BN,
                     )
             except Exception as e:
                 print(f"Error in burst scanner loop: {e}")
@@ -274,7 +284,7 @@ def run_scanner(kite, stop_event=None):
         stop_event = threading.Event()
 
     print("Scanner session initialized. Starting priority scanner loops...")
-    dispatcher = TelegramDispatcher()
+    dispatcher = AlertDispatcher()
     dispatcher.start(stop_event)
     dispatcher.send(
         PRIORITY_STATUS,
@@ -303,4 +313,6 @@ def run_scanner(kite, stop_event=None):
                 break
     finally:
         print("Scanner loop stopped.")
-        send_telegram_message("🛑 *Market Scanner Process Ended.*")
+        msg = "🛑 *Market Scanner Process Ended.*"
+        send_telegram_message(msg)
+        send_matrix_message(msg)

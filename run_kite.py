@@ -11,6 +11,7 @@ from env_config import API_KEY, API_SECRET
 from scanner import run_scanner
 from websocket_flow import FlowEngine
 from telegram_utils import send_telegram_message
+from matrix_utils import send_matrix_message
 
 # --- Configuration ---
 IST = ZoneInfo("Asia/Kolkata")
@@ -76,7 +77,9 @@ def update_instruments():
             with open("instruments.csv", "wb") as f:
                 f.write(r.content)
             print("Instruments updated.")
-            send_telegram_message("✅ Instruments Updated Successfully.")
+            msg = "✅ Instruments Updated Successfully."
+            send_telegram_message(msg)
+            send_matrix_message(msg)
     except Exception as e:
         print(f"Update Error: {e}")
 

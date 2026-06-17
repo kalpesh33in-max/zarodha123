@@ -19,3 +19,9 @@ TELE_CHAT_ID = os.getenv("CHAT_ID", "YOUR_CHAT_ID")
 TELE_CHAT_ID_BN = os.getenv("CHAT_ID_BN", TELE_CHAT_ID)
 TELE_CHAT_ID_STOCKS = os.getenv("CHAT_ID_STOCKS", TELE_CHAT_ID)
 TELE_CHAT_ID_VELOCITY = os.getenv("CHAT_ID_VELOCITY", TELE_CHAT_ID)
+
+# Matrix / Element X Credentials
+MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "https://matrix.org")
+MATRIX_ACCESS_TOKEN = os.getenv("MATRIX_ACCESS_TOKEN", "")
+MATRIX_ROOM_ID = os.getenv("MATRIX_ROOM_ID", "") # Default Room ID
+MATRIX_ROOM_ID_BN = os.getenv("MATRIX_ROOM_ID_BN", MATRIX_ROOM_ID)
