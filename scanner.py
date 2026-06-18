@@ -6,7 +6,10 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from env_config import TELE_CHAT_ID_BN, TELE_TOKEN_BN, MATRIX_ROOM_ID_BN
+from env_config import (
+    TELE_CHAT_ID_BN, TELE_TOKEN_BN, MATRIX_ROOM_ID_BN,
+    TELE_CHAT_ID_STOCKS, TELE_TOKEN_STOCKS, MATRIX_ROOM_ID_STOCKS
+)
 from heatmap_engine import (
     calculate_burst_alerts,
     calculate_first_30m_alerts,
