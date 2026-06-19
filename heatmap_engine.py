@@ -1094,10 +1094,8 @@ def get_relevant_options(name, ltp, strike_range=None):
     if options.empty:
         return pd.DataFrame()
 
-    if is_mcx_underlying(name):
-        monthly_expiry = get_next_monthly_expiry(options["expiry"].unique())
-    else:
-        monthly_expiry = get_monthly_expiry(options["expiry"].unique())
+    # Changed from get_next_monthly_expiry to get_monthly_expiry for all
+    monthly_expiry = get_monthly_expiry(options["expiry"].unique())
 
     selected_expiries = [monthly_expiry] if monthly_expiry is not None else []
 

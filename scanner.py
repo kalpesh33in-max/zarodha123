@@ -289,10 +289,12 @@ def run_scanner(kite, stop_event=None):
     print("Scanner session initialized. Starting priority scanner loops...")
     dispatcher = AlertDispatcher()
     dispatcher.start(stop_event)
-    dispatcher.send(
-        PRIORITY_STATUS,
-        "✅ *Kite Scanner Login Successful!* Priority scanner started. Burst alerts are highest priority. NSE burst: 09:00-15:29, MCX burst: 15:30-23:30. Burst REST fallback is enabled.",
-    )
+    
+    start_msg = "✅ *Kite Scanner Login Successful!* Priority scanner started. Burst alerts are highest priority. NSE burst: 09:00-15:29, MCX burst: 15:30-23:30. Burst REST fallback is enabled."
+    dispatcher.send(PRIORITY_STATUS, start_msg)
+    # Explicitly send to Telegram as well to ensure it arrives
+    from telegram_utils import send_telegram_message
+    send_telegram_message(start_msg.replace("*", ""))
 
     threads = [
         threading.Thread(target=_burst_loop, args=(kite, dispatcher, stop_event), daemon=True),
