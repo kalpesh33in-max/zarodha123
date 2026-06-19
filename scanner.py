@@ -82,17 +82,17 @@ class AlertDispatcher:
             except queue.Empty:
                 continue
 
+            # Send to Matrix (Priority)
+            try:
+                send_matrix_message(message, room_id=room_id)
+            except Exception as e:
+                print(f"Matrix send failed at priority {priority}: {e}")
+
             # Send to Telegram
             try:
                 send_telegram_message(message, chat_id=chat_id, token=token)
             except Exception as e:
                 print(f"Telegram send failed at priority {priority}: {e}")
-
-            # Send to Matrix
-            try:
-                send_matrix_message(message, room_id=room_id)
-            except Exception as e:
-                print(f"Matrix send failed at priority {priority}: {e}")
 
             self._queue.task_done()
 
