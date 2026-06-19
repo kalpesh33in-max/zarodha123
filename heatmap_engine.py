@@ -2479,6 +2479,7 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
 
         if prev_oi > 0:
             tick_lots = int(abs(curr_oi - prev_oi) / lot_size)
+            print(f"DEBUG: MCX-OPTION {row['tradingsymbol']} | PrevOI: {prev_oi} | CurrOI: {curr_oi} | Change: {abs(curr_oi - prev_oi)} | TickLots: {tick_lots} | Threshold: {threshold}")
             if stats is not None:
                 stats["max_option_tick_lots"] = max(
                     stats.get("max_option_tick_lots", 0),
