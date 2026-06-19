@@ -2441,10 +2441,8 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
 
     opt_df, u_ltp = underlying_data
     if opt_df.empty:
-        print(f"DEBUG: process_option_logic - No options for {name}")
         return
 
-    print(f"DEBUG: process_option_logic - Processing {len(opt_df)} options for {name}")
     threshold = get_burst_threshold(name)
     lot_size = LOT_SIZES.get(name, 1)
     now = datetime.now(IST)
@@ -2454,8 +2452,6 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
         if t_str not in option_quotes:
             continue
         
-        print(f"DEBUG: process_option_logic - Processing {row['tradingsymbol']} for {name}")
-
         q = option_quotes[t_str]
         curr_oi = q.get("oi", 0)
         ltp = q.get("last_price", 0)
@@ -2477,7 +2473,6 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
 
         if prev_oi > 0:
             tick_lots = int(abs(curr_oi - prev_oi) / lot_size)
-            print(f"DEBUG: MCX-OPTION {row['tradingsymbol']} | PrevOI: {prev_oi} | CurrOI: {curr_oi} | Change: {abs(curr_oi - prev_oi)} | TickLots: {tick_lots} | Threshold: {threshold}")
             if stats is not None:
                 stats["max_option_tick_lots"] = max(
                     stats.get("max_option_tick_lots", 0),
