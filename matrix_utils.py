@@ -1,12 +1,15 @@
 import requests
-import uuid
 import json
 import os
-from env_config import MATRIX_HOMESERVER, MATRIX_ROOM_ID, MATRIX_USER, MATRIX_PASS
+import threading
+from env_config import MATRIX_HOMESERVER, MATRIX_USER, MATRIX_PASS
 
-MATRIX_TOKEN_FILE = "matrix_access_token.txt"
+# In-memory storage for the token
+_matrix_token = None
+_token_lock = threading.Lock()
 
 def perform_matrix_login():
+    global _matrix_token
     if not MATRIX_USER or not MATRIX_PASS:
         return None
     
@@ -23,37 +26,28 @@ def perform_matrix_login():
         if response.status_code == 200:
             token = response.json().get("access_token")
             if token:
-                with open(MATRIX_TOKEN_FILE, "w") as f:
-                    f.write(token)
-                print("Matrix auto-login successful.")
+                with _token_lock:
+                    _matrix_token = token
+                print("Matrix login successful. Token updated in memory.")
                 return token
         else:
-            print(f"Matrix auto-login failed: {response.status_code} - {response.text}")
+            print(f"Matrix login failed: {response.status_code} - {response.text}")
     except Exception as e:
-        print(f"Matrix auto-login error: {e}")
+        print(f"Matrix login error: {e}")
     return None
 
-def get_matrix_token():
-    # 1. Try to read from file first
-    token = None
-    if os.path.exists(MATRIX_TOKEN_FILE):
-        try:
-            with open(MATRIX_TOKEN_FILE, "r") as f:
-                token = f.read().strip()
-        except Exception as e:
-            print(f"Error reading {MATRIX_TOKEN_FILE}: {e}")
-    
-    # 2. Fallback to environment variable
-    if not token:
-        token = os.getenv("MATRIX_ACCESS_TOKEN")
+def get_matrix_token(force_refresh=False):
+    global _matrix_token
+    with _token_lock:
+        if _matrix_token and not force_refresh:
+            return _matrix_token
         
-    # 3. Auto-login if still no token
-    if not token:
-        token = perform_matrix_login()
-        
-    return token
+    # Attempt login if no token or force_refresh is True
+    return perform_matrix_login()
 
 def send_matrix_message(message, room_id=None):
+    from env_config import MATRIX_ROOM_ID
+    
     token = get_matrix_token()
     if not token:
         return None
@@ -63,6 +57,7 @@ def send_matrix_message(message, room_id=None):
         print("Matrix Room ID missing!")
         return None
 
+    import uuid
     txn_id = str(uuid.uuid4())
     url = f"{MATRIX_HOMESERVER}/_matrix/client/v3/rooms/{target_room}/send/m.room.message/{txn_id}"
     
@@ -81,8 +76,8 @@ def send_matrix_message(message, room_id=None):
         if response.status_code == 200:
             return response.json()
         elif response.status_code == 401:
-            print("Matrix token expired/invalid. Attempting auto-login...")
-            new_token = perform_matrix_login()
+            print("Matrix token expired/invalid. Refreshing and retrying...")
+            new_token = get_matrix_token(force_refresh=True)
             if new_token:
                 headers["Authorization"] = f"Bearer {new_token}"
                 response = requests.put(url, headers=headers, data=json.dumps(payload), timeout=10)

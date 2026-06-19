@@ -2443,8 +2443,10 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
 
     opt_df, u_ltp = underlying_data
     if opt_df.empty:
+        print(f"DEBUG: process_option_logic - No options for {name}")
         return
 
+    print(f"DEBUG: process_option_logic - Processing {len(opt_df)} options for {name}")
     threshold = get_burst_threshold(name)
     lot_size = LOT_SIZES.get(name, 1)
     now = datetime.now(IST)
@@ -2453,6 +2455,8 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
         t_str = str(int(row["instrument_token"]))
         if t_str not in option_quotes:
             continue
+        
+        print(f"DEBUG: process_option_logic - Processing {row['tradingsymbol']} for {name}")
 
         q = option_quotes[t_str]
         curr_oi = q.get("oi", 0)
@@ -2549,14 +2553,17 @@ def _reset_burst_state_if_session_changed(session):
 
 def calculate_burst_alerts(kite):
     session = get_burst_session()
+    print(f"DEBUG: calculate_burst_alerts session={session}")
     track_names = get_active_burst_names()
     if not track_names:
+        print(f"DEBUG: calculate_burst_alerts - No track names for session={session}")
         _set_burst_quote_status("inactive", "burst session closed")
         return [], []
 
     _reset_burst_state_if_session_changed(session)
 
     fut_symbols = get_burst_futures(kite, track_names)
+    print(f"DEBUG: calculate_burst_alerts - Tracked futures: {fut_symbols}")
     symbols = list(fut_symbols)
     if session == "nse":
         for name in track_names:
