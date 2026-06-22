@@ -3,6 +3,8 @@ import time
 import pandas as pd
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from zarodha.matrix_utils import send_matrix_message
+from zarodha.telegram_utils import send_telegram_message
 
 from kite_rate_limiter import kite_historical_data, kite_quote
 from websocket_flow import get_symbol_quotes, get_token_quotes
@@ -72,8 +74,8 @@ BURST_TRACK_NAMES = NSE_BURST_TRACK_NAMES
 BURST_OPTION_STRIKE_RANGE = 30
 STOCK_BURST_OPTION_STRIKE_RANGE = int(os.getenv("STOCK_BURST_OPTION_STRIKE_RANGE", "10"))
 MCX_BURST_OPTION_STRIKE_RANGE = int(os.getenv("MCX_BURST_OPTION_STRIKE_RANGE", "10"))
-BURST_THRESHOLD_LOTS = 100
-MCX_BURST_THRESHOLD_LOTS = 10
+BURST_THRESHOLD_LOTS = int(os.getenv("BURST_THRESHOLD_LOTS", "200"))
+MCX_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_BURST_THRESHOLD_LOTS", "200"))
 BURST_REST_FALLBACK_CACHE_SECONDS = int(os.getenv("BURST_REST_FALLBACK_CACHE_SECONDS", "3"))
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 INDEX_FUTURE_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "SENSEX50"}
@@ -168,9 +170,7 @@ def is_burst_underlying(name):
 
 
 def get_burst_threshold(name):
-    if is_mcx_underlying(name):
-        return MCX_BURST_THRESHOLD_LOTS
-    return BURST_THRESHOLD_LOTS
+    return 200
 
 
 def get_burst_option_strike_range(name):
@@ -2420,7 +2420,7 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list, stats=None):
                     if watch.get("expiry_text")
                     else ""
                 )
-                alerts_list.append(
+                alert_text = (
                     f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n"
                     f"{expiry_line}"
                     f"━━━━━━━━━━━━━━━\n"
@@ -2429,6 +2429,9 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list, stats=None):
                     f"EXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {oi:,}\n"
                     f"TIME: {now.strftime('%H:%M:%S')}"
                 )
+                alerts_list.append(alert_text)
+                send_matrix_message(alert_text, is_burst=True)
+                send_telegram_message(alert_text, is_burst=True)
             del active_watches[key]
 
     history.append({"time": now, "oi": oi, "price": ltp})
@@ -2504,7 +2507,7 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
                     strength = get_strength_label(final_lots, watch["underlying"])
                     action = classify_action(watch["symbol"], oi_chg, p_chg)
                     p_icon = "▲" if p_chg >= 0 else "▼"
-                    alerts_list.append(
+                    alert_text = (
                         f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n"
                         f"EXPIRY: {watch.get('expiry_text', 'NA')}\n"
                         f"━━━━━━━━━━━━━━━\n"
@@ -2513,6 +2516,9 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
                         f"EXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {curr_oi:,}\n"
                         f"TIME: {now.strftime('%H:%M:%S')}"
                     )
+                    alerts_list.append(alert_text)
+                    send_matrix_message(alert_text, is_burst=True)
+                    send_telegram_message(alert_text, is_burst=True)
                 del active_watches[t_int]
 
         history.append({"time": now, "oi": curr_oi, "price": ltp})

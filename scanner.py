@@ -169,6 +169,8 @@ def _burst_loop(kite, dispatcher, stop_event):
                     else:
                         print(message)
 
+                # bn_alerts: Index (Nifty/BankNifty) and Index Options burst alerts
+                # Destination: Telegram BN channel (TELE_CHAT_ID_BN) and Matrix BN room (MATRIX_ROOM_ID_BN)
                 for alert in bn_alerts:
                     print(f"DEBUG: Sending BN/Index alert to {TELE_CHAT_ID_BN}")
                     dispatcher.send(
@@ -178,14 +180,17 @@ def _burst_loop(kite, dispatcher, stop_event):
                         token=TELE_TOKEN_BN,
                         room_id=MATRIX_ROOM_ID_BN,
                     )
+                
+                # stock_alerts: Stock Futures and MCX burst alerts
+                # Destination: Telegram BN channel (TELE_CHAT_ID_BN) and Matrix BN room (MATRIX_ROOM_ID_BN)
                 for alert in stock_alerts:
-                    print(f"DEBUG: Sending Stock/MCX alert to {TELE_CHAT_ID_STOCKS}")
+                    print(f"DEBUG: Sending Stock/MCX alert to {TELE_CHAT_ID_BN}")
                     dispatcher.send(
                         PRIORITY_BURST,
                         alert,
-                        chat_id=TELE_CHAT_ID_STOCKS,
-                        token=TELE_TOKEN_STOCKS,
-                        room_id=MATRIX_ROOM_ID_STOCKS,
+                        chat_id=TELE_CHAT_ID_BN,
+                        token=TELE_TOKEN_BN,
+                        room_id=MATRIX_ROOM_ID_BN,
                     )
             except Exception as e:
                 print(f"Error in burst scanner loop: {e}")
@@ -202,6 +207,8 @@ def _gap_loop(kite, dispatcher, stop_event):
         now = datetime.now(IST)
         if _is_any_scanner_session(now):
             try:
+                # gap_alerts: Monthly future gap reports
+                # Destination: Default Telegram/Matrix channel (resolved by _resolve_telegram_target)
                 alerts = calculate_gap_alerts(
                     kite,
                     batch_index=batch_index,
@@ -225,10 +232,14 @@ def _historical_loop(kite, dispatcher, stop_event):
         if _is_market_open(now):
             try:
                 # 2. First 30m Alerts
+                # first_30m_alerts: Early session volume mismatches
+                # Destination: Default Telegram/Matrix channel (resolved by _resolve_telegram_target)
                 first_30m_alerts = calculate_first_30m_alerts(kite)
                 for alert in first_30m_alerts:
                     dispatcher.send(PRIORITY_FIRST_30M, alert)
 
+                # historical_alerts: Daily/weekly volume mismatches and S4 alerts
+                # Destination: Default Telegram/Matrix channel (resolved by _resolve_telegram_target)
                 alerts = calculate_other_historical_alerts(kite)
                 for alert in alerts:
                     dispatcher.send(PRIORITY_HISTORICAL, alert)
@@ -267,6 +278,8 @@ def _websocket_heartbeat_loop(dispatcher, stop_event):
             else:
                 message = "WebSocket disconnected"
 
+            # status_alerts: Websocket health reports
+            # Destination: Default Telegram/Matrix channel (resolved by _resolve_telegram_target)
             if problem and time.time() - last_alert_time >= WS_ALERT_COOLDOWN_SECONDS:
                 last_alert_time = time.time()
                 message = (

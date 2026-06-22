@@ -15,15 +15,14 @@ def _is_valid_chat_id(chat_id):
     return bool(chat_id and chat_id != "YOUR_CHAT_ID")
 
 
-def _resolve_telegram_target(chat_id=None, token=None):
+def _resolve_telegram_target(chat_id=None, token=None, is_burst=False):
     if token or chat_id:
         target_token = token or TELE_TOKEN or TELE_TOKEN_BN or TELE_TOKEN_STOCKS or TELE_TOKEN_VELOCITY
         target_id = chat_id or next(
             (
                 candidate
                 for candidate in (
-                    TELE_CHAT_ID,
-                    TELE_CHAT_ID_BN,
+                    TELE_CHAT_ID_BN if is_burst else TELE_CHAT_ID,
                     TELE_CHAT_ID_STOCKS,
                     TELE_CHAT_ID_VELOCITY,
                 )
@@ -33,9 +32,11 @@ def _resolve_telegram_target(chat_id=None, token=None):
         )
         return target_token, target_id
 
+    if is_burst and _is_valid_chat_id(TELE_CHAT_ID_BN) and TELE_TOKEN_BN:
+        return TELE_TOKEN_BN, TELE_CHAT_ID_BN
+
     for target_token, target_id in (
         (TELE_TOKEN, TELE_CHAT_ID),
-        (TELE_TOKEN_BN, TELE_CHAT_ID_BN),
         (TELE_TOKEN_STOCKS, TELE_CHAT_ID_STOCKS),
         (TELE_TOKEN_VELOCITY, TELE_CHAT_ID_VELOCITY),
     ):

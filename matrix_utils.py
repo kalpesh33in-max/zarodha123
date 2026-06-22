@@ -74,14 +74,17 @@ def _log_missing_matrix_config(allow_static_token=False):
     else:
         print("Matrix credentials missing: set MATRIX_USER/MATRIX_PASS or MATRIX_ACCESS_TOKEN.")
 
-def send_matrix_message(message, room_id=None):
+def send_matrix_message(message, room_id=None, is_burst=False):
     from env_config import MATRIX_ROOM_ID, MATRIX_ROOM_ID_BN, MATRIX_ROOM_ID_STOCKS
     
     token = get_matrix_token()
     if not token:
         return None
 
-    target_room = room_id if room_id else (MATRIX_ROOM_ID or MATRIX_ROOM_ID_BN or MATRIX_ROOM_ID_STOCKS)
+    if is_burst and MATRIX_ROOM_ID_BN:
+        target_room = MATRIX_ROOM_ID_BN
+    else:
+        target_room = room_id if room_id else (MATRIX_ROOM_ID or MATRIX_ROOM_ID_STOCKS)
     if not target_room:
         print("Matrix Room ID missing!")
         return None
