@@ -12,11 +12,14 @@ _token_lock = threading.Lock()
 _last_config_warning_time = 0.0
 _CONFIG_WARNING_INTERVAL_SECONDS = int(os.getenv("MATRIX_CONFIG_WARNING_INTERVAL_SECONDS", "300"))
 
-def perform_matrix_login():
+def _has_matrix_password_login():
+    return bool(MATRIX_USER and MATRIX_PASS)
+
+def perform_matrix_login(allow_static_token=False):
     global _matrix_token
-    if not MATRIX_USER or not MATRIX_PASS:
-        _log_missing_matrix_config()
-        return MATRIX_ACCESS_TOKEN or None
+    if not _has_matrix_password_login():
+        _log_missing_matrix_config(allow_static_token=allow_static_token)
+        return MATRIX_ACCESS_TOKEN if allow_static_token else None
     
     login_url = f"{MATRIX_HOMESERVER}/_matrix/client/v3/login"
     payload = {
@@ -48,14 +51,14 @@ def get_matrix_token(force_refresh=False):
             return _matrix_token
         
     # Attempt login if no token or force_refresh is True.
-    return perform_matrix_login()
+    return perform_matrix_login(allow_static_token=not force_refresh)
 
 def refresh_matrix_token():
     return get_matrix_token(force_refresh=True)
 
-def _log_missing_matrix_config():
+def _log_missing_matrix_config(allow_static_token=False):
     global _last_config_warning_time
-    if MATRIX_ACCESS_TOKEN:
+    if allow_static_token and MATRIX_ACCESS_TOKEN:
         return
 
     now = time.time()
@@ -63,7 +66,13 @@ def _log_missing_matrix_config():
         return
 
     _last_config_warning_time = now
-    print("Matrix credentials missing: set MATRIX_USER/MATRIX_PASS or MATRIX_ACCESS_TOKEN.")
+    if MATRIX_ACCESS_TOKEN:
+        print(
+            "Matrix password login missing: set MATRIX_USER and MATRIX_PASS. "
+            "The configured MATRIX_ACCESS_TOKEN can be used only until Matrix expires it."
+        )
+    else:
+        print("Matrix credentials missing: set MATRIX_USER/MATRIX_PASS or MATRIX_ACCESS_TOKEN.")
 
 def send_matrix_message(message, room_id=None):
     from env_config import MATRIX_ROOM_ID, MATRIX_ROOM_ID_BN, MATRIX_ROOM_ID_STOCKS
@@ -98,6 +107,12 @@ def send_matrix_message(message, room_id=None):
         elif response.status_code == 401:
             print("Matrix token expired/invalid. Refreshing and retrying...")
             new_token = get_matrix_token(force_refresh=True)
+            if not new_token:
+                print("Failed to refresh Matrix token. Check MATRIX_USER and MATRIX_PASS.")
+                return None
+            if new_token == token:
+                print("Matrix refresh returned the same expired token. Check Matrix password login config.")
+                return None
             if new_token:
                 headers["Authorization"] = f"Bearer {new_token}"
                 response = requests.put(url, headers=headers, data=json.dumps(payload), timeout=10)
