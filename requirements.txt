@@ -6,3 +6,5 @@ websocket-client
 requests
 pyotp
 gunicorn
+twisted
+autobahn
