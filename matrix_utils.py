@@ -2,16 +2,21 @@ import requests
 import json
 import os
 import threading
-from env_config import MATRIX_HOMESERVER, MATRIX_USER, MATRIX_PASS
+import time
+from env_config import MATRIX_HOMESERVER, MATRIX_USER, MATRIX_PASS, MATRIX_ACCESS_TOKEN
 
-# In-memory storage for the token
-_matrix_token = None
+# In-memory storage for the token. Prefer a configured token at boot, but allow
+# password login to refresh it automatically when the server rejects it.
+_matrix_token = MATRIX_ACCESS_TOKEN or None
 _token_lock = threading.Lock()
+_last_config_warning_time = 0.0
+_CONFIG_WARNING_INTERVAL_SECONDS = int(os.getenv("MATRIX_CONFIG_WARNING_INTERVAL_SECONDS", "300"))
 
 def perform_matrix_login():
     global _matrix_token
     if not MATRIX_USER or not MATRIX_PASS:
-        return None
+        _log_missing_matrix_config()
+        return MATRIX_ACCESS_TOKEN or None
     
     login_url = f"{MATRIX_HOMESERVER}/_matrix/client/v3/login"
     payload = {
@@ -42,17 +47,32 @@ def get_matrix_token(force_refresh=False):
         if _matrix_token and not force_refresh:
             return _matrix_token
         
-    # Attempt login if no token or force_refresh is True
+    # Attempt login if no token or force_refresh is True.
     return perform_matrix_login()
 
+def refresh_matrix_token():
+    return get_matrix_token(force_refresh=True)
+
+def _log_missing_matrix_config():
+    global _last_config_warning_time
+    if MATRIX_ACCESS_TOKEN:
+        return
+
+    now = time.time()
+    if now - _last_config_warning_time < _CONFIG_WARNING_INTERVAL_SECONDS:
+        return
+
+    _last_config_warning_time = now
+    print("Matrix credentials missing: set MATRIX_USER/MATRIX_PASS or MATRIX_ACCESS_TOKEN.")
+
 def send_matrix_message(message, room_id=None):
-    from env_config import MATRIX_ROOM_ID
+    from env_config import MATRIX_ROOM_ID, MATRIX_ROOM_ID_BN, MATRIX_ROOM_ID_STOCKS
     
     token = get_matrix_token()
     if not token:
         return None
 
-    target_room = room_id if room_id else MATRIX_ROOM_ID
+    target_room = room_id if room_id else (MATRIX_ROOM_ID or MATRIX_ROOM_ID_BN or MATRIX_ROOM_ID_STOCKS)
     if not target_room:
         print("Matrix Room ID missing!")
         return None

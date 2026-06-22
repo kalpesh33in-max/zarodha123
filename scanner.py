@@ -20,7 +20,7 @@ from heatmap_engine import (
     is_burst_session_open,
 )
 from telegram_utils import send_telegram_message
-from matrix_utils import send_matrix_message
+from matrix_utils import refresh_matrix_token, send_matrix_message
 from websocket_flow import get_ws_status
 
 
@@ -179,13 +179,13 @@ def _burst_loop(kite, dispatcher, stop_event):
                         room_id=MATRIX_ROOM_ID_BN,
                     )
                 for alert in stock_alerts:
-                    print(f"DEBUG: Sending Stock/MCX alert to {TELE_CHAT_ID_BN}")
+                    print(f"DEBUG: Sending Stock/MCX alert to {TELE_CHAT_ID_STOCKS}")
                     dispatcher.send(
                         PRIORITY_BURST,
                         alert,
-                        chat_id=TELE_CHAT_ID_BN,
-                        token=TELE_TOKEN_BN,
-                        room_id=MATRIX_ROOM_ID_BN,
+                        chat_id=TELE_CHAT_ID_STOCKS,
+                        token=TELE_TOKEN_STOCKS,
+                        room_id=MATRIX_ROOM_ID_STOCKS,
                     )
             except Exception as e:
                 print(f"Error in burst scanner loop: {e}")
@@ -287,6 +287,11 @@ def run_scanner(kite, stop_event=None):
         stop_event = threading.Event()
 
     print("Scanner session initialized. Starting priority scanner loops...")
+    try:
+        refresh_matrix_token()
+    except Exception as e:
+        print(f"Matrix token refresh at scanner start failed: {e}")
+
     dispatcher = AlertDispatcher()
     dispatcher.start(stop_event)
     

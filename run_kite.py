@@ -39,13 +39,22 @@ def load_saved_token():
     with open(TOKEN_FILE, "r") as f:
         return f.read().strip()
 
+def send_service_status(message):
+    def _worker():
+        try:
+            send_matrix_message(message)
+        except Exception as e:
+            print(f"Matrix service status alert failed: {e}")
+        try:
+            send_telegram_message(message)
+        except Exception as e:
+            print(f"Telegram service status alert failed: {e}")
+
+    threading.Thread(target=_worker, daemon=True).start()
+
 def validate_and_start_scanner(source):
     global scanner_thread, flow_engine
     with scanner_lock:
-        if scanner_thread and scanner_thread.is_alive():
-            print(f"[{source}] Scanner already running.")
-            return True
-
         token = load_saved_token()
         if not token:
             print(f"[{source}] No access token found. Cannot start scanner.")
@@ -54,6 +63,24 @@ def validate_and_start_scanner(source):
         try:
             kite.set_access_token(token)
             kite.profile() # Validation call
+            if scanner_thread and scanner_thread.is_alive():
+                print(f"[{source}] Token validated. Scanner already running; refreshed Kite session.")
+                if flow_engine is None:
+                    flow_engine = FlowEngine(kite)
+                    flow_engine.start()
+
+                message = (
+                    f"Kite Scanner session refreshed from {source}. "
+                    "Scanner is already running with the latest Kite access token."
+                )
+                if flow_engine and getattr(flow_engine, "_auth_failed", False):
+                    message += (
+                        " WebSocket auth failed earlier; REST fallback will use the refreshed token. "
+                        "Restart the Railway service after login to recreate the WebSocket connection."
+                    )
+                send_service_status(message)
+                return True
+
             print(f"[{source}] Token validated. Starting Engine...")
             
             flow_engine = FlowEngine(kite)
@@ -156,8 +183,9 @@ def login():
         token = data["access_token"]
         with open(TOKEN_FILE, "w") as f:
             f.write(token)
-        validate_and_start_scanner("Manual Login")
-        return "<h1>Success!</h1><p>Login successful and scanner started.</p>"
+        if validate_and_start_scanner("Manual Login"):
+            return "<h1>Success!</h1><p>Login successful and scanner is running.</p>"
+        return "<h1>Error</h1><p>Login succeeded, but scanner validation/startup failed. Check logs.</p>"
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
