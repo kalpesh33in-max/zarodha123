@@ -161,6 +161,10 @@ def ensure_background_services_started(source):
     if AUTO_START_BACKGROUND:
         start_background_services(source)
 
+
+if AUTO_START_BACKGROUND:
+    start_background_services("Module Import")
+
 # --- Flask Routes ---
 
 @app.route("/")
