@@ -3,9 +3,6 @@ import time
 import pandas as pd
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from zarodha.matrix_utils import send_matrix_message
-from zarodha.telegram_utils import send_telegram_message
-
 from kite_rate_limiter import kite_historical_data, kite_quote
 from websocket_flow import get_symbol_quotes, get_token_quotes
 
@@ -57,9 +54,6 @@ STOCK_BURST_NAMES = {
     "TATAMOTORS", "M&M", "MARUTI", "ASHOKLEY", "LT", "SUNPHARMA", "ITC", "HINDUNILVR"
 }
 NSE_BURST_TRACK_NAMES = [
-    "BANKNIFTY",
-    "NIFTY",
-    "MIDCPNIFTY",
     "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "BAJFINANCE", "BAJAJFINSV",
     "INDUSINDBK", "BANKBARODA", "PNB", "RELIANCE", "ONGC", "NTPC", "POWERGRID",
     "COALINDIA", "BPCL", "GAIL", "INFOSYS", "TCS", "HCLTECH", "WIPRO", "TECHM",
@@ -101,6 +95,7 @@ weekly_mismatch_setup_rows = []
 
 born_breakout_last_check_time = None
 born_breakout_alert_store = {}
+burst_alert_store = {}
 
 _options_df = None
 _futures_df = None
@@ -149,7 +144,7 @@ FIRST_30M_MISMATCH_CANDLE_START_TIME = datetime.strptime("09:15", "%H:%M").time(
 FIRST_30M_MISMATCH_SCAN_START_TIME = datetime.strptime("09:45", "%H:%M").time()
 FIRST_30M_MISMATCH_GAP_THRESHOLD_PCT = float(os.getenv("FIRST_30M_MISMATCH_GAP_THRESHOLD_PCT", "1.0"))
 FIRST_30M_MISMATCH_MIN_VOLUME = int(os.getenv("FIRST_30M_MISMATCH_MIN_VOLUME", "100000"))
-FIRST_30M_MISMATCH_RETRY_SECONDS = 120
+FIRST_30M_MISMATCH_RETRY_SECONDS = 30
 FIRST_30M_OPTION_ITM_COUNT = int(os.getenv("FIRST_30M_OPTION_ITM_COUNT", "4"))
 DAILY_WEEKLY_MISMATCH_MIN_VOLUME = int(os.getenv("DAILY_WEEKLY_MISMATCH_MIN_VOLUME", "1000000"))
 PREVIOUS_DAY_MISMATCH_LOOKBACK_DAYS = int(os.getenv("PREVIOUS_DAY_MISMATCH_LOOKBACK_DAYS", "20"))
@@ -2429,9 +2424,9 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list, stats=None):
                     f"EXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {oi:,}\n"
                     f"TIME: {now.strftime('%H:%M:%S')}"
                 )
-                alerts_list.append(alert_text)
-                send_matrix_message(alert_text, is_burst=True)
-                send_telegram_message(alert_text, is_burst=True)
+                alert_key = f"FUT:{name}:{watch['symbol']}:{watch['start_oi']}:{watch['start_price']}"
+                if not _burst_alert_recent(alert_key):
+                    alerts_list.append(alert_text)
             del active_watches[key]
 
     history.append({"time": now, "oi": oi, "price": ltp})
@@ -2516,9 +2511,9 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
                         f"EXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {curr_oi:,}\n"
                         f"TIME: {now.strftime('%H:%M:%S')}"
                     )
-                    alerts_list.append(alert_text)
-                    send_matrix_message(alert_text, is_burst=True)
-                    send_telegram_message(alert_text, is_burst=True)
+                    alert_key = f"OPT:{name}:{t_int}:{watch['start_oi']}:{watch['start_price']}"
+                    if not _burst_alert_recent(alert_key):
+                        alerts_list.append(alert_text)
                 del active_watches[t_int]
 
         history.append({"time": now, "oi": curr_oi, "price": ltp})
@@ -2548,8 +2543,25 @@ def _reset_burst_state_if_session_changed(session):
     option_history.clear()
     active_watches.clear()
     day_open_oi_store.clear()
+    burst_alert_store.clear()
     _last_burst_session = session
     print(f"Burst state reset for {session.upper()} session.")
+
+
+def _burst_alert_recent(alert_key, cooldown_seconds=120):
+    now = time.time()
+    last_sent = burst_alert_store.get(alert_key)
+    if last_sent and now - last_sent < cooldown_seconds:
+        return True
+
+    burst_alert_store[alert_key] = now
+    if len(burst_alert_store) > 2000:
+        stale_cutoff = now - max(cooldown_seconds, 300)
+        for key, ts in list(burst_alert_store.items()):
+            if ts < stale_cutoff:
+                burst_alert_store.pop(key, None)
+
+    return False
 
 
 def calculate_burst_alerts(kite):
@@ -2700,8 +2712,6 @@ def calculate_other_historical_alerts(kite):
         return []
 
     alerts = []
-    alerts.extend(build_previous_day_future_volume_mismatch_alerts(kite))
-    alerts.extend(build_weekly_future_volume_mismatch_alerts(kite))
     alerts.extend(build_stock_future_1hr_s4_alerts(kite))
     alerts.extend(build_weekly_born_breakout_alerts(kite))
     return alerts
