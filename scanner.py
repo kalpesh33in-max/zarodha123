@@ -10,6 +10,8 @@ from env_config import (
     TELE_CHAT_ID_BN, TELE_TOKEN_BN, MATRIX_ROOM_ID_BN
 )
 from heatmap_engine import (
+    ENABLE_INDEX_BURST_ALERTS,
+    ENABLE_MCX_BURST_ALERTS,
     calculate_burst_alerts,
     calculate_first_30m_alerts,
     calculate_gap_alerts,
@@ -171,7 +173,7 @@ def _burst_loop(kite, dispatcher, stop_event):
                 # All burst alerts: Index, Stock Futures, and MCX
                 # Destination: Telegram BN channel (TELE_CHAT_ID_BN) and Matrix BN room (MATRIX_ROOM_ID_BN)
                 for alert in dict.fromkeys([*bn_alerts, *stock_alerts]):
-                    print(f"DEBUG: Sending Burst alert to {TELE_CHAT_ID_BN}")
+                    print(f"Sending burst alert to {TELE_CHAT_ID_BN}")
                     dispatcher.send(
                         PRIORITY_BURST,
                         alert,
@@ -295,7 +297,12 @@ def run_scanner(kite, stop_event=None):
     dispatcher = AlertDispatcher()
     dispatcher.start(stop_event)
     
-    start_msg = "✅ *Kite Scanner Login Successful!* Priority scanner started. Burst alerts are highest priority. NSE burst: 09:00-15:29, MCX burst: 15:30-23:30. Burst REST fallback is enabled."
+    burst_scope = ["BANKNIFTY", "NIFTY", "MIDCPNIFTY", "stocks"]
+    start_msg = (
+        "Kite Scanner Login Successful. Priority scanner started. "
+        f"Burst alerts enabled for: {', '.join(burst_scope)}. "
+        "Burst REST fallback is enabled."
+    )
     dispatcher.send(PRIORITY_STATUS, start_msg)
 
     threads = [

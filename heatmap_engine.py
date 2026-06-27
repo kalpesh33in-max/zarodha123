@@ -54,10 +54,7 @@ STOCK_BURST_NAMES = {
     "TATAMOTORS", "M&M", "MARUTI", "ASHOKLEY", "LT", "SUNPHARMA", "ITC", "HINDUNILVR"
 }
 NSE_BURST_TRACK_NAMES = [
-    "BANKNIFTY", "NIFTY", "MIDCPNIFTY","HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "BAJFINANCE", "BAJAJFINSV",
-    "INDUSINDBK", "BANKBARODA", "PNB", "RELIANCE", "ONGC", "NTPC", "POWERGRID",
-    "COALINDIA", "BPCL", "GAIL", "INFOSYS", "TCS", "HCLTECH", "WIPRO", "TECHM",
-    "TATAMOTORS", "M&M", "MARUTI", "ASHOKLEY", "LT", "SUNPHARMA", "ITC", "HINDUNILVR"
+    "BANKNIFTY", "NIFTY", "MIDCPNIFTY",
 ]
 MCX_BURST_TRACK_NAMES = [
     "CRUDEOIL",
@@ -65,14 +62,26 @@ MCX_BURST_TRACK_NAMES = [
 ]
 MCX_BURST_NAMES = set(MCX_BURST_TRACK_NAMES)
 BURST_TRACK_NAMES = NSE_BURST_TRACK_NAMES
+ENABLE_INDEX_BURST_ALERTS = os.getenv("ENABLE_INDEX_BURST_ALERTS", "false").lower() in (
+    "true",
+    "1",
+    "yes",
+    "on",
+)
+ENABLE_MCX_BURST_ALERTS = False
 BURST_OPTION_STRIKE_RANGE = 30
 STOCK_BURST_OPTION_STRIKE_RANGE = int(os.getenv("STOCK_BURST_OPTION_STRIKE_RANGE", "10"))
 MCX_BURST_OPTION_STRIKE_RANGE = int(os.getenv("MCX_BURST_OPTION_STRIKE_RANGE", "10"))
-BURST_THRESHOLD_LOTS = int(os.getenv("BURST_THRESHOLD_LOTS", "200"))
-MCX_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_BURST_THRESHOLD_LOTS", "200"))
+BURST_THRESHOLD_LOTS = int(os.getenv("BURST_THRESHOLD_LOTS", "100"))
+INDEX_BURST_THRESHOLD_LOTS = int(os.getenv("INDEX_BURST_THRESHOLD_LOTS", "100"))
+STOCK_BURST_THRESHOLD_LOTS = int(os.getenv("STOCK_BURST_THRESHOLD_LOTS", str(BURST_THRESHOLD_LOTS)))
+MCX_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_BURST_THRESHOLD_LOTS", "100"))
 BURST_REST_FALLBACK_CACHE_SECONDS = int(os.getenv("BURST_REST_FALLBACK_CACHE_SECONDS", "3"))
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 INDEX_FUTURE_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "SENSEX50"}
+TARGET_MONTHLY_EXPIRY_MONTH = int(os.getenv("TARGET_MONTHLY_EXPIRY_MONTH", "7"))
+TARGET_MONTHLY_EXPIRY_DAY = int(os.getenv("TARGET_MONTHLY_EXPIRY_DAY", "28"))
+TARGET_MONTHLY_EXPIRY_YEAR = os.getenv("TARGET_MONTHLY_EXPIRY_YEAR", "").strip()
 
 day_open_oi_store = {}
 option_history = {}
@@ -117,7 +126,10 @@ NSE_BURST_END_TIME = datetime.strptime("15:30", "%H:%M").time()
 MCX_BURST_START_TIME = datetime.strptime("15:30", "%H:%M").time()
 MCX_BURST_END_TIME = datetime.strptime("23:30:59", "%H:%M:%S").time()
 MONTHLY_FUTURE_GAP_THRESHOLD_PCT = 2.0
-MONTHLY_FUTURE_NEXT_GAP_MAX_PCT = 0.5
+MONTHLY_FUTURE_NEXT_GAP_MAX_PCT = 1.0
+MONTHLY_FUTURE_MATCH_ABOVE_PCT = 0.5
+MONTHLY_FUTURE_MATCH_BELOW_PCT = 0.95
+MONTHLY_FUTURE_MATCH_NEXT_MIN_PCT = 2.0
 MONTHLY_FUTURE_GAP_START_TIME = datetime.strptime("09:15", "%H:%M").time()
 GAP_ALERT_COOLDOWN_SECONDS = 3600
 R3_PIVOT_ALERT_START_TIME = datetime.strptime("09:15", "%H:%M").time()
@@ -165,7 +177,11 @@ def is_burst_underlying(name):
 
 
 def get_burst_threshold(name):
-    return 200
+    if is_index_underlying(name):
+        return INDEX_BURST_THRESHOLD_LOTS
+    if is_mcx_underlying(name):
+        return MCX_BURST_THRESHOLD_LOTS
+    return STOCK_BURST_THRESHOLD_LOTS
 
 
 def get_burst_option_strike_range(name):
@@ -186,7 +202,10 @@ def get_burst_session(now_ist=None):
     if NSE_BURST_START_TIME <= t < NSE_BURST_END_TIME:
         return "nse"
     # MCX session starts at 15:30:00
-    if MCX_BURST_START_TIME <= t <= MCX_BURST_END_TIME:
+    if (
+        ENABLE_MCX_BURST_ALERTS
+        and MCX_BURST_START_TIME <= t <= MCX_BURST_END_TIME
+    ):
         return "mcx"
     return None
 
@@ -198,9 +217,9 @@ def is_burst_session_open(now_ist=None):
 def get_active_burst_names(now_ist=None):
     session = get_burst_session(now_ist)
     if session == "mcx":
-        return list(MCX_BURST_TRACK_NAMES)
+        return []
     if session == "nse":
-        return list(NSE_BURST_TRACK_NAMES)
+        return sorted(set(INDEX_BURST_NAMES) | set(STOCK_BURST_NAMES))
     return []
 
 
@@ -213,11 +232,11 @@ def get_burst_subscription_names(now_ist=None):
     if now_ist.weekday() <= 4:
         t = now_ist.time()
         if t < NSE_BURST_START_TIME:
-            return list(NSE_BURST_TRACK_NAMES)
-        if NSE_BURST_END_TIME <= t < MCX_BURST_START_TIME:
-            return list(MCX_BURST_TRACK_NAMES)
+            return sorted(set(INDEX_BURST_NAMES) | set(STOCK_BURST_NAMES))
+        if NSE_BURST_END_TIME <= t <= MCX_BURST_END_TIME:
+            return []
 
-    return list(NSE_BURST_TRACK_NAMES)
+    return sorted(set(INDEX_BURST_NAMES) | set(STOCK_BURST_NAMES))
 
 
 def non_burst_alerts_paused_today():
@@ -253,35 +272,31 @@ def get_due_s4_slot(now_ist):
 
 
 def get_monthly_expiry(expiries, rollover_days=1):
+    return get_target_monthly_expiry(expiries)
+
+
+def get_target_monthly_expiry(expiries):
     valid_expiries = sorted(exp for exp in expiries if pd.notna(exp))
     if not valid_expiries:
         return None
 
-    now_ist = datetime.now(IST)
     month_last_expiries = {}
     for expiry in valid_expiries:
         month_last_expiries[(int(expiry.year), int(expiry.month))] = expiry
 
     ordered_monthlies = [month_last_expiries[key] for key in sorted(month_last_expiries)]
-    current_monthly = None
-    for expiry in ordered_monthlies:
-        if (int(expiry.year), int(expiry.month)) == (now_ist.year, now_ist.month):
-            current_monthly = expiry
-            break
+    target_year = int(TARGET_MONTHLY_EXPIRY_YEAR) if TARGET_MONTHLY_EXPIRY_YEAR else None
+    target_monthlies = [
+        exp
+        for exp in ordered_monthlies
+        if exp.month == TARGET_MONTHLY_EXPIRY_MONTH
+        and exp.day == TARGET_MONTHLY_EXPIRY_DAY
+        and (target_year is None or exp.year == target_year)
+    ]
+    if target_monthlies:
+        return target_monthlies[-1]
 
-    if current_monthly is not None:
-        rollover_date = current_monthly.date() - timedelta(days=rollover_days)
-        if now_ist.date() >= rollover_date:
-            for expiry in ordered_monthlies:
-                if expiry > current_monthly:
-                    return expiry
-        elif current_monthly.date() >= now_ist.date():
-            return current_monthly
-
-    future_monthlies = [exp for exp in ordered_monthlies if exp.date() >= now_ist.date()]
-    if future_monthlies:
-        return future_monthlies[0]
-    return ordered_monthlies[-1]
+    return None
 
 
 def get_next_monthly_expiry(expiries):
@@ -428,10 +443,7 @@ def get_active_future(name):
     if futures.empty:
         return None
 
-    if is_mcx_underlying(name):
-        preferred_expiry = get_next_monthly_expiry(futures["expiry"].unique())
-    else:
-        preferred_expiry = get_monthly_expiry(futures["expiry"].unique())
+    preferred_expiry = get_target_monthly_expiry(futures["expiry"].unique())
 
     if preferred_expiry is None:
         return None
@@ -1195,6 +1207,11 @@ def build_monthly_future_gap_alerts(kite, batch_index=None, max_quote_symbols=No
         return []
 
     future_contracts = _get_active_stock_future_contracts()
+    future_contracts = [
+        contract
+        for contract in future_contracts
+        if contract.get("name") not in INDEX_FUTURE_NAMES
+    ]
     if not future_contracts:
         return []
 
@@ -1245,6 +1262,7 @@ def build_monthly_future_gap_alerts(kite, batch_index=None, max_quote_symbols=No
 
     now = datetime.now(IST)
     rows = []
+    match_rows = []
     for name, spot_symbol, future_symbol, month_label, next_symbol, next_month_label in symbol_pairs:
         spot_price = data.get(spot_symbol, {}).get("last_price", 0)
         future_price = data.get(future_symbol, {}).get("last_price", 0)
@@ -1271,23 +1289,31 @@ def build_monthly_future_gap_alerts(kite, batch_index=None, max_quote_symbols=No
             continue
 
         gap_alert_store[future_symbol] = now
-        rows.append(
-            {
-                "name": name,
-                "month_label": month_label,
-                "spot_price": spot_price,
-                "future_price": future_price,
-                "gap_pct": gap_pct,
-                "next_future_price": next_future_price,
-                "next_gap_pct": next_gap_pct,
-                "next_month_label": next_month_label,
-            }
-        )
+        item = {
+            "name": name,
+            "month_label": month_label,
+            "spot_price": spot_price,
+            "future_price": future_price,
+            "gap_pct": gap_pct,
+            "next_future_price": next_future_price,
+            "next_gap_pct": next_gap_pct,
+            "next_month_label": next_month_label,
+        }
+        rows.append(item)
 
-    if not rows:
+        spot_match_ok = (
+            (gap_pct >= 0 and gap_pct <= MONTHLY_FUTURE_MATCH_ABOVE_PCT)
+            or (gap_pct < 0 and abs(gap_pct) <= MONTHLY_FUTURE_MATCH_BELOW_PCT)
+        )
+        next_move_ok = abs(next_gap_pct) >= MONTHLY_FUTURE_MATCH_NEXT_MIN_PCT
+        if spot_match_ok and next_move_ok:
+            match_rows.append(item)
+
+    if not rows and not match_rows:
         return []
 
     rows.sort(key=lambda item: abs(item["gap_pct"]), reverse=True)
+    match_rows.sort(key=lambda item: abs(item["gap_pct"]), reverse=True)
     alerts = []
     chunk_size = 20
     for i in range(0, len(rows), chunk_size):
@@ -1310,6 +1336,27 @@ def build_monthly_future_gap_alerts(kite, batch_index=None, max_quote_symbols=No
         body = "\n".join(body_lines)
         report_month = chunk[0]["month_label"] if chunk else "MONTHLY"
         alerts.append(f"📊 {report_month} FUTURE GAP REPORT\n\n{body}")
+
+    for i in range(0, len(match_rows), chunk_size):
+        chunk = match_rows[i:i + chunk_size]
+        body_lines = []
+        for item in chunk:
+            if item["next_gap_pct"] is None:
+                next_future_text = f"Next Fut NA | Next-vs-{item['month_label']} NA"
+            else:
+                next_future_text = (
+                    f"{item['next_month_label']} Fut {item['next_future_price']:.2f} | "
+                    f"{item['next_month_label']}-vs-{item['month_label']} {item['next_gap_pct']:+.2f}%"
+                )
+            body_lines.append(
+                f"{item['name']}: Spot {item['spot_price']:.2f} | "
+                f"{item['month_label']} Fut {item['future_price']:.2f} | "
+                f"Spot Match {item['gap_pct']:+.2f}% | "
+                f"{next_future_text} | SPOT FUTURE MATCH"
+            )
+        body = "\n".join(body_lines)
+        report_month = chunk[0]["month_label"] if chunk else "MONTHLY"
+        alerts.append(f"📌 {report_month} SPOT FUTURE GAP MATCH ALERT\n\n{body}")
     return alerts
 
 
@@ -1852,6 +1899,7 @@ def _get_previous_day_r3_for_interval(kite, token, interval, interval_minutes, n
 
 
 def build_monthly_future_r3_pivot_alerts(kite):
+    return []
     global r3_last_check_time, r3_watch_last_sent_time
 
     now_ist = datetime.now(IST)
@@ -2059,6 +2107,7 @@ def build_monthly_future_r3_pivot_alerts(kite):
 
 
 def build_stock_future_1hr_s4_alerts(kite):
+    return []
     global s4_last_slot
 
     now_ist = datetime.now(IST)
@@ -2566,17 +2615,14 @@ def _burst_alert_recent(alert_key, cooldown_seconds=120):
 
 def calculate_burst_alerts(kite):
     session = get_burst_session()
-    print(f"DEBUG: calculate_burst_alerts session={session}")
     track_names = get_active_burst_names()
     if not track_names:
-        print(f"DEBUG: calculate_burst_alerts - No track names for session={session}")
         _set_burst_quote_status("inactive", "burst session closed")
         return [], []
 
     _reset_burst_state_if_session_changed(session)
 
     fut_symbols = get_burst_futures(kite, track_names)
-    print(f"DEBUG: calculate_burst_alerts - Tracked futures: {fut_symbols}")
     symbols = list(fut_symbols)
     if session == "nse":
         for name in track_names:
