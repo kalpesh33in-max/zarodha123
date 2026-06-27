@@ -1,0 +1,10 @@
+kiteconnect
+pandas
+flask
+schedule
+websocket-client
+requests
+pyotp
+gunicorn
+twisted
+autobahn
