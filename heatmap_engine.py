@@ -46,16 +46,14 @@ LOT_SIZES = {
     "CRUDEOILM": 1,
 }
 
-INDEX_BURST_NAMES = {"BANKNIFTY", "NIFTY", "MIDCPNIFTY"}
+INDEX_BURST_NAMES = set()
 STOCK_BURST_NAMES = {
     "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "BAJFINANCE", "BAJAJFINSV",
     "INDUSINDBK", "BANKBARODA", "PNB", "RELIANCE", "ONGC", "NTPC", "POWERGRID",
     "COALINDIA", "BPCL", "GAIL", "INFOSYS", "TCS", "HCLTECH", "WIPRO", "TECHM",
     "TATAMOTORS", "M&M", "MARUTI", "ASHOKLEY", "LT", "SUNPHARMA", "ITC", "HINDUNILVR"
 }
-NSE_BURST_TRACK_NAMES = [
-    "BANKNIFTY", "NIFTY", "MIDCPNIFTY",
-]
+NSE_BURST_TRACK_NAMES = []
 MCX_BURST_TRACK_NAMES = [
     "CRUDEOIL",
     "CRUDEOILM",
@@ -73,9 +71,14 @@ BURST_OPTION_STRIKE_RANGE = 30
 STOCK_BURST_OPTION_STRIKE_RANGE = int(os.getenv("STOCK_BURST_OPTION_STRIKE_RANGE", "10"))
 MCX_BURST_OPTION_STRIKE_RANGE = int(os.getenv("MCX_BURST_OPTION_STRIKE_RANGE", "10"))
 BURST_THRESHOLD_LOTS = int(os.getenv("BURST_THRESHOLD_LOTS", "100"))
-INDEX_BURST_THRESHOLD_LOTS = int(os.getenv("INDEX_BURST_THRESHOLD_LOTS", "100"))
-STOCK_BURST_THRESHOLD_LOTS = int(os.getenv("STOCK_BURST_THRESHOLD_LOTS", str(BURST_THRESHOLD_LOTS)))
-MCX_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_BURST_THRESHOLD_LOTS", "100"))
+OPTION_BURST_THRESHOLD_LOTS = int(os.getenv("OPTION_BURST_THRESHOLD_LOTS", "100"))
+FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("FUTURE_BURST_THRESHOLD_LOTS", "2000"))
+INDEX_BURST_THRESHOLD_LOTS = int(os.getenv("INDEX_OPTION_BURST_THRESHOLD_LOTS", str(OPTION_BURST_THRESHOLD_LOTS)))
+STOCK_BURST_THRESHOLD_LOTS = int(os.getenv("STOCK_OPTION_BURST_THRESHOLD_LOTS", str(OPTION_BURST_THRESHOLD_LOTS)))
+MCX_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_OPTION_BURST_THRESHOLD_LOTS", "100"))
+INDEX_FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("INDEX_FUTURE_BURST_THRESHOLD_LOTS", str(FUTURE_BURST_THRESHOLD_LOTS)))
+STOCK_FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("STOCK_FUTURE_BURST_THRESHOLD_LOTS", str(FUTURE_BURST_THRESHOLD_LOTS)))
+MCX_FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_FUTURE_BURST_THRESHOLD_LOTS", str(MCX_BURST_THRESHOLD_LOTS)))
 BURST_REST_FALLBACK_CACHE_SECONDS = int(os.getenv("BURST_REST_FALLBACK_CACHE_SECONDS", "3"))
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 INDEX_FUTURE_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "SENSEX50"}
@@ -176,12 +179,24 @@ def is_burst_underlying(name):
     return name in INDEX_BURST_NAMES or name in STOCK_BURST_NAMES or is_mcx_underlying(name)
 
 
-def get_burst_threshold(name):
+def get_option_burst_threshold(name):
     if is_index_underlying(name):
         return INDEX_BURST_THRESHOLD_LOTS
     if is_mcx_underlying(name):
         return MCX_BURST_THRESHOLD_LOTS
     return STOCK_BURST_THRESHOLD_LOTS
+
+
+def get_future_burst_threshold(name):
+    if is_index_underlying(name):
+        return INDEX_FUTURE_BURST_THRESHOLD_LOTS
+    if is_mcx_underlying(name):
+        return MCX_FUTURE_BURST_THRESHOLD_LOTS
+    return STOCK_FUTURE_BURST_THRESHOLD_LOTS
+
+
+def get_burst_threshold(name):
+    return get_option_burst_threshold(name)
 
 
 def get_burst_option_strike_range(name):
@@ -2417,7 +2432,7 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list, stats=None):
     if not is_burst_underlying(name):
         return
 
-    threshold = get_burst_threshold(name)
+    threshold = get_future_burst_threshold(name)
     lot_size = LOT_SIZES.get(name, 1)
     now = datetime.now(IST)
     key = f"FUT_{symbol}"
@@ -2491,7 +2506,7 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
     if opt_df.empty:
         return
 
-    threshold = get_burst_threshold(name)
+    threshold = get_option_burst_threshold(name)
     lot_size = LOT_SIZES.get(name, 1)
     now = datetime.now(IST)
 
@@ -2624,6 +2639,8 @@ def calculate_burst_alerts(kite):
 
     fut_symbols = get_burst_futures(kite, track_names)
     symbols = list(fut_symbols)
+    future_threshold = max(get_future_burst_threshold(name) for name in track_names)
+    option_threshold = max(get_option_burst_threshold(name) for name in track_names)
     if session == "nse":
         for name in track_names:
             if is_index_underlying(name):
@@ -2644,7 +2661,9 @@ def calculate_burst_alerts(kite):
             "names": ",".join(track_names),
             "source": "none",
             "reason": "no future quotes",
-            "threshold": max(get_burst_threshold(name) for name in track_names),
+            "threshold": f"future={future_threshold}, option={option_threshold}",
+            "future_threshold": future_threshold,
+            "option_threshold": option_threshold,
         })
         return [], []
 
@@ -2654,7 +2673,9 @@ def calculate_burst_alerts(kite):
         "session": session,
         "names": ",".join(track_names),
         "source": quote_source,
-        "threshold": max(get_burst_threshold(name) for name in track_names),
+        "threshold": f"future={future_threshold}, option={option_threshold}",
+        "future_threshold": future_threshold,
+        "option_threshold": option_threshold,
         "future_symbols": len(fut_symbols),
         "future_quotes": 0,
         "future_oi_quotes": 0,
@@ -2720,7 +2741,10 @@ def calculate_burst_alerts(kite):
         stats["reason"] = "no current future quote"
     elif stats["future_oi_quotes"] == 0 and stats["option_oi_quotes"] == 0:
         stats["reason"] = "OI missing/zero in quotes"
-    elif max(stats["max_future_tick_lots"], stats["max_option_tick_lots"]) < stats["threshold"]:
+    elif (
+        stats["max_future_tick_lots"] < stats["future_threshold"]
+        and stats["max_option_tick_lots"] < stats["option_threshold"]
+    ):
         stats["reason"] = "OI move below threshold"
     else:
         stats["reason"] = "watching 15-second confirmation"
@@ -2758,6 +2782,8 @@ def calculate_other_historical_alerts(kite):
         return []
 
     alerts = []
+    alerts.extend(build_previous_day_future_volume_mismatch_alerts(kite))
+    alerts.extend(build_weekly_future_volume_mismatch_alerts(kite))
     alerts.extend(build_stock_future_1hr_s4_alerts(kite))
     alerts.extend(build_weekly_born_breakout_alerts(kite))
     return alerts

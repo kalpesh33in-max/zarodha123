@@ -50,8 +50,8 @@ SEND_WS_HEARTBEAT_STATUS = _env_flag("SEND_WS_HEARTBEAT_STATUS", False)
 SEND_REST_FALLBACK_STATUS = _env_flag("SEND_REST_FALLBACK_STATUS", False)
 SEND_MCX_MONITOR_STATUS = _env_flag("SEND_MCX_MONITOR_STATUS", False)
 
-PRIORITY_BURST = 1
-PRIORITY_GAP = 2
+PRIORITY_GAP = 1
+PRIORITY_BURST = 2
 PRIORITY_FIRST_30M = 3
 PRIORITY_HISTORICAL = 4
 PRIORITY_STATUS = 5
@@ -220,7 +220,6 @@ def _historical_loop(kite, dispatcher, stop_event):
         now = datetime.now(IST)
         if _is_market_open(now):
             try:
-                # 2. First 30m Alerts
                 # first_30m_alerts: Early session volume mismatches
                 # Destination: Default Telegram/Matrix channel (resolved by _resolve_telegram_target)
                 first_30m_alerts = calculate_first_30m_alerts(kite)
@@ -297,7 +296,7 @@ def run_scanner(kite, stop_event=None):
     dispatcher = AlertDispatcher()
     dispatcher.start(stop_event)
     
-    burst_scope = ["BANKNIFTY", "NIFTY", "MIDCPNIFTY", "stocks"]
+    burst_scope = ["stocks"]
     start_msg = (
         "Kite Scanner Login Successful. Priority scanner started. "
         f"Burst alerts enabled for: {', '.join(burst_scope)}. "
