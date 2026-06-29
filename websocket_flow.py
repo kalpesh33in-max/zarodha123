@@ -204,7 +204,7 @@ class FlowEngine:
 
         burst_names = get_burst_subscription_names()
         fut_symbols = get_burst_futures(self.kite, burst_names)
-        include_nse_market_tokens = any(name in {"BANKNIFTY", "NIFTY"} for name in burst_names)
+        include_index_tokens = any(name in {"BANKNIFTY", "NIFTY"} for name in burst_names)
 
         # Exact prefix match to avoid substring collisions (e.g. "NIFTY" vs "BANKNIFTY").
         fut_by_name = {}
@@ -235,7 +235,7 @@ class FlowEngine:
             base_tokens.add(token)
             symbol_by_token[token] = symbol
 
-        if include_nse_market_tokens:
+        if include_index_tokens:
             index_rows = self._load_index_rows()
             if index_rows is not None and not index_rows.empty:
                 row = index_rows.iloc[0]
@@ -244,31 +244,31 @@ class FlowEngine:
                 base_tokens.add(index_token)
                 symbol_by_token[index_token] = INDEX_SYMBOL
 
-            equity_rows = self._load_equity_rows()
-            equity_token_by_symbol = {}
-            if equity_rows is not None and not equity_rows.empty:
-                for _, row in equity_rows.iterrows():
-                    equity_token_by_symbol[str(row["tradingsymbol"])] = int(row["instrument_token"])
+        equity_rows = self._load_equity_rows()
+        equity_token_by_symbol = {}
+        if equity_rows is not None and not equity_rows.empty:
+            for _, row in equity_rows.iterrows():
+                equity_token_by_symbol[str(row["tradingsymbol"])] = int(row["instrument_token"])
 
-            for contract in _get_active_stock_future_contracts():
-                token = int(contract["token"])
-                tokens.add(token)
-                base_tokens.add(token)
-                symbol_by_token[token] = contract["symbol"]
+        for contract in _get_active_stock_future_contracts():
+            token = int(contract["token"])
+            tokens.add(token)
+            base_tokens.add(token)
+            symbol_by_token[token] = contract["symbol"]
 
-                next_token = contract.get("next_token")
-                next_symbol = contract.get("next_symbol")
-                if next_token and next_symbol:
-                    next_token = int(next_token)
-                    tokens.add(next_token)
-                    base_tokens.add(next_token)
-                    symbol_by_token[next_token] = next_symbol
+            next_token = contract.get("next_token")
+            next_symbol = contract.get("next_symbol")
+            if next_token and next_symbol:
+                next_token = int(next_token)
+                tokens.add(next_token)
+                base_tokens.add(next_token)
+                symbol_by_token[next_token] = next_symbol
 
-                spot_token = equity_token_by_symbol.get(contract["name"])
-                if spot_token:
-                    tokens.add(spot_token)
-                    base_tokens.add(spot_token)
-                    symbol_by_token[spot_token] = f"NSE:{contract['name']}"
+            spot_token = equity_token_by_symbol.get(contract["name"])
+            if spot_token:
+                tokens.add(spot_token)
+                base_tokens.add(spot_token)
+                symbol_by_token[spot_token] = f"NSE:{contract['name']}"
 
         for name in burst_names:
             base_symbol = fut_by_name.get(name, "")
