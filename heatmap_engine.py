@@ -6,52 +6,28 @@ from zoneinfo import ZoneInfo
 from kite_rate_limiter import kite_historical_data, kite_quote
 from websocket_flow import get_symbol_quotes, get_token_quotes
 
-LOT_SIZES = {
-    "NIFTY": 65,
-    "BANKNIFTY": 30,
-    "FINNIFTY": 60,
-    "MIDCPNIFTY": 120,
-    "SENSEX": 20,
-    "HDFCBANK": 550,
-    "ICICIBANK": 700,
-    "SBIN": 1500,
-    "AXISBANK": 625,
-    "KOTAKBANK": 400,
-    "BAJFINANCE": 125,
-    "BAJAJFINSV": 500,
-    "INDUSINDBK": 500,
-    "BANKBARODA": 4850,
-    "PNB": 8000,
-    "RELIANCE": 250,
-    "ONGC": 3850,
-    "NTPC": 3000,
-    "POWERGRID": 3600,
-    "COALINDIA": 2100,
-    "BPCL": 1800,
-    "GAIL": 4550,
-    "INFOSYS": 400,
-    "TCS": 175,
-    "HCLTECH": 700,
-    "WIPRO": 1500,
-    "TECHM": 600,
-    "TATAMOTORS": 550,
-    "M&M": 350,
-    "MARUTI": 50,
-    "ASHOKLEY": 5000,
-    "LT": 150,
-    "SUNPHARMA": 700,
-    "ITC": 1600,
-    "HINDUNILVR": 300,
-    "CRUDEOIL": 10,
-    "CRUDEOILM": 1,
-}
-
-INDEX_BURST_NAMES = set()
+INDEX_BURST_NAMES = {"BANKNIFTY"}
 STOCK_BURST_NAMES = {
-    "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "BAJFINANCE", "BAJAJFINSV",
-    "INDUSINDBK", "BANKBARODA", "PNB", "RELIANCE", "ONGC", "NTPC", "POWERGRID",
-    "COALINDIA", "BPCL", "GAIL", "INFOSYS", "TCS", "HCLTECH", "WIPRO", "TECHM",
-    "TATAMOTORS", "M&M", "MARUTI", "ASHOKLEY", "LT", "SUNPHARMA", "ITC", "HINDUNILVR"
+    "RELIANCE", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK",
+    "KOTAKBANK", "BANKBARODA", "PNB", "INDUSINDBK", "AUBANK",
+    "INFY", "TCS", "WIPRO", "HCLTECH", "TECHM",
+    "PERSISTENT", "OFSS", "TATASTEEL", "JSWSTEEL",
+    "JINDALSTEL", "HINDALCO", "VEDL", "NATIONALUM", "SAIL",
+    "COALINDIA", "NMDC", "HINDZINC", "M&M",
+    "MARUTI", "BAJAJ-AUTO", "HEROMOTOCO", "TVSMOTOR", "ASHOKLEY",
+    "EICHERMOT", "BHARATFORG", "LT", "SIEMENS", "ABB",
+    "CUMMINSIND", "CGPOWER", "BHEL", "HAL", "BEL",
+    "CIPLA", "SUNPHARMA", "DRREDDY", "LUPIN",
+    "AUROPHARMA", "ZYDUSLIFE", "TORNTPHARM", "DIVISLAB", "MANKIND",
+    "ITC", "HINDUNILVR", "NESTLEIND", "BRITANNIA", "TATACONSUM",
+    "GODREJCP", "DABUR", "COLPAL", "ASIANPAINT",
+    "GRASIM", "ULTRACEMCO", "SHREECEM", "AMBUJACEM",
+    "ADANIENT", "ADANIPORTS", "ADANIPOWER", "ADANIGREEN", "ADANIENSOL",
+    "NTPC", "POWERGRID", "TATAPOWER", "RECLTD", "PFC",
+    "IOC", "BPCL", "HINDPETRO", "GAIL", "ONGC",
+    "BHARTIARTL", "INDUSTOWER", "IDEA", "ETERNAL", "SWIGGY",
+    "TRENT", "DLF", "GODREJPROP", "PRESTIGE", "LODHA",
+    "INDHOTEL", "DELHIVERY", "BAJFINANCE", "BAJAJFINSV"
 }
 NSE_BURST_TRACK_NAMES = []
 MCX_BURST_TRACK_NAMES = [
@@ -68,13 +44,14 @@ ENABLE_INDEX_BURST_ALERTS = os.getenv("ENABLE_INDEX_BURST_ALERTS", "false").lowe
 )
 ENABLE_MCX_BURST_ALERTS = False
 BURST_OPTION_STRIKE_RANGE = 30
-STOCK_BURST_OPTION_STRIKE_RANGE = int(os.getenv("STOCK_BURST_OPTION_STRIKE_RANGE", "10"))
+BANKNIFTY_BURST_OPTION_STRIKE_RANGE = 15
+STOCK_BURST_OPTION_STRIKE_RANGE = 5
 MCX_BURST_OPTION_STRIKE_RANGE = int(os.getenv("MCX_BURST_OPTION_STRIKE_RANGE", "10"))
 BURST_THRESHOLD_LOTS = int(os.getenv("BURST_THRESHOLD_LOTS", "100"))
 OPTION_BURST_THRESHOLD_LOTS = int(os.getenv("OPTION_BURST_THRESHOLD_LOTS", "100"))
 FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("FUTURE_BURST_THRESHOLD_LOTS", "2000"))
 INDEX_BURST_THRESHOLD_LOTS = int(os.getenv("INDEX_OPTION_BURST_THRESHOLD_LOTS", str(OPTION_BURST_THRESHOLD_LOTS)))
-STOCK_BURST_THRESHOLD_LOTS = int(os.getenv("STOCK_OPTION_BURST_THRESHOLD_LOTS", str(OPTION_BURST_THRESHOLD_LOTS)))
+STOCK_BURST_THRESHOLD_LOTS = 300
 MCX_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_OPTION_BURST_THRESHOLD_LOTS", "100"))
 INDEX_FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("INDEX_FUTURE_BURST_THRESHOLD_LOTS", str(FUTURE_BURST_THRESHOLD_LOTS)))
 STOCK_FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("STOCK_FUTURE_BURST_THRESHOLD_LOTS", str(FUTURE_BURST_THRESHOLD_LOTS)))
@@ -110,9 +87,12 @@ born_breakout_alert_store = {}
 burst_alert_store = {}
 
 _options_df = None
+_options_mtime = None
 _futures_df = None
+_futures_mtime = None
 _last_logged_expiry = {}
 _historical_cache = {}
+_missing_lot_size_logs = set()
 _burst_rest_symbol_cache = {"ts": 0.0, "data": {}}
 _burst_rest_option_cache = {"ts": 0.0, "data": {}}
 _burst_quote_status = {
@@ -202,6 +182,8 @@ def get_burst_threshold(name):
 def get_burst_option_strike_range(name):
     if is_mcx_underlying(name):
         return MCX_BURST_OPTION_STRIKE_RANGE
+    if name == "BANKNIFTY":
+        return BANKNIFTY_BURST_OPTION_STRIKE_RANGE
     if name in STOCK_BURST_NAMES:
         return STOCK_BURST_OPTION_STRIKE_RANGE
     return BURST_OPTION_STRIKE_RANGE
@@ -332,9 +314,17 @@ def get_next_monthly_expiry(expiries):
     return future_monthlies[0] if future_monthlies else ordered_monthlies[-1]
 
 
+def _get_instruments_mtime():
+    try:
+        return os.path.getmtime("instruments.csv")
+    except OSError:
+        return None
+
+
 def load_options_data():
-    global _options_df
-    if _options_df is None:
+    global _options_df, _options_mtime
+    current_mtime = _get_instruments_mtime()
+    if _options_df is None or _options_mtime != current_mtime:
         try:
             df = pd.read_csv("instruments.csv", low_memory=False)
             _options_df = df[df["segment"].isin(["NFO-OPT", "BFO-OPT", "MCX-OPT"])].copy()
@@ -342,14 +332,16 @@ def load_options_data():
             if expiry.isna().mean() > 0.05:
                 expiry = pd.to_datetime(_options_df["expiry"], dayfirst=True, errors="coerce")
             _options_df["expiry"] = expiry
+            _options_mtime = current_mtime
         except Exception as e:
             print(f"Error loading Options: {e}")
     return _options_df
 
 
 def load_futures_data():
-    global _futures_df
-    if _futures_df is None:
+    global _futures_df, _futures_mtime
+    current_mtime = _get_instruments_mtime()
+    if _futures_df is None or _futures_mtime != current_mtime:
         try:
             df = pd.read_csv("instruments.csv", low_memory=False)
             _futures_df = df[df["segment"].str.contains("-FUT", na=False)].copy()
@@ -357,9 +349,45 @@ def load_futures_data():
             if expiry.isna().mean() > 0.05:
                 expiry = pd.to_datetime(_futures_df["expiry"], dayfirst=True, errors="coerce")
             _futures_df["expiry"] = expiry
+            _futures_mtime = current_mtime
         except Exception as e:
             print(f"Error loading Futures: {e}")
     return _futures_df
+
+
+def _normalize_lot_size(value):
+    try:
+        if pd.isna(value):
+            return None
+        lot_size = int(float(value))
+    except Exception:
+        return None
+    return lot_size if lot_size > 0 else None
+
+
+def _get_row_lot_size(row):
+    if row is None or "lot_size" not in row:
+        return None
+    return _normalize_lot_size(row.get("lot_size"))
+
+
+def get_future_lot_size(symbol):
+    df = load_futures_data()
+    if df is None or df.empty or not symbol:
+        return None
+
+    tradingsymbol = symbol.split(":", 1)[1] if ":" in symbol else symbol
+    rows = df[df["tradingsymbol"] == tradingsymbol]
+    if rows.empty:
+        return None
+    return _get_row_lot_size(rows.iloc[0])
+
+
+def _log_missing_lot_size_once(key, label):
+    if key in _missing_lot_size_logs:
+        return
+    _missing_lot_size_logs.add(key)
+    print(f"Skipping burst lot calculation: lot_size missing in instruments.csv for {label}.")
 
 
 def load_stock_futures_data():
@@ -2433,7 +2461,11 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list, stats=None):
         return
 
     threshold = get_future_burst_threshold(name)
-    lot_size = LOT_SIZES.get(name, 1)
+    lot_size = get_future_lot_size(symbol)
+    if not lot_size:
+        _log_missing_lot_size_once(f"future:{symbol}", symbol)
+        return
+
     now = datetime.now(IST)
     key = f"FUT_{symbol}"
     if key not in option_history:
@@ -2461,6 +2493,7 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list, stats=None):
                 "end_time": now + timedelta(seconds=15),
                 "symbol": symbol,
                 "name": name,
+                "lot_size": lot_size,
                 "expiry_text": get_future_expiry_text(symbol) if is_mcx_underlying(name) else "",
             }
 
@@ -2469,7 +2502,8 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list, stats=None):
         if now >= watch["end_time"]:
             oi_chg = oi - watch["start_oi"]
             p_chg = ltp - watch["start_price"]
-            final_lots = int(abs(oi_chg) / lot_size)
+            final_lot_size = _normalize_lot_size(watch.get("lot_size")) or lot_size
+            final_lots = int(abs(oi_chg) / final_lot_size)
             if final_lots >= threshold:
                 strength = get_strength_label(final_lots, watch["name"])
                 action = classify_action(watch["symbol"], oi_chg, p_chg)
@@ -2507,12 +2541,19 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
         return
 
     threshold = get_option_burst_threshold(name)
-    lot_size = LOT_SIZES.get(name, 1)
     now = datetime.now(IST)
 
     for _, row in opt_df.iterrows():
         t_str = str(int(row["instrument_token"]))
         if t_str not in option_quotes:
+            continue
+
+        lot_size = _get_row_lot_size(row)
+        if not lot_size:
+            _log_missing_lot_size_once(
+                f"option:{t_str}",
+                row.get("tradingsymbol", t_str),
+            )
             continue
         
         q = option_quotes[t_str]
@@ -2553,6 +2594,7 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
                     "end_time": now + timedelta(seconds=15),
                     "symbol": row["tradingsymbol"],
                     "underlying": name,
+                    "lot_size": lot_size,
                     "expiry_text": expiry_text,
                 }
 
@@ -2561,7 +2603,8 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
             if now >= watch["end_time"]:
                 oi_chg = curr_oi - watch["start_oi"]
                 p_chg = ltp - watch["start_price"]
-                final_lots = int(abs(oi_chg) / lot_size)
+                final_lot_size = _normalize_lot_size(watch.get("lot_size")) or lot_size
+                final_lots = int(abs(oi_chg) / final_lot_size)
                 if final_lots >= threshold:
                     strength = get_strength_label(final_lots, watch["underlying"])
                     action = classify_action(watch["symbol"], oi_chg, p_chg)
@@ -2586,16 +2629,22 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
 
 
 def _map_tracked_futures_by_name(fut_symbols, names=None):
-    names = list(names or BURST_TRACK_NAMES)
+    names = set(names or BURST_TRACK_NAMES)
     fut_by_name = {}
+    futures = load_futures_data()
     for sym in fut_symbols:
         try:
             tsym = sym.split(":", 1)[1]
         except Exception:
             continue
-        for name in names:
-            if tsym.startswith(name):
-                fut_by_name[name] = sym
+        if futures is None or futures.empty:
+            continue
+        rows = futures[futures["tradingsymbol"] == tsym]
+        if rows.empty:
+            continue
+        name = str(rows.iloc[0].get("name", "") or "")
+        if name in names:
+            fut_by_name[name] = sym
     return fut_by_name
 
 
