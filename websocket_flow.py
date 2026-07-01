@@ -206,16 +206,18 @@ class FlowEngine:
         fut_symbols = get_burst_futures(self.kite, burst_names)
         include_index_tokens = any(name in {"BANKNIFTY", "NIFTY"} for name in burst_names)
 
-        # Exact prefix match to avoid substring collisions (e.g. "NIFTY" vs "BANKNIFTY").
         fut_by_name = {}
         for sym in fut_symbols:
             parts = sym.split(":", 1)
             if len(parts) != 2:
                 continue
             tsym = parts[1]
-            for name in burst_names:
-                if tsym.startswith(name):
-                    fut_by_name[name] = sym
+            rows = futures[futures["tradingsymbol"] == tsym]
+            if rows.empty:
+                continue
+            name = str(rows.iloc[0].get("name", "") or "")
+            if name in burst_names:
+                fut_by_name[name] = sym
 
         symbol_quotes = get_symbol_quotes(fut_symbols, max_age_seconds=60)
         missing_fut_symbols = [symbol for symbol in fut_symbols if symbol not in symbol_quotes]
