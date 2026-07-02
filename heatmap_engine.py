@@ -1451,7 +1451,7 @@ def build_monthly_future_gap_alerts(kite, batch_index=None, max_quote_symbols=No
                 f"{item['next_month_label']} Fut {item['next_future_price']:.2f} ({item['next_lot_size']} Lot) | "
                 f"{item['next_month_label']}-vs-{item['month_label']} "
                 f"{item['next_gap_pct']:+.2f}% ({item['next_gap_points']:.2f}) | "
-                f"{_format_gap_signal(item['gap_pct'])}|",
+                f"{_format_gap_signal(item['gap_pct'])}",
                 f"Loss ({item['loss_value']:.0f}) , Profit ({item['profit_value']:.0f})",
                 "",
             ])
