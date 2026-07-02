@@ -182,9 +182,9 @@ class FlowEngine:
         from heatmap_engine import (
             _get_active_stock_future_contracts,
             get_burst_futures,
-            get_burst_option_strike_range,
+            get_burst_relevant_options,
             get_burst_subscription_names,
-            get_relevant_options,
+            get_spot_symbol,
             load_futures_data,
             load_options_data,
         )
@@ -205,6 +205,10 @@ class FlowEngine:
         burst_names = get_burst_subscription_names()
         fut_symbols = get_burst_futures(self.kite, burst_names)
         include_index_tokens = any(name in {"BANKNIFTY", "NIFTY"} for name in burst_names)
+        spot_symbols_by_name = {
+            name: get_spot_symbol(name)
+            for name in burst_names
+        }
 
         fut_by_name = {}
         for sym in fut_symbols:
@@ -219,11 +223,14 @@ class FlowEngine:
             if name in burst_names:
                 fut_by_name[name] = sym
 
-        symbol_quotes = get_symbol_quotes(fut_symbols, max_age_seconds=60)
-        missing_fut_symbols = [symbol for symbol in fut_symbols if symbol not in symbol_quotes]
+        bootstrap_symbols = list(dict.fromkeys([*fut_symbols, *spot_symbols_by_name.values()]))
+        symbol_quotes = get_symbol_quotes(bootstrap_symbols, max_age_seconds=60)
+        missing_bootstrap_symbols = [
+            symbol for symbol in bootstrap_symbols if symbol not in symbol_quotes
+        ]
         try:
-            if missing_fut_symbols:
-                symbol_quotes.update(kite_quote(self.kite, missing_fut_symbols))
+            if missing_bootstrap_symbols:
+                symbol_quotes.update(kite_quote(self.kite, missing_bootstrap_symbols))
         except Exception as e:
             print(f"WebSocket bootstrap quote failed: {e}")
 
@@ -273,12 +280,12 @@ class FlowEngine:
                 symbol_by_token[spot_token] = f"NSE:{contract['name']}"
 
         for name in burst_names:
-            base_symbol = fut_by_name.get(name, "")
-            u_ltp = symbol_quotes.get(base_symbol, {}).get("last_price", 0)
-            if u_ltp <= 0:
+            spot_symbol = spot_symbols_by_name.get(name, "")
+            spot_ltp = symbol_quotes.get(spot_symbol, {}).get("last_price", 0)
+            if spot_ltp <= 0:
                 continue
 
-            df = get_relevant_options(name, u_ltp, strike_range=get_burst_option_strike_range(name))
+            df = get_burst_relevant_options(name, spot_ltp)
             if df.empty:
                 continue
 

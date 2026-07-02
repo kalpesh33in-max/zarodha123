@@ -47,10 +47,17 @@ BURST_OPTION_STRIKE_RANGE = 30
 BANKNIFTY_BURST_OPTION_STRIKE_RANGE = 15
 STOCK_BURST_OPTION_STRIKE_RANGE = 5
 MCX_BURST_OPTION_STRIKE_RANGE = int(os.getenv("MCX_BURST_OPTION_STRIKE_RANGE", "10"))
+STOCK_BURST_STRIKES_BELOW_ATM = 1
+STOCK_BURST_STRIKES_ABOVE_ATM = 7
+BANKNIFTY_BURST_STRIKES_BELOW_ATM = 1
+BANKNIFTY_BURST_STRIKES_ABOVE_ATM = 30
 BURST_THRESHOLD_LOTS = int(os.getenv("BURST_THRESHOLD_LOTS", "100"))
 OPTION_BURST_THRESHOLD_LOTS = int(os.getenv("OPTION_BURST_THRESHOLD_LOTS", "100"))
 FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("FUTURE_BURST_THRESHOLD_LOTS", "2000"))
-INDEX_BURST_THRESHOLD_LOTS = int(os.getenv("INDEX_OPTION_BURST_THRESHOLD_LOTS", str(OPTION_BURST_THRESHOLD_LOTS)))
+BANKNIFTY_OPTION_BURST_THRESHOLD_LOTS = int(os.getenv("BANKNIFTY_OPTION_BURST_THRESHOLD_LOTS", "300"))
+BANKNIFTY_HIGH_PREMIUM_PRICE = float(os.getenv("BANKNIFTY_HIGH_PREMIUM_PRICE", "1500"))
+BANKNIFTY_HIGH_PREMIUM_THRESHOLD_LOTS = int(os.getenv("BANKNIFTY_HIGH_PREMIUM_THRESHOLD_LOTS", "100"))
+INDEX_BURST_THRESHOLD_LOTS = int(os.getenv("INDEX_OPTION_BURST_THRESHOLD_LOTS", str(BANKNIFTY_OPTION_BURST_THRESHOLD_LOTS)))
 STOCK_BURST_THRESHOLD_LOTS = 300
 MCX_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_OPTION_BURST_THRESHOLD_LOTS", "100"))
 INDEX_FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("INDEX_FUTURE_BURST_THRESHOLD_LOTS", str(FUTURE_BURST_THRESHOLD_LOTS)))
@@ -110,9 +117,6 @@ MCX_BURST_START_TIME = datetime.strptime("15:30", "%H:%M").time()
 MCX_BURST_END_TIME = datetime.strptime("23:30:59", "%H:%M:%S").time()
 MONTHLY_FUTURE_GAP_THRESHOLD_PCT = 2.0
 MONTHLY_FUTURE_NEXT_GAP_MAX_PCT = 1.0
-MONTHLY_FUTURE_MATCH_ABOVE_PCT = 0.5
-MONTHLY_FUTURE_MATCH_BELOW_PCT = 0.95
-MONTHLY_FUTURE_MATCH_NEXT_MIN_PCT = 2.0
 MONTHLY_FUTURE_GAP_START_TIME = datetime.strptime("09:15", "%H:%M").time()
 GAP_ALERT_COOLDOWN_SECONDS = 3600
 R3_PIVOT_ALERT_START_TIME = datetime.strptime("09:15", "%H:%M").time()
@@ -160,11 +164,19 @@ def is_burst_underlying(name):
 
 
 def get_option_burst_threshold(name):
+    if name == "BANKNIFTY":
+        return BANKNIFTY_OPTION_BURST_THRESHOLD_LOTS
     if is_index_underlying(name):
         return INDEX_BURST_THRESHOLD_LOTS
     if is_mcx_underlying(name):
         return MCX_BURST_THRESHOLD_LOTS
     return STOCK_BURST_THRESHOLD_LOTS
+
+
+def get_option_burst_threshold_for_price(name, price):
+    if name == "BANKNIFTY" and float(price or 0) >= BANKNIFTY_HIGH_PREMIUM_PRICE:
+        return BANKNIFTY_HIGH_PREMIUM_THRESHOLD_LOTS
+    return get_option_burst_threshold(name)
 
 
 def get_future_burst_threshold(name):
@@ -187,6 +199,14 @@ def get_burst_option_strike_range(name):
     if name in STOCK_BURST_NAMES:
         return STOCK_BURST_OPTION_STRIKE_RANGE
     return BURST_OPTION_STRIKE_RANGE
+
+
+def get_burst_option_strike_window(name):
+    if name == "BANKNIFTY":
+        return BANKNIFTY_BURST_STRIKES_BELOW_ATM, BANKNIFTY_BURST_STRIKES_ABOVE_ATM
+    if name in STOCK_BURST_NAMES:
+        return STOCK_BURST_STRIKES_BELOW_ATM, STOCK_BURST_STRIKES_ABOVE_ATM
+    return 1, get_burst_option_strike_range(name)
 
 
 def get_burst_session(now_ist=None):
@@ -693,12 +713,14 @@ def _get_active_stock_future_contracts():
         next_month_label = "Next"
         next_token = None
         next_expiry = None
+        next_lot_size = None
         if not next_futures.empty:
             next_row = next_futures.iloc[0]
             next_symbol = f"NFO:{next_row['tradingsymbol']}"
             next_month_label = _format_month_label(next_row["expiry"])
             next_token = int(next_row["instrument_token"])
             next_expiry = next_row["expiry"]
+            next_lot_size = _get_row_lot_size(next_row)
 
         contracts.append(
             {
@@ -707,10 +729,12 @@ def _get_active_stock_future_contracts():
                 "token": int(row["instrument_token"]),
                 "expiry": current_expiry,
                 "month_label": _format_month_label(current_expiry),
+                "lot_size": _get_row_lot_size(row),
                 "next_symbol": next_symbol,
                 "next_month_label": next_month_label,
                 "next_token": next_token,
                 "next_expiry": next_expiry,
+                "next_lot_size": next_lot_size,
             }
         )
     return contracts
@@ -1184,6 +1208,50 @@ def get_relevant_options(name, ltp, strike_range=None):
     return pd.concat(selected_frames, ignore_index=True)
 
 
+def get_burst_relevant_options(name, spot_ltp):
+    df = load_options_data()
+    if df is None or df.empty or spot_ltp <= 0:
+        return pd.DataFrame()
+
+    options = df[df["name"] == name]
+    if options.empty:
+        return pd.DataFrame()
+
+    monthly_expiry = get_monthly_expiry(options["expiry"].unique())
+    if monthly_expiry is None:
+        return pd.DataFrame()
+
+    log_key = f"burst_options:{name}"
+    expiry_text = monthly_expiry.strftime("%d-%m-%Y")
+    if _last_logged_expiry.get(log_key) != expiry_text:
+        print(f"Selected burst options expiry for {name}: {expiry_text}")
+        _last_logged_expiry[log_key] = expiry_text
+
+    options = options[options["expiry"] == monthly_expiry].copy()
+    if options.empty:
+        return pd.DataFrame()
+
+    below_count, above_count = get_burst_option_strike_window(name)
+    selected_frames = []
+
+    for expiry, expiry_options in options.groupby("expiry"):
+        strikes = sorted(expiry_options["strike"].unique())
+        if not strikes:
+            continue
+
+        atm = min(strikes, key=lambda x: abs(x - spot_ltp))
+        idx = strikes.index(atm)
+        selected = strikes[max(0, idx - below_count): idx + above_count + 1]
+        selected_frames.append(
+            expiry_options[expiry_options["strike"].isin(selected)].copy()
+        )
+
+    if not selected_frames:
+        return pd.DataFrame()
+
+    return pd.concat(selected_frames, ignore_index=True)
+
+
 def get_strength_label(lots, name="BANKNIFTY"):
     if is_mcx_underlying(name):
         if lots >= 400:
@@ -1269,6 +1337,8 @@ def build_monthly_future_gap_alerts(kite, batch_index=None, max_quote_symbols=No
             contract["month_label"],
             contract["next_symbol"],
             contract["next_month_label"],
+            contract.get("lot_size"),
+            contract.get("next_lot_size"),
         )
         for contract in future_contracts
     ]
@@ -1293,7 +1363,7 @@ def build_monthly_future_gap_alerts(kite, batch_index=None, max_quote_symbols=No
             symbol_pairs = batches[batch_index % len(batches)]
 
     quote_symbols = []
-    for _, spot_symbol, future_symbol, _, next_symbol, _ in symbol_pairs:
+    for _, spot_symbol, future_symbol, _, next_symbol, _, _, _ in symbol_pairs:
         quote_symbols.append(spot_symbol)
         quote_symbols.append(future_symbol)
         if next_symbol:
@@ -1305,26 +1375,40 @@ def build_monthly_future_gap_alerts(kite, batch_index=None, max_quote_symbols=No
 
     now = datetime.now(IST)
     rows = []
-    match_rows = []
-    for name, spot_symbol, future_symbol, month_label, next_symbol, next_month_label in symbol_pairs:
+    for (
+        name,
+        spot_symbol,
+        future_symbol,
+        month_label,
+        next_symbol,
+        next_month_label,
+        lot_size,
+        next_lot_size,
+    ) in symbol_pairs:
+        if not lot_size or not next_lot_size or lot_size != next_lot_size:
+            continue
+
         spot_price = data.get(spot_symbol, {}).get("last_price", 0)
         future_price = data.get(future_symbol, {}).get("last_price", 0)
         if spot_price <= 0 or future_price <= 0:
             continue
 
-        gap_pct = ((future_price - spot_price) / spot_price) * 100
         next_future_price = data.get(next_symbol, {}).get("last_price", 0) if next_symbol else 0
-        next_gap_pct = None
-        if next_future_price > 0:
-            next_gap_pct = ((next_future_price - future_price) / future_price) * 100
+        if next_future_price <= 0:
+            continue
+
+        gap_points = next_future_price - spot_price
+        next_gap_points = next_future_price - future_price
+        gap_pct = (gap_points / spot_price) * 100
+        next_gap_pct = (next_gap_points / future_price) * 100
 
         # Updated Gap Hedge Logic:
-        # 1. Absolute gap between Spot and Future must be GREATER THAN OR EQUAL to 2.0%
-        # 2. Absolute gap between the two Futures (Near vs Next) must be LESS THAN OR EQUAL to 0.5%
+        # 1. Absolute gap between Spot and Next Future must be GREATER THAN OR EQUAL to 2.0%
+        # 2. Absolute gap between the two Futures (Near vs Next) must be LESS THAN OR EQUAL to 1.0%
         if abs(gap_pct) < MONTHLY_FUTURE_GAP_THRESHOLD_PCT:
             continue
 
-        if next_gap_pct is None or abs(next_gap_pct) > MONTHLY_FUTURE_NEXT_GAP_MAX_PCT:
+        if abs(next_gap_pct) > MONTHLY_FUTURE_NEXT_GAP_MAX_PCT:
             continue
 
         last_sent = gap_alert_store.get(future_symbol)
@@ -1338,68 +1422,43 @@ def build_monthly_future_gap_alerts(kite, batch_index=None, max_quote_symbols=No
             "spot_price": spot_price,
             "future_price": future_price,
             "gap_pct": gap_pct,
+            "gap_points": gap_points,
             "next_future_price": next_future_price,
             "next_gap_pct": next_gap_pct,
+            "next_gap_points": next_gap_points,
             "next_month_label": next_month_label,
+            "lot_size": lot_size,
+            "next_lot_size": next_lot_size,
+            "loss_value": abs(next_gap_points) * lot_size,
+            "profit_value": abs(gap_points) * lot_size,
         }
         rows.append(item)
 
-        spot_match_ok = (
-            (gap_pct >= 0 and gap_pct <= MONTHLY_FUTURE_MATCH_ABOVE_PCT)
-            or (gap_pct < 0 and abs(gap_pct) <= MONTHLY_FUTURE_MATCH_BELOW_PCT)
-        )
-        next_move_ok = abs(next_gap_pct) >= MONTHLY_FUTURE_MATCH_NEXT_MIN_PCT
-        if spot_match_ok and next_move_ok:
-            match_rows.append(item)
-
-    if not rows and not match_rows:
+    if not rows:
         return []
 
     rows.sort(key=lambda item: abs(item["gap_pct"]), reverse=True)
-    match_rows.sort(key=lambda item: abs(item["gap_pct"]), reverse=True)
     alerts = []
     chunk_size = 20
     for i in range(0, len(rows), chunk_size):
         chunk = rows[i:i + chunk_size]
         body_lines = []
         for item in chunk:
-            if item["next_gap_pct"] is None:
-                next_future_text = f"Next Fut NA | Next-vs-{item['month_label']} NA"
-            else:
-                next_future_text = (
-                    f"{item['next_month_label']} Fut {item['next_future_price']:.2f} | "
-                    f"{item['next_month_label']}-vs-{item['month_label']} {item['next_gap_pct']:+.2f}%"
-                )
-            body_lines.append(
+            body_lines.extend([
                 f"{item['name']}: Spot {item['spot_price']:.2f} | "
-                f"{item['month_label']} Fut {item['future_price']:.2f} | "
-                f"Spot Gap {item['gap_pct']:+.2f}% | "
-                f"{next_future_text} | {_format_gap_signal(item['gap_pct'])}"
-            )
+                f"{item['month_label']} Fut {item['future_price']:.2f} ({item['lot_size']} Lot) | "
+                f"{item['next_month_label']}-vs-Spot Gap {item['gap_pct']:+.2f}% ({item['gap_points']:.2f}) |",
+                f"{item['next_month_label']} Fut {item['next_future_price']:.2f} ({item['next_lot_size']} Lot) | "
+                f"{item['next_month_label']}-vs-{item['month_label']} "
+                f"{item['next_gap_pct']:+.2f}% ({item['next_gap_points']:.2f}) | "
+                f"{_format_gap_signal(item['gap_pct'])}|",
+                f"Loss ({item['loss_value']:.0f}) , Profit ({item['profit_value']:.0f})",
+                "",
+            ])
         body = "\n".join(body_lines)
         report_month = chunk[0]["month_label"] if chunk else "MONTHLY"
         alerts.append(f"📊 {report_month} FUTURE GAP REPORT\n\n{body}")
 
-    for i in range(0, len(match_rows), chunk_size):
-        chunk = match_rows[i:i + chunk_size]
-        body_lines = []
-        for item in chunk:
-            if item["next_gap_pct"] is None:
-                next_future_text = f"Next Fut NA | Next-vs-{item['month_label']} NA"
-            else:
-                next_future_text = (
-                    f"{item['next_month_label']} Fut {item['next_future_price']:.2f} | "
-                    f"{item['next_month_label']}-vs-{item['month_label']} {item['next_gap_pct']:+.2f}%"
-                )
-            body_lines.append(
-                f"{item['name']}: Spot {item['spot_price']:.2f} | "
-                f"{item['month_label']} Fut {item['future_price']:.2f} | "
-                f"Spot Match {item['gap_pct']:+.2f}% | "
-                f"{next_future_text} | SPOT FUTURE MATCH"
-            )
-        body = "\n".join(body_lines)
-        report_month = chunk[0]["month_label"] if chunk else "MONTHLY"
-        alerts.append(f"📌 {report_month} SPOT FUTURE GAP MATCH ALERT\n\n{body}")
     return alerts
 
 
@@ -2540,7 +2599,6 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
     if opt_df.empty:
         return
 
-    threshold = get_option_burst_threshold(name)
     now = datetime.now(IST)
 
     for _, row in opt_df.iterrows():
@@ -2559,6 +2617,7 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
         q = option_quotes[t_str]
         curr_oi = q.get("oi", 0)
         ltp = q.get("last_price", 0)
+        threshold = get_option_burst_threshold_for_price(name, ltp)
         t_int = int(row["instrument_token"])
 
         if stats is not None:
@@ -2605,7 +2664,8 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
                 p_chg = ltp - watch["start_price"]
                 final_lot_size = _normalize_lot_size(watch.get("lot_size")) or lot_size
                 final_lots = int(abs(oi_chg) / final_lot_size)
-                if final_lots >= threshold:
+                final_threshold = get_option_burst_threshold_for_price(watch["underlying"], ltp)
+                if final_lots >= final_threshold:
                     strength = get_strength_label(final_lots, watch["underlying"])
                     action = classify_action(watch["symbol"], oi_chg, p_chg)
                     p_icon = "▲" if p_chg >= 0 else "▼"
@@ -2687,19 +2747,20 @@ def calculate_burst_alerts(kite):
     _reset_burst_state_if_session_changed(session)
 
     fut_symbols = get_burst_futures(kite, track_names)
-    symbols = list(fut_symbols)
+    spot_symbols_by_name = {
+        name: get_spot_symbol(name)
+        for name in track_names
+        if session == "nse"
+    }
+    symbols = list(dict.fromkeys([*fut_symbols, *spot_symbols_by_name.values()]))
     future_threshold = max(get_future_burst_threshold(name) for name in track_names)
     option_threshold = max(get_option_burst_threshold(name) for name in track_names)
-    if session == "nse":
-        for name in track_names:
-            if is_index_underlying(name):
-                symbols.append(get_spot_symbol(name))
     fut_by_name = _map_tracked_futures_by_name(fut_symbols, track_names)
 
     quote_source = "websocket"
     data = get_symbol_quotes_ws_only(symbols, max_age_seconds=15)
-    missing_futures = [symbol for symbol in fut_symbols if symbol not in data]
-    if not data or missing_futures:
+    missing_symbols = [symbol for symbol in symbols if symbol not in data]
+    if not data or missing_symbols:
         data = _get_burst_symbol_quotes_with_fallback(kite, symbols)
         quote_source = "rest_fallback"
 
@@ -2741,9 +2802,11 @@ def calculate_burst_alerts(kite):
     for name in track_names:
         base_symbol = fut_by_name.get(name, "")
         u_ltp = data.get(base_symbol, {}).get("last_price", 0)
+        spot_symbol = spot_symbols_by_name.get(name)
+        spot_ltp = data.get(spot_symbol, {}).get("last_price", 0) if spot_symbol else 0
         if u_ltp <= 0:
             continue
-        df = get_relevant_options(name, u_ltp, strike_range=get_burst_option_strike_range(name))
+        df = get_burst_relevant_options(name, spot_ltp)
         if df.empty:
             continue
         underlying_map[name] = (df, u_ltp)
