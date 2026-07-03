@@ -43,27 +43,29 @@ ENABLE_INDEX_BURST_ALERTS = os.getenv("ENABLE_INDEX_BURST_ALERTS", "false").lowe
     "on",
 )
 ENABLE_MCX_BURST_ALERTS = False
-BURST_OPTION_STRIKE_RANGE = 30
-BANKNIFTY_BURST_OPTION_STRIKE_RANGE = 15
+BURST_OPTION_STRIKE_RANGE = 25
+BANKNIFTY_BURST_OPTION_STRIKE_RANGE = 25
 STOCK_BURST_OPTION_STRIKE_RANGE = 5
 MCX_BURST_OPTION_STRIKE_RANGE = int(os.getenv("MCX_BURST_OPTION_STRIKE_RANGE", "10"))
-STOCK_BURST_STRIKES_BELOW_ATM = 1
-STOCK_BURST_STRIKES_ABOVE_ATM = 7
-BANKNIFTY_BURST_STRIKES_BELOW_ATM = 1
-BANKNIFTY_BURST_STRIKES_ABOVE_ATM = 30
+STOCK_BURST_STRIKES_BELOW_ATM = 5
+STOCK_BURST_STRIKES_ABOVE_ATM = 5
+BANKNIFTY_BURST_STRIKES_BELOW_ATM = 25
+BANKNIFTY_BURST_STRIKES_ABOVE_ATM = 25
 BURST_THRESHOLD_LOTS = int(os.getenv("BURST_THRESHOLD_LOTS", "100"))
 OPTION_BURST_THRESHOLD_LOTS = int(os.getenv("OPTION_BURST_THRESHOLD_LOTS", "100"))
-FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("FUTURE_BURST_THRESHOLD_LOTS", "2000"))
-BANKNIFTY_OPTION_BURST_THRESHOLD_LOTS = int(os.getenv("BANKNIFTY_OPTION_BURST_THRESHOLD_LOTS", "300"))
+FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("FUTURE_BURST_THRESHOLD_LOTS", "1000"))
+BANKNIFTY_OPTION_BURST_THRESHOLD_LOTS = int(os.getenv("BANKNIFTY_OPTION_BURST_THRESHOLD_LOTS", "100"))
 BANKNIFTY_HIGH_PREMIUM_PRICE = float(os.getenv("BANKNIFTY_HIGH_PREMIUM_PRICE", "1500"))
 BANKNIFTY_HIGH_PREMIUM_THRESHOLD_LOTS = int(os.getenv("BANKNIFTY_HIGH_PREMIUM_THRESHOLD_LOTS", "100"))
-INDEX_BURST_THRESHOLD_LOTS = int(os.getenv("INDEX_OPTION_BURST_THRESHOLD_LOTS", str(BANKNIFTY_OPTION_BURST_THRESHOLD_LOTS)))
-STOCK_BURST_THRESHOLD_LOTS = 300
+INDEX_BURST_THRESHOLD_LOTS = int(os.getenv("INDEX_OPTION_BURST_THRESHOLD_LOTS", str(OPTION_BURST_THRESHOLD_LOTS)))
+STOCK_BURST_THRESHOLD_LOTS = int(os.getenv("STOCK_OPTION_BURST_THRESHOLD_LOTS", str(OPTION_BURST_THRESHOLD_LOTS)))
 MCX_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_OPTION_BURST_THRESHOLD_LOTS", "100"))
 INDEX_FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("INDEX_FUTURE_BURST_THRESHOLD_LOTS", str(FUTURE_BURST_THRESHOLD_LOTS)))
 STOCK_FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("STOCK_FUTURE_BURST_THRESHOLD_LOTS", str(FUTURE_BURST_THRESHOLD_LOTS)))
-MCX_FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_FUTURE_BURST_THRESHOLD_LOTS", str(MCX_BURST_THRESHOLD_LOTS)))
+MCX_FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_FUTURE_BURST_THRESHOLD_LOTS", str(FUTURE_BURST_THRESHOLD_LOTS)))
 BURST_REST_FALLBACK_CACHE_SECONDS = int(os.getenv("BURST_REST_FALLBACK_CACHE_SECONDS", "3"))
+DEBUG_BURST_PRICE_NORMALIZATION = os.getenv("DEBUG_BURST_PRICE_NORMALIZATION", "false").lower() in ("true", "1", "yes", "on")
+DEBUG_BURST_STRIKES = os.getenv("DEBUG_BURST_STRIKES", "false").lower() in ("true", "1", "yes", "on")
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 INDEX_FUTURE_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "SENSEX50"}
 TARGET_MONTHLY_EXPIRY_MONTH = int(os.getenv("TARGET_MONTHLY_EXPIRY_MONTH", "7"))
@@ -192,8 +194,6 @@ def get_burst_threshold(name):
 
 
 def get_burst_option_strike_range(name):
-    if is_mcx_underlying(name):
-        return MCX_BURST_OPTION_STRIKE_RANGE
     if name == "BANKNIFTY":
         return BANKNIFTY_BURST_OPTION_STRIKE_RANGE
     if name in STOCK_BURST_NAMES:
@@ -383,6 +383,20 @@ def _normalize_lot_size(value):
     except Exception:
         return None
     return lot_size if lot_size > 0 else None
+
+
+def _normalize_burst_price(name, price):
+    try:
+        value = float(price or 0)
+    except Exception:
+        return 0.0
+
+    # Some BANKNIFTY index-future feeds have been observed arriving 100x too large.
+    if name == "BANKNIFTY" and value >= 100000:
+        if DEBUG_BURST_PRICE_NORMALIZATION:
+            print(f"[BURST DEBUG] Normalizing {name} price from {value} to {value / 100.0}")
+        return value / 100.0
+    return value
 
 
 def _get_row_lot_size(row):
@@ -1208,9 +1222,10 @@ def get_relevant_options(name, ltp, strike_range=None):
     return pd.concat(selected_frames, ignore_index=True)
 
 
-def get_burst_relevant_options(name, spot_ltp):
+def get_burst_relevant_options(name, future_ltp):
     df = load_options_data()
-    if df is None or df.empty or spot_ltp <= 0:
+    future_ltp = _normalize_burst_price(name, future_ltp)
+    if df is None or df.empty or future_ltp <= 0:
         return pd.DataFrame()
 
     options = df[df["name"] == name]
@@ -1239,9 +1254,19 @@ def get_burst_relevant_options(name, spot_ltp):
         if not strikes:
             continue
 
-        atm = min(strikes, key=lambda x: abs(x - spot_ltp))
+        atm = min(strikes, key=lambda x: abs(x - future_ltp))
         idx = strikes.index(atm)
-        selected = strikes[max(0, idx - below_count): idx + above_count + 1]
+        ce_selected = strikes[max(0, idx - above_count): idx + 1]
+        pe_selected = strikes[idx: idx + below_count + 1]
+        selected = sorted(set(ce_selected + pe_selected))
+        if DEBUG_BURST_STRIKES:
+            print(
+                f"[BURST DEBUG] {name} future_ltp={future_ltp:.2f} "
+                f"atm={atm} ce={ce_selected[:5]}{'...' if len(ce_selected) > 5 else ''} "
+                f"pe={pe_selected[:5]}{'...' if len(pe_selected) > 5 else ''} "
+                f"selected={selected[:5]}{'...' if len(selected) > 5 else ''} "
+                f"count={len(selected)}"
+            )
         selected_frames.append(
             expiry_options[expiry_options["strike"].isin(selected)].copy()
         )
@@ -2519,6 +2544,8 @@ def process_future_burst(symbol, name, ltp, oi, alerts_list, stats=None):
     if not is_burst_underlying(name):
         return
 
+    ltp = _normalize_burst_price(name, ltp)
+
     threshold = get_future_burst_threshold(name)
     lot_size = get_future_lot_size(symbol)
     if not lot_size:
@@ -2600,6 +2627,17 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
         return
 
     now = datetime.now(IST)
+    u_ltp = _normalize_burst_price(name, u_ltp)
+    if DEBUG_BURST_STRIKES:
+        try:
+            strikes = sorted({float(row["strike"]) for _, row in opt_df.iterrows()})
+            print(
+                f"[BURST RUNTIME DEBUG] {name} future_ltp={u_ltp:.2f} "
+                f"option_rows={len(opt_df)} selected_strikes={strikes[:5]}{'...' if len(strikes) > 5 else ''} "
+                f"count={len(strikes)}"
+            )
+        except Exception as e:
+            print(f"[BURST RUNTIME DEBUG] {name} strike debug failed: {e}")
 
     for _, row in opt_df.iterrows():
         t_str = str(int(row["instrument_token"]))
@@ -2617,6 +2655,7 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
         q = option_quotes[t_str]
         curr_oi = q.get("oi", 0)
         ltp = q.get("last_price", 0)
+        ltp = float(ltp or 0)
         threshold = get_option_burst_threshold_for_price(name, ltp)
         t_int = int(row["instrument_token"])
 
@@ -2802,11 +2841,9 @@ def calculate_burst_alerts(kite):
     for name in track_names:
         base_symbol = fut_by_name.get(name, "")
         u_ltp = data.get(base_symbol, {}).get("last_price", 0)
-        spot_symbol = spot_symbols_by_name.get(name)
-        spot_ltp = data.get(spot_symbol, {}).get("last_price", 0) if spot_symbol else 0
         if u_ltp <= 0:
             continue
-        df = get_burst_relevant_options(name, spot_ltp)
+        df = get_burst_relevant_options(name, u_ltp)
         if df.empty:
             continue
         underlying_map[name] = (df, u_ltp)
@@ -2836,7 +2873,7 @@ def calculate_burst_alerts(kite):
             continue
 
         d = data[sym]
-        ltp = d["last_price"]
+        ltp = _normalize_burst_price(name, d["last_price"])
         oi = d.get("oi", 0)
         target_alerts = bn_alerts if is_index_underlying(name) else stock_alerts
 

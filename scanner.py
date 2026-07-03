@@ -7,7 +7,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from env_config import (
-    TELE_CHAT_ID_BN, TELE_TOKEN_BN, MATRIX_ROOM_ID_BN
+    TELE_CHAT_ID_BN, TELE_TOKEN_BN
 )
 from heatmap_engine import (
     ENABLE_INDEX_BURST_ALERTS,
@@ -21,7 +21,6 @@ from heatmap_engine import (
     is_burst_session_open,
 )
 from telegram_utils import send_telegram_message
-from matrix_utils import refresh_matrix_token, send_matrix_message
 from websocket_flow import get_ws_status
 
 
@@ -79,15 +78,9 @@ class AlertDispatcher:
     def _worker(self, stop_event):
         while not stop_event.is_set():
             try:
-                priority, _, message, chat_id, token, room_id = self._queue.get(timeout=1)
+                priority, _, message, chat_id, token, _room_id = self._queue.get(timeout=1)
             except queue.Empty:
                 continue
-
-            # Send to Matrix (Priority)
-            try:
-                send_matrix_message(message, room_id=room_id)
-            except Exception as e:
-                print(f"Matrix send failed at priority {priority}: {e}")
 
             # Send to Telegram
             try:
@@ -171,7 +164,7 @@ def _burst_loop(kite, dispatcher, stop_event):
                         print(message)
 
                 # All burst alerts: Index, Stock Futures, and MCX
-                # Destination: Telegram BN channel (TELE_CHAT_ID_BN) and Matrix BN room (MATRIX_ROOM_ID_BN)
+                # Destination: Telegram BN channel (TELE_CHAT_ID_BN)
                 for alert in dict.fromkeys([*bn_alerts, *stock_alerts]):
                     print(f"Sending burst alert to {TELE_CHAT_ID_BN}")
                     dispatcher.send(
@@ -179,7 +172,6 @@ def _burst_loop(kite, dispatcher, stop_event):
                         alert,
                         chat_id=TELE_CHAT_ID_BN,
                         token=TELE_TOKEN_BN,
-                        room_id=MATRIX_ROOM_ID_BN,
                     )
             except Exception as e:
                 print(f"Error in burst scanner loop: {e}")
@@ -288,11 +280,6 @@ def run_scanner(kite, stop_event=None):
         stop_event = threading.Event()
 
     print("Scanner session initialized. Starting priority scanner loops...")
-    try:
-        refresh_matrix_token()
-    except Exception as e:
-        print(f"Matrix token refresh at scanner start failed: {e}")
-
     dispatcher = AlertDispatcher()
     dispatcher.start(stop_event)
     
@@ -328,4 +315,3 @@ def run_scanner(kite, stop_event=None):
         print("Scanner loop stopped.")
         msg = "🛑 *Market Scanner Process Ended.*"
         send_telegram_message(msg)
-        send_matrix_message(msg)

@@ -6,8 +6,10 @@ from kiteconnect import KiteTicker
 
 from env_config import API_KEY
 from kite_rate_limiter import kite_quote
+import os
 
 INDEX_SYMBOL = "NSE:NIFTY BANK"
+DEBUG_BURST_STRIKES = os.getenv("DEBUG_BURST_STRIKES", "false").lower() in ("true", "1", "yes", "on")
 
 
 _cache_lock = threading.Lock()
@@ -280,14 +282,22 @@ class FlowEngine:
                 symbol_by_token[spot_token] = f"NSE:{contract['name']}"
 
         for name in burst_names:
-            spot_symbol = spot_symbols_by_name.get(name, "")
-            spot_ltp = symbol_quotes.get(spot_symbol, {}).get("last_price", 0)
-            if spot_ltp <= 0:
+            future_symbol = fut_by_name.get(name, "")
+            future_ltp = symbol_quotes.get(future_symbol, {}).get("last_price", 0)
+            if future_ltp <= 0:
                 continue
 
-            df = get_burst_relevant_options(name, spot_ltp)
+            df = get_burst_relevant_options(name, future_ltp)
             if df.empty:
                 continue
+
+            if DEBUG_BURST_STRIKES:
+                strikes = sorted(set(float(value) for value in df["strike"].tolist()))
+                print(
+                    f"[WS BURST DEBUG] {name} future_ltp={future_ltp:.2f} "
+                    f"selected_strikes={strikes[:5]}{'...' if len(strikes) > 5 else ''} "
+                    f"count={len(strikes)}"
+                )
 
             for token in df["instrument_token"].tolist():
                 token = int(token)
