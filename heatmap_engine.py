@@ -203,10 +203,10 @@ def get_burst_option_strike_range(name):
 
 def get_burst_option_strike_window(name):
     if name == "BANKNIFTY":
-        return BANKNIFTY_BURST_STRIKES_BELOW_ATM, BANKNIFTY_BURST_STRIKES_ABOVE_ATM
+        return BANKNIFTY_BURST_STRIKES_BELOW_ATM, 2
     if name in STOCK_BURST_NAMES:
-        return STOCK_BURST_STRIKES_BELOW_ATM, STOCK_BURST_STRIKES_ABOVE_ATM
-    return 1, get_burst_option_strike_range(name)
+        return 7, 2
+    return 1, 2
 
 
 def get_burst_session(now_ist=None):
