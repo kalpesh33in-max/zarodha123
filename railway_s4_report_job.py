@@ -198,6 +198,16 @@ def upload_to_telegram(df, now_ist):
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="S4")
+        ws = writer.book["S4"]
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        for column_cells in ws.columns:
+            max_len = 0
+            column = column_cells[0].column_letter
+            for cell in column_cells:
+                value = "" if cell.value is None else str(cell.value)
+                max_len = max(max_len, len(value))
+            ws.column_dimensions[column].width = min(max_len + 2, 28)
     buffer.seek(0)
 
     url = f"https://api.telegram.org/bot{TELE_TOKEN}/sendDocument"
@@ -214,6 +224,9 @@ def wait_until_target():
     target_hour, target_minute = map(int, TARGET_TIME.split(":", 1))
     while True:
         now_ist = datetime.now(IST)
+        if now_ist.weekday() > 4:
+            time.sleep(300)
+            continue
         target = now_ist.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
         if now_ist >= target:
             return
@@ -222,10 +235,26 @@ def wait_until_target():
 
 
 def main():
+    now_ist = datetime.now(IST)
+    if now_ist.weekday() > 4 and not RUN_NOW:
+        print("Weekend detected. No report will be generated.")
+        return 0
+
     wait_until_target()
     df, now_ist = build_report()
     local_xlsx = f"s4_report_{now_ist.strftime('%Y%m%d')}.xlsx"
-    df.to_excel(local_xlsx, index=False)
+    with pd.ExcelWriter(local_xlsx, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="S4")
+        ws = writer.book["S4"]
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        for column_cells in ws.columns:
+            max_len = 0
+            column = column_cells[0].column_letter
+            for cell in column_cells:
+                value = "" if cell.value is None else str(cell.value)
+                max_len = max(max_len, len(value))
+            ws.column_dimensions[column].width = min(max_len + 2, 28)
     upload_to_telegram(df, now_ist)
     print(f"Saved and uploaded {local_xlsx}")
     return 0
