@@ -2234,7 +2234,6 @@ def build_monthly_future_r3_pivot_alerts(kite):
 
 
 def build_stock_future_1hr_s4_alerts(kite):
-    return []
     global s4_last_slot
 
     now_ist = datetime.now(IST)

@@ -187,6 +187,7 @@ def login():
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
 
+
 # This block is only executed when run directly (e.g., `python run_kite.py`)
 if __name__ == "__main__":
     print(f"Starting Flask Dev Server directly on port {os.getenv('PORT', 8080)}...")
