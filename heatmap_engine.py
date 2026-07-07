@@ -13,7 +13,7 @@ STOCK_BURST_NAMES = {
     "INFY", "TCS", "WIPRO", "HCLTECH", "TECHM",
     "PERSISTENT", "OFSS", "TATASTEEL", "JSWSTEEL",
     "JINDALSTEL", "HINDALCO", "VEDL", "NATIONALUM", "SAIL",
-    "COALINDIA", "NMDC", "HINDZINC", "M&M",
+    "COALINDIA", "HINDZINC", "M&M",
     "MARUTI", "BAJAJ-AUTO", "HEROMOTOCO", "TVSMOTOR", "ASHOKLEY",
     "EICHERMOT", "BHARATFORG", "LT", "SIEMENS", "ABB",
     "CUMMINSIND", "CGPOWER", "BHEL", "HAL", "BEL",
@@ -25,7 +25,7 @@ STOCK_BURST_NAMES = {
     "ADANIENT", "ADANIPORTS", "ADANIPOWER", "ADANIGREEN", "ADANIENSOL",
     "NTPC", "POWERGRID", "TATAPOWER", "RECLTD", "PFC",
     "IOC", "BPCL", "HINDPETRO", "GAIL", "ONGC",
-    "BHARTIARTL", "INDUSTOWER", "IDEA", "ETERNAL", "SWIGGY",
+    "BHARTIARTL", "INDUSTOWER", "ETERNAL", "SWIGGY",
     "TRENT", "DLF", "GODREJPROP", "PRESTIGE", "LODHA",
     "INDHOTEL", "DELHIVERY", "BAJFINANCE", "BAJAJFINSV"
 }
@@ -203,10 +203,10 @@ def get_burst_option_strike_range(name):
 
 def get_burst_option_strike_window(name):
     if name == "BANKNIFTY":
-        return BANKNIFTY_BURST_STRIKES_BELOW_ATM, 2
+        return BANKNIFTY_BURST_STRIKES_BELOW_ATM, 0
     if name in STOCK_BURST_NAMES:
-        return 7, 2
-    return 1, 2
+        return 10, 0
+    return 1, 0
 
 
 def get_burst_session(now_ist=None):
@@ -1246,7 +1246,7 @@ def get_burst_relevant_options(name, future_ltp):
     if options.empty:
         return pd.DataFrame()
 
-    below_count, above_count = get_burst_option_strike_window(name)
+    itm_count, _ = get_burst_option_strike_window(name)
     selected_frames = []
 
     for expiry, expiry_options in options.groupby("expiry"):
@@ -1256,14 +1256,42 @@ def get_burst_relevant_options(name, future_ltp):
 
         atm = min(strikes, key=lambda x: abs(x - future_ltp))
         idx = strikes.index(atm)
-        ce_selected = strikes[max(0, idx - above_count): idx + 1]
-        pe_selected = strikes[idx: idx + below_count + 1]
-        selected = sorted(set(ce_selected + pe_selected))
+        selected = set()
+        for _, row in expiry_options.iterrows():
+            strike = row["strike"]
+            option_type = str(row.get("instrument_type", "") or "").upper()
+            if option_type not in {"CE", "PE"}:
+                tradingsymbol = str(row.get("tradingsymbol", "") or "").upper()
+                if tradingsymbol.endswith("CE"):
+                    option_type = "CE"
+                elif tradingsymbol.endswith("PE"):
+                    option_type = "PE"
+
+            # ATM is always included for both CE and PE.
+            # ITM selection is side-aware:
+            # - CE: strikes at or below ATM
+            # - PE: strikes at or above ATM
+            # OTM is excluded completely.
+            if strike == atm:
+                selected.add(strike)
+                continue
+
+            if option_type == "CE":
+                if strike < atm:
+                    lower_bound = strikes[max(0, idx - itm_count)]
+                    if lower_bound <= strike <= atm:
+                        selected.add(strike)
+            elif option_type == "PE":
+                if strike > atm:
+                    upper_bound = strikes[min(len(strikes) - 1, idx + itm_count)]
+                    if atm <= strike <= upper_bound:
+                        selected.add(strike)
+
+        selected = sorted(selected)
         if DEBUG_BURST_STRIKES:
             print(
                 f"[BURST DEBUG] {name} future_ltp={future_ltp:.2f} "
-                f"atm={atm} ce={ce_selected[:5]}{'...' if len(ce_selected) > 5 else ''} "
-                f"pe={pe_selected[:5]}{'...' if len(pe_selected) > 5 else ''} "
+                f"atm={atm} itm_count={itm_count} "
                 f"selected={selected[:5]}{'...' if len(selected) > 5 else ''} "
                 f"count={len(selected)}"
             )
