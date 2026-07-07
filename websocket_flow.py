@@ -10,6 +10,7 @@ import os
 
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 DEBUG_BURST_STRIKES = os.getenv("DEBUG_BURST_STRIKES", "false").lower() in ("true", "1", "yes", "on")
+MAX_WS_SUBSCRIPTIONS = int(os.getenv("MAX_WS_SUBSCRIPTIONS", "3900"))
 
 
 _cache_lock = threading.Lock()
@@ -304,7 +305,41 @@ class FlowEngine:
                 tokens.add(token)
                 option_tokens.add(token)
 
+        tokens = self._apply_subscription_budget(tokens, base_tokens, option_tokens)
         return sorted(tokens), symbol_by_token, base_tokens, option_tokens
+
+    def _apply_subscription_budget(self, tokens, base_tokens, option_tokens):
+        tokens = set(tokens)
+        base_tokens = set(base_tokens)
+        option_tokens = set(option_tokens)
+
+        if len(tokens) <= MAX_WS_SUBSCRIPTIONS:
+            return tokens
+
+        # Keep base instruments first so futures/spot quotes remain available.
+        # Trim option subscriptions next because they are the largest contributor
+        # to exceeding Kite's 4000-instrument WebSocket cap.
+        prioritized = list(base_tokens)
+        if len(prioritized) > MAX_WS_SUBSCRIPTIONS:
+            print(
+                f"WebSocket subscription budget too small for base tokens: "
+                f"{len(prioritized)} > {MAX_WS_SUBSCRIPTIONS}."
+            )
+            return set(prioritized[:MAX_WS_SUBSCRIPTIONS])
+
+        remaining_budget = MAX_WS_SUBSCRIPTIONS - len(prioritized)
+        if remaining_budget <= 0:
+            return set(prioritized)
+
+        prioritized.extend(sorted(option_tokens)[:remaining_budget])
+        trimmed = set(prioritized)
+        dropped = len(tokens) - len(trimmed)
+        if dropped > 0:
+            print(
+                f"WebSocket subscription budget applied: kept {len(trimmed)} of "
+                f"{len(tokens)} tokens, dropped {dropped} option subscriptions."
+            )
+        return trimmed
 
     def _load_index_rows(self):
         if self._index_rows is not None:
