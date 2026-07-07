@@ -1266,6 +1266,9 @@ def get_burst_relevant_options(name, future_ltp):
                     option_type = "CE"
                 elif tradingsymbol.endswith("PE"):
                     option_type = "PE"
+                else:
+                    # If the contract cannot be classified, do not include it.
+                    continue
 
             # ATM is always included for both CE and PE.
             # ITM selection is side-aware:
@@ -1288,16 +1291,32 @@ def get_burst_relevant_options(name, future_ltp):
                         selected.add(strike)
 
         selected = sorted(selected)
+        selected_rows = expiry_options[expiry_options["strike"].isin(selected)].copy()
+        if not selected_rows.empty:
+            selected_rows = selected_rows[
+                selected_rows.apply(
+                    lambda row: (
+                        row["strike"] == atm
+                        or (
+                            str(row.get("instrument_type", "") or "").upper() == "CE"
+                            and row["strike"] < atm
+                        )
+                        or (
+                            str(row.get("instrument_type", "") or "").upper() == "PE"
+                            and row["strike"] > atm
+                        )
+                    ),
+                    axis=1,
+                )
+            ]
         if DEBUG_BURST_STRIKES:
             print(
                 f"[BURST DEBUG] {name} future_ltp={future_ltp:.2f} "
                 f"atm={atm} itm_count={itm_count} "
                 f"selected={selected[:5]}{'...' if len(selected) > 5 else ''} "
-                f"count={len(selected)}"
+                f"count={len(selected_rows)}"
             )
-        selected_frames.append(
-            expiry_options[expiry_options["strike"].isin(selected)].copy()
-        )
+        selected_frames.append(selected_rows)
 
     if not selected_frames:
         return pd.DataFrame()
