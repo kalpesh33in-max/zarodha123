@@ -10,7 +10,7 @@ import os
 
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 DEBUG_BURST_STRIKES = os.getenv("DEBUG_BURST_STRIKES", "false").lower() in ("true", "1", "yes", "on")
-MAX_WS_SUBSCRIPTIONS = int(os.getenv("MAX_WS_SUBSCRIPTIONS", "3900"))
+MAX_WS_SUBSCRIPTIONS = int(os.getenv("MAX_WS_SUBSCRIPTIONS", "3000"))
 
 
 _cache_lock = threading.Lock()

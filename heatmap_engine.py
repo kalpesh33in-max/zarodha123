@@ -7,27 +7,38 @@ from kite_rate_limiter import kite_historical_data, kite_quote
 from websocket_flow import get_symbol_quotes, get_token_quotes
 
 INDEX_BURST_NAMES = {"BANKNIFTY"}
+BURST_OPTION_EXCLUDED_NAMES = {
+    "NIFTY",
+    "FINNIFTY",
+    "MIDCPNIFTY",
+    "SENSEX",
+    "BANKEX",
+    "SENSEX50",
+    "CRUDEOIL",
+    "CRUDEOILM",
+}
 STOCK_BURST_NAMES = {
-    "RELIANCE", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK",
-    "KOTAKBANK", "BANKBARODA", "PNB", "INDUSINDBK", "AUBANK",
-    "INFY", "TCS", "WIPRO", "HCLTECH", "TECHM",
-    "PERSISTENT", "OFSS", "TATASTEEL", "JSWSTEEL",
-    "JINDALSTEL", "HINDALCO", "VEDL", "NATIONALUM", "SAIL",
-    "COALINDIA", "HINDZINC", "M&M",
-    "MARUTI", "BAJAJ-AUTO", "HEROMOTOCO", "TVSMOTOR", "ASHOKLEY",
-    "EICHERMOT", "BHARATFORG", "LT", "SIEMENS", "ABB",
-    "CUMMINSIND", "CGPOWER", "BHEL", "HAL", "BEL",
-    "CIPLA", "SUNPHARMA", "DRREDDY", "LUPIN",
-    "AUROPHARMA", "ZYDUSLIFE", "TORNTPHARM", "DIVISLAB", "MANKIND",
-    "ITC", "HINDUNILVR", "NESTLEIND", "BRITANNIA", "TATACONSUM",
-    "GODREJCP", "DABUR", "COLPAL", "ASIANPAINT",
-    "GRASIM", "ULTRACEMCO", "SHREECEM", "AMBUJACEM",
-    "ADANIENT", "ADANIPORTS", "ADANIPOWER", "ADANIGREEN", "ADANIENSOL",
-    "NTPC", "POWERGRID", "TATAPOWER", "RECLTD", "PFC",
-    "IOC", "BPCL", "HINDPETRO", "GAIL", "ONGC",
-    "BHARTIARTL", "INDUSTOWER", "ETERNAL", "SWIGGY",
-    "TRENT", "DLF", "GODREJPROP", "PRESTIGE", "LODHA",
-    "INDHOTEL", "DELHIVERY", "BAJFINANCE", "BAJAJFINSV"
+    "360ONE", "ADANIENSOL", "ADANIENT", "ADANIGREEN", "ADANIPORTS",
+    "APLAPOLLO", "ASIANPAINT", "ASTRAL", "AUROPHARMA", "AXISBANK",
+    "ABB", "BAJAJ-AUTO", "BAJAJFINSV", "BAJFINANCE", "BDL",
+    "BHARATFORG", "BHARTIARTL", "BLUESTARCO", "BSE", "BRITANNIA", "CDSL",
+    "CGPOWER", "CHOLAFIN", "CIPLA", "COCHINSHIP", "COFORGE",
+    "COLPAL", "CUMMINSIND", "DALBHARAT", "DMART", "DIVISLAB",
+    "DRREDDY", "EICHERMOT", "GLENMARK", "GODFRYPHLP", "GODREJCP",
+    "GODREJPROP", "GRASIM", "GVT&D", "HAL", "HAVELLS",
+    "HCLTECH", "HDFCAMC", "HDFCBANK", "HEROMOTOCO", "HINDALCO",
+    "HINDUNILVR", "HYUNDAI", "ICICIBANK", "ICICIGI", "INDUSINDBK",
+    "JINDALSTEL", "JSWSTEEL", "KAYNES", "KPITTECH", "LAURUSLABS",
+    "LODHA", "LT", "LTM", "LUPIN", "M&M",
+    "MANKIND", "MARUTI", "MAXHEALTH", "MAZDOCK", "MCX",
+    "MFSL", "MOTILALOFS", "MPHASIS", "MUTHOOTFIN", "NAM-INDIA",
+    "NAUKRI", "NESTLEIND", "OBEROIRLTY", "OFSS", "PAYTM",
+    "PERSISTENT", "PHOENIXLTD", "PIIND", "PNBHOUSING", "POLICYBZR",
+    "PRESTIGE", "RADICO", "RELIANCE", "SBICARD", "SBILIFE",
+    "SBIN", "SHRIRAMFIN", "SHREECEM", "SIEMENS", "SRF",
+    "SUNPHARMA", "SUPREMEIND", "TATACONSUM", "TATAELXSI", "TCS",
+    "TECHM", "TIINDIA", "TITAN", "TORNTPHARM", "TRENT",
+    "TVSMOTOR", "UNITDSPR", "ULTRACEMCO", "UNOMINDA", "VOLTAS"
 }
 NSE_BURST_TRACK_NAMES = []
 MCX_BURST_TRACK_NAMES = [
@@ -202,6 +213,8 @@ def get_burst_option_strike_range(name):
 
 
 def get_burst_option_strike_window(name):
+    if name in BURST_OPTION_EXCLUDED_NAMES:
+        return 0, 0
     if name == "BANKNIFTY":
         return BANKNIFTY_BURST_STRIKES_BELOW_ATM, 0
     if name in STOCK_BURST_NAMES:
@@ -1226,6 +1239,8 @@ def get_burst_relevant_options(name, future_ltp):
     df = load_options_data()
     future_ltp = _normalize_burst_price(name, future_ltp)
     if df is None or df.empty or future_ltp <= 0:
+        return pd.DataFrame()
+    if name in BURST_OPTION_EXCLUDED_NAMES:
         return pd.DataFrame()
 
     options = df[df["name"] == name]
