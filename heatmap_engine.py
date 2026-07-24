@@ -153,9 +153,9 @@ BORN_BREAKOUT_CHECK_INTERVAL_SECONDS = 1800
 BORN_BREAKOUT_LOOKBACK_DAYS = 180
 # Pause non-burst reports only for this date. They resume automatically the next day.
 FIRST_30M_MISMATCH_CANDLE_START_TIME = datetime.strptime("09:15", "%H:%M").time()
-FIRST_30M_MISMATCH_SCAN_START_TIME = datetime.strptime("09:45", "%H:%M").time()
-FIRST_30M_MISMATCH_GAP_THRESHOLD_PCT = float(os.getenv("FIRST_30M_MISMATCH_GAP_THRESHOLD_PCT", "1.0"))
-FIRST_30M_MISMATCH_MIN_VOLUME = int(os.getenv("FIRST_30M_MISMATCH_MIN_VOLUME", "100000"))
+FIRST_30M_MISMATCH_SCAN_START_TIME = datetime.strptime("10:15", "%H:%M").time()
+FIRST_30M_MISMATCH_GAP_THRESHOLD_PCT = float(os.getenv("FIRST_60M_MISMATCH_GAP_THRESHOLD_PCT", "3.0"))
+FIRST_30M_MISMATCH_MIN_VOLUME = int(os.getenv("FIRST_60M_MISMATCH_MIN_VOLUME", "300000"))
 FIRST_30M_MISMATCH_RETRY_SECONDS = 30
 FIRST_30M_OPTION_ITM_COUNT = int(os.getenv("FIRST_30M_OPTION_ITM_COUNT", "4"))
 DAILY_WEEKLY_MISMATCH_MIN_VOLUME = int(os.getenv("DAILY_WEEKLY_MISMATCH_MIN_VOLUME", "1000000"))
@@ -867,9 +867,9 @@ def _get_first_30m_candle(kite, token, now_ist):
         FIRST_30M_MISMATCH_CANDLE_START_TIME,
         tzinfo=IST,
     )
-    session_end = session_start + timedelta(minutes=30)
+    session_end = session_start + timedelta(minutes=60)
     try:
-        candles = kite_historical_data(kite, token, session_start, session_end, "30minute")
+        candles = kite_historical_data(kite, token, session_start, session_end, "60minute")
     except Exception as e:
         print(f"First 30m historical data error for {token}: {e}")
         return None
@@ -901,7 +901,7 @@ def _get_first_30m_candle_context(kite, token, now_ist, label="First 30m"):
         FIRST_30M_MISMATCH_CANDLE_START_TIME,
         tzinfo=IST,
     )
-    session_end = session_start + timedelta(minutes=30)
+    session_end = session_start + timedelta(minutes=60)
     prev_day = _get_previous_trading_day(now_ist)
     from_time = datetime.combine(
         prev_day,
@@ -910,7 +910,7 @@ def _get_first_30m_candle_context(kite, token, now_ist, label="First 30m"):
     )
 
     try:
-        candles = get_historical_data_cached(kite, token, from_time, session_end, "30minute")
+        candles = get_historical_data_cached(kite, token, from_time, session_end, "60minute")
     except Exception as e:
         print(f"{label} historical data error for {token}: {e}")
         return None
@@ -1180,7 +1180,7 @@ def build_first_30m_future_volume_mismatch_alerts(kite):
 
         body = "\n".join(body_lines)
         alerts.append(
-            "FIRST 30M GAP VOLUME MISMATCH\n\n"
+            "FIRST 60M GAP VOLUME MISMATCH\n\n"
             f"{body}"
         )
 
@@ -1486,16 +1486,22 @@ def build_monthly_future_gap_alerts(kite, batch_index=None, max_quote_symbols=No
 
         gap_points = next_future_price - spot_price
         next_gap_points = next_future_price - future_price
+        near_spot_gap_points = future_price - spot_price
         gap_pct = (gap_points / spot_price) * 100
         next_gap_pct = (next_gap_points / future_price) * 100
+        near_spot_gap_pct = (near_spot_gap_points / spot_price) * 100
 
         # Updated Gap Hedge Logic:
         # 1. Absolute gap between Spot and Next Future must be GREATER THAN OR EQUAL to 2.0%
-        # 2. Absolute gap between the two Futures (Near vs Next) must be LESS THAN OR EQUAL to 1.0%
+        # 2. Either the gap between Near and Next must be <= 1.0%,
+        #    or the gap between Spot and Near must be <= 0.5%.
         if abs(gap_pct) < MONTHLY_FUTURE_GAP_THRESHOLD_PCT:
             continue
 
-        if abs(next_gap_pct) > MONTHLY_FUTURE_NEXT_GAP_MAX_PCT:
+        if (
+            abs(next_gap_pct) > MONTHLY_FUTURE_NEXT_GAP_MAX_PCT
+            and abs(near_spot_gap_pct) > 0.5
+        ):
             continue
 
         last_sent = gap_alert_store.get(future_symbol)
