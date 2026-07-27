@@ -65,11 +65,11 @@ BANKNIFTY_BURST_STRIKES_ABOVE_ATM = 25
 BURST_THRESHOLD_LOTS = int(os.getenv("BURST_THRESHOLD_LOTS", "100"))
 OPTION_BURST_THRESHOLD_LOTS = int(os.getenv("OPTION_BURST_THRESHOLD_LOTS", "100"))
 FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("FUTURE_BURST_THRESHOLD_LOTS", "1000"))
-BANKNIFTY_OPTION_BURST_THRESHOLD_LOTS = int(os.getenv("BANKNIFTY_OPTION_BURST_THRESHOLD_LOTS", "100"))
+BANKNIFTY_OPTION_BURST_THRESHOLD_LOTS = int(os.getenv("BANKNIFTY_OPTION_BURST_THRESHOLD_LOTS", "200"))
 BANKNIFTY_HIGH_PREMIUM_PRICE = float(os.getenv("BANKNIFTY_HIGH_PREMIUM_PRICE", "1500"))
-BANKNIFTY_HIGH_PREMIUM_THRESHOLD_LOTS = int(os.getenv("BANKNIFTY_HIGH_PREMIUM_THRESHOLD_LOTS", "100"))
+BANKNIFTY_HIGH_PREMIUM_THRESHOLD_LOTS = int(os.getenv("BANKNIFTY_HIGH_PREMIUM_THRESHOLD_LOTS", "200"))
 INDEX_BURST_THRESHOLD_LOTS = int(os.getenv("INDEX_OPTION_BURST_THRESHOLD_LOTS", str(OPTION_BURST_THRESHOLD_LOTS)))
-STOCK_BURST_THRESHOLD_LOTS = int(os.getenv("STOCK_OPTION_BURST_THRESHOLD_LOTS", str(OPTION_BURST_THRESHOLD_LOTS)))
+STOCK_BURST_THRESHOLD_LOTS = int(os.getenv("STOCK_OPTION_BURST_THRESHOLD_LOTS", "200"))
 MCX_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_OPTION_BURST_THRESHOLD_LOTS", "100"))
 INDEX_FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("INDEX_FUTURE_BURST_THRESHOLD_LOTS", str(FUTURE_BURST_THRESHOLD_LOTS)))
 STOCK_FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("STOCK_FUTURE_BURST_THRESHOLD_LOTS", str(FUTURE_BURST_THRESHOLD_LOTS)))
@@ -79,9 +79,11 @@ DEBUG_BURST_PRICE_NORMALIZATION = os.getenv("DEBUG_BURST_PRICE_NORMALIZATION", "
 DEBUG_BURST_STRIKES = os.getenv("DEBUG_BURST_STRIKES", "false").lower() in ("true", "1", "yes", "on")
 INDEX_SYMBOL = "NSE:NIFTY BANK"
 INDEX_FUTURE_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "SENSEX50"}
-TARGET_MONTHLY_EXPIRY_MONTH = int(os.getenv("TARGET_MONTHLY_EXPIRY_MONTH", "7"))
-TARGET_MONTHLY_EXPIRY_DAY = int(os.getenv("TARGET_MONTHLY_EXPIRY_DAY", "28"))
-TARGET_MONTHLY_EXPIRY_YEAR = os.getenv("TARGET_MONTHLY_EXPIRY_YEAR", "").strip()
+# Expiry rollover policy.  A contract expiring today is treated as expired so
+# the scanner moves to the next monthly contract from the next session.  The
+# default of one day also makes the scanner ignore the just-expired contract
+# when it is started on the following day.
+EXPIRY_ROLLOVER_DAYS = int(os.getenv("EXPIRY_ROLLOVER_DAYS", "1"))
 
 day_open_oi_store = {}
 option_history = {}
@@ -301,50 +303,45 @@ def get_due_s4_slot(now_ist):
     return None
 
 
-def get_monthly_expiry(expiries, rollover_days=1):
-    return get_target_monthly_expiry(expiries)
+def _monthly_expiry_candidates(expiries):
+    valid_expiries = sorted(exp for exp in expiries if pd.notna(exp))
+    if not valid_expiries:
+        return []
+
+    # Keep only the last expiry available in each calendar month.  This
+    # removes weekly expiries from monthly futures/options selection.
+    month_last_expiries = {}
+    for expiry in valid_expiries:
+        month_last_expiries[(int(expiry.year), int(expiry.month))] = expiry
+    return [month_last_expiries[key] for key in sorted(month_last_expiries)]
+
+
+def get_monthly_expiry(expiries, rollover_days=EXPIRY_ROLLOVER_DAYS):
+    """Return the first non-expired monthly expiry.
+
+    Expiries on or before the rollover cutoff are intentionally ignored.  This
+    is the central selector used by futures, options, burst, gap, S4, and
+    historical-alert logic.
+    """
+    candidates = _monthly_expiry_candidates(expiries)
+    if not candidates:
+        return None
+
+    cutoff = datetime.now(IST).date() + timedelta(days=max(0, int(rollover_days)))
+    return next((expiry for expiry in candidates if expiry.date() > cutoff), None)
 
 
 def get_target_monthly_expiry(expiries):
-    valid_expiries = sorted(exp for exp in expiries if pd.notna(exp))
-    if not valid_expiries:
-        return None
-
-    month_last_expiries = {}
-    for expiry in valid_expiries:
-        month_last_expiries[(int(expiry.year), int(expiry.month))] = expiry
-
-    ordered_monthlies = [month_last_expiries[key] for key in sorted(month_last_expiries)]
-    target_year = int(TARGET_MONTHLY_EXPIRY_YEAR) if TARGET_MONTHLY_EXPIRY_YEAR else None
-    target_monthlies = [
-        exp
-        for exp in ordered_monthlies
-        if exp.month == TARGET_MONTHLY_EXPIRY_MONTH
-        and exp.day == TARGET_MONTHLY_EXPIRY_DAY
-        and (target_year is None or exp.year == target_year)
-    ]
-    if target_monthlies:
-        return target_monthlies[-1]
-
-    return None
+    # Kept as a compatibility alias for callers using the old function name.
+    return get_monthly_expiry(expiries)
 
 
 def get_next_monthly_expiry(expiries):
-    valid_expiries = sorted(exp for exp in expiries if pd.notna(exp))
-    if not valid_expiries:
+    current = get_monthly_expiry(expiries)
+    if current is None:
         return None
-
-    now_ist = datetime.now(IST)
-    month_last_expiries = {}
-    for expiry in valid_expiries:
-        month_last_expiries[(int(expiry.year), int(expiry.month))] = expiry
-
-    ordered_monthlies = [month_last_expiries[key] for key in sorted(month_last_expiries)]
-    future_monthlies = [exp for exp in ordered_monthlies if exp.date() >= now_ist.date()]
-
-    if len(future_monthlies) >= 2:
-        return future_monthlies[1]
-    return future_monthlies[0] if future_monthlies else ordered_monthlies[-1]
+    candidates = _monthly_expiry_candidates(expiries)
+    return next((expiry for expiry in candidates if expiry > current), None)
 
 
 def _get_instruments_mtime():
@@ -352,6 +349,16 @@ def _get_instruments_mtime():
         return os.path.getmtime("instruments.csv")
     except OSError:
         return None
+
+
+def _drop_expired_contracts(df):
+    """Remove expired/rolling-off contracts from the in-memory instrument data."""
+    if df is None or df.empty or "expiry" not in df.columns:
+        return df
+    cutoff = pd.Timestamp(
+        datetime.now(IST).date() + timedelta(days=max(0, EXPIRY_ROLLOVER_DAYS))
+    )
+    return df[df["expiry"].notna() & (df["expiry"] > cutoff)].copy()
 
 
 def load_options_data():
@@ -365,6 +372,7 @@ def load_options_data():
             if expiry.isna().mean() > 0.05:
                 expiry = pd.to_datetime(_options_df["expiry"], dayfirst=True, errors="coerce")
             _options_df["expiry"] = expiry
+            _options_df = _drop_expired_contracts(_options_df)
             _options_mtime = current_mtime
         except Exception as e:
             print(f"Error loading Options: {e}")
@@ -382,6 +390,7 @@ def load_futures_data():
             if expiry.isna().mean() > 0.05:
                 expiry = pd.to_datetime(_futures_df["expiry"], dayfirst=True, errors="coerce")
             _futures_df["expiry"] = expiry
+            _futures_df = _drop_expired_contracts(_futures_df)
             _futures_mtime = current_mtime
         except Exception as e:
             print(f"Error loading Futures: {e}")
