@@ -107,6 +107,7 @@ weekly_mismatch_setup_rows = []
 born_breakout_last_check_time = None
 born_breakout_alert_store = {}
 burst_alert_store = {}
+volume_burst_store = {}
 
 _options_df = None
 _options_mtime = None
@@ -2616,82 +2617,158 @@ def build_weekly_born_breakout_alerts(kite):
     return alerts
 
 
+def process_volume_burst_logic(key, name, symbol, ltp, volume, lot_size, is_option, option_type, expiry_text, u_ltp, alerts_list, stats=None):
+    if not lot_size:
+        return
+
+    now = datetime.now(IST)
+    current_minute = now.minute
+
+    # Initialize store for this contract key if not exists
+    if key not in volume_burst_store:
+        volume_burst_store[key] = {
+            "start_minute": current_minute,
+            "start_price": ltp,
+            "start_volume": volume,
+            "last_seen_price": ltp,
+            "last_seen_volume": volume,
+            "active_watch": None
+        }
+
+    state = volume_burst_store[key]
+
+    # Update stats for telemetry/monitoring
+    if stats is not None:
+        if is_option:
+            stats["option_quotes"] = stats.get("option_quotes", 0) + 1
+            if volume > 0:
+                stats["option_oi_quotes"] = stats.get("option_oi_quotes", 0) + 1
+        else:
+            stats["future_quotes"] = stats.get("future_quotes", 0) + 1
+            if volume > 0:
+                stats["future_oi_quotes"] = stats.get("future_oi_quotes", 0) + 1
+
+    # Check if a minute has rolled over
+    if current_minute != state["start_minute"]:
+        # The previous minute has completed!
+        minute_1_close_price = state["last_seen_price"]
+        minute_1_close_volume = state["last_seen_volume"]
+        minute_1_start_price = state["start_price"]
+        minute_1_start_volume = state["start_volume"]
+        
+        # Calculate Minute 1 details
+        delta_volume_1 = minute_1_close_volume - minute_1_start_volume
+        lots_1 = int(delta_volume_1 / lot_size) if delta_volume_1 > 0 else 0
+        threshold = 1000 if name == "BANKNIFTY" else 150
+
+        # Update monitoring stats
+        if stats is not None:
+            if is_option:
+                stats["max_option_tick_lots"] = max(stats.get("max_option_tick_lots", 0), lots_1)
+            else:
+                stats["max_future_tick_lots"] = max(stats.get("max_future_tick_lots", 0), lots_1)
+
+        # Handle active watch first if we had a burst in the previous minute (Minute 2 completion check)
+        if state["active_watch"] is not None:
+            watch = state["active_watch"]
+            # Minute 2 has completed!
+            minute_2_close_price = minute_1_close_price
+            minute_2_open_price = watch["watch_open_price"] if watch["watch_open_price"] is not None else watch["burst_end_price"]
+            
+            p_chg_2 = minute_2_close_price - minute_2_open_price
+            p_icon = "▲" if p_chg_2 >= 0 else "▼"
+            
+            if is_option:
+                is_call = option_type == "CE"
+                if p_chg_2 >= 0:
+                    action = "CALL BUY 🔵" if is_call else "PUT WRITER ✍️"
+                else:
+                    action = "CALL WRITER ✍️" if is_call else "PUT BUY 🔴"
+            else:
+                action = "FUTURE BUY (LONG) 📈" if p_chg_2 >= 0 else "FUTURE SELL (SHORT) 📉"
+            
+            strength = get_strength_label(watch["burst_lots"], name)
+            
+            # Format Alert
+            expiry_line = f"EXPIRY: {expiry_text}\n" if expiry_text else ""
+            future_price_line = f"FUTURE PRICE: {u_ltp:.2f}\n" if is_option else f"FUTURE PRICE: {minute_2_close_price:.2f}\n"
+            
+            alert_text = (
+                f"{strength}\n🚨 {action}\nSymbol: {symbol}\n"
+                f"{expiry_line}"
+                f"━━━━━━━━━━━━━━━\n"
+                f"LOTS: {watch['burst_lots']}\nPRICE: {minute_2_close_price:.2f} ({p_icon})\n{future_price_line}"
+                f"━━━━━━━━━━━━━━━\n"
+                f"START VOLUME: {watch['burst_start_volume']:,}\nVOLUME DELTA: +{watch['burst_volume_delta']:,}\nEND VOLUME  : {watch['burst_end_volume']:,}\n"
+                f"TIME: {watch['time_str']}"
+            )
+            
+            alert_key = f"VOL_BURST:{name}:{symbol}:{watch['burst_start_volume']}:{watch['burst_start_price']}"
+            if not _burst_alert_recent(alert_key):
+                alerts_list.append(alert_text)
+            
+            # Clear watch
+            state["active_watch"] = None
+
+        # Check if Minute 1 itself is a new burst
+        if lots_1 >= threshold:
+            burst_time = now - timedelta(minutes=1)
+            time_str = burst_time.strftime("%H:%M:00")
+            
+            state["active_watch"] = {
+                "burst_lots": lots_1,
+                "burst_start_price": minute_1_start_price,
+                "burst_end_price": minute_1_close_price,
+                "burst_start_volume": minute_1_start_volume,
+                "burst_volume_delta": delta_volume_1,
+                "burst_end_volume": minute_1_close_volume,
+                "watch_minute": current_minute,
+                "watch_open_price": None,
+                "time_str": time_str
+            }
+
+        # Reset starting state for the new minute
+        state["start_minute"] = current_minute
+        state["start_price"] = ltp
+        state["start_volume"] = volume
+
+    # Update rolling values for the current minute
+    state["last_seen_price"] = ltp
+    state["last_seen_volume"] = volume
+    
+    # If we are in the middle of Minute 2 (the watch minute), capture its open price on first tick
+    if state["active_watch"] is not None and state["active_watch"]["watch_open_price"] is None:
+        state["active_watch"]["watch_open_price"] = ltp
+
+
 def process_future_burst(symbol, name, ltp, oi, alerts_list, stats=None):
     if not is_burst_underlying(name):
         return
 
     ltp = _normalize_burst_price(name, ltp)
-
-    threshold = get_future_burst_threshold(name)
     lot_size = get_future_lot_size(symbol)
     if not lot_size:
         _log_missing_lot_size_once(f"future:{symbol}", symbol)
         return
 
-    now = datetime.now(IST)
+    # Treat the 4th parameter (oi) as volume in the new logic
+    volume = oi
     key = f"FUT_{symbol}"
-    if key not in option_history:
-        option_history[key] = []
-    history = option_history[key]
-    prev_oi = history[-1]["oi"] if history else 0
-    prev_price = history[-1]["price"] if history else 0
 
-    if stats is not None:
-        stats["future_quotes"] = stats.get("future_quotes", 0) + 1
-        if oi > 0:
-            stats["future_oi_quotes"] = stats.get("future_oi_quotes", 0) + 1
-
-    if prev_oi > 0:
-        tick_lots = int(abs(oi - prev_oi) / lot_size)
-        if stats is not None:
-            stats["max_future_tick_lots"] = max(
-                stats.get("max_future_tick_lots", 0),
-                tick_lots,
-            )
-        if tick_lots >= threshold and key not in active_watches:
-            active_watches[key] = {
-                "start_oi": prev_oi,
-                "start_price": prev_price,
-                "end_time": now + timedelta(seconds=15),
-                "symbol": symbol,
-                "name": name,
-                "lot_size": lot_size,
-                "expiry_text": get_future_expiry_text(symbol) if is_mcx_underlying(name) else "",
-            }
-
-    if key in active_watches:
-        watch = active_watches[key]
-        if now >= watch["end_time"]:
-            oi_chg = oi - watch["start_oi"]
-            p_chg = ltp - watch["start_price"]
-            final_lot_size = _normalize_lot_size(watch.get("lot_size")) or lot_size
-            final_lots = int(abs(oi_chg) / final_lot_size)
-            if final_lots >= threshold:
-                strength = get_strength_label(final_lots, watch["name"])
-                action = classify_action(watch["symbol"], oi_chg, p_chg)
-                p_icon = "▲" if p_chg >= 0 else "▼"
-                expiry_line = (
-                    f"EXPIRY: {watch['expiry_text']}\n"
-                    if watch.get("expiry_text")
-                    else ""
-                )
-                alert_text = (
-                    f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n"
-                    f"{expiry_line}"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"LOTS: {final_lots}\nPRICE: {ltp:.2f} ({p_icon})\nFUTURE PRICE: {ltp:.2f}\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"EXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {oi:,}\n"
-                    f"TIME: {now.strftime('%H:%M:%S')}"
-                )
-                alert_key = f"FUT:{name}:{watch['symbol']}:{watch['start_oi']}:{watch['start_price']}"
-                if not _burst_alert_recent(alert_key):
-                    alerts_list.append(alert_text)
-            del active_watches[key]
-
-    history.append({"time": now, "oi": oi, "price": ltp})
-    if len(history) > 20:
-        history.pop(0)
+    process_volume_burst_logic(
+        key=key,
+        name=name,
+        symbol=symbol,
+        ltp=ltp,
+        volume=volume,
+        lot_size=lot_size,
+        is_option=False,
+        option_type=None,
+        expiry_text=get_future_expiry_text(symbol) if is_mcx_underlying(name) else "",
+        u_ltp=ltp,
+        alerts_list=alerts_list,
+        stats=stats
+    )
 
 
 def process_option_logic(name, underlying_data, option_quotes, alerts_list, stats=None):
@@ -2702,7 +2779,6 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
     if opt_df.empty:
         return
 
-    now = datetime.now(IST)
     u_ltp = _normalize_burst_price(name, u_ltp)
     if DEBUG_BURST_STRIKES:
         try:
@@ -2729,78 +2805,40 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
             continue
         
         q = option_quotes[t_str]
-        curr_oi = q.get("oi", 0)
+        volume = q.get("volume", 0)
         ltp = q.get("last_price", 0)
         ltp = float(ltp or 0)
-        threshold = get_option_burst_threshold_for_price(name, ltp)
         t_int = int(row["instrument_token"])
+        option_type = str(row.get("instrument_type", "") or "").upper()
+        if option_type not in {"CE", "PE"}:
+            tradingsymbol = str(row.get("tradingsymbol", "") or "").upper()
+            if tradingsymbol.endswith("CE"):
+                option_type = "CE"
+            elif tradingsymbol.endswith("PE"):
+                option_type = "PE"
+        
+        expiry_text = (
+            row["expiry"].strftime("%d-%m-%Y")
+            if pd.notna(row.get("expiry"))
+            else "NA"
+        )
+        
+        process_volume_burst_logic(
+            key=t_int,
+            name=name,
+            symbol=row["tradingsymbol"],
+            ltp=ltp,
+            volume=volume,
+            lot_size=lot_size,
+            is_option=True,
+            option_type=option_type,
+            expiry_text=expiry_text,
+            u_ltp=u_ltp,
+            alerts_list=alerts_list,
+            stats=stats
+        )
 
-        if stats is not None:
-            stats["option_quotes"] = stats.get("option_quotes", 0) + 1
-            if curr_oi > 0:
-                stats["option_oi_quotes"] = stats.get("option_oi_quotes", 0) + 1
 
-        if t_int not in day_open_oi_store:
-            day_open_oi_store[t_int] = curr_oi
-
-        if t_int not in option_history:
-            option_history[t_int] = []
-        history = option_history[t_int]
-        prev_oi = history[-1]["oi"] if history else 0
-        prev_price = history[-1]["price"] if history else 0
-
-        if prev_oi > 0:
-            tick_lots = int(abs(curr_oi - prev_oi) / lot_size)
-            if stats is not None:
-                stats["max_option_tick_lots"] = max(
-                    stats.get("max_option_tick_lots", 0),
-                    tick_lots,
-                )
-            if tick_lots >= threshold and t_int not in active_watches:
-                expiry_text = (
-                    row["expiry"].strftime("%d-%m-%Y")
-                    if pd.notna(row.get("expiry"))
-                    else "NA"
-                )
-                active_watches[t_int] = {
-                    "start_oi": prev_oi,
-                    "start_price": prev_price,
-                    "end_time": now + timedelta(seconds=15),
-                    "symbol": row["tradingsymbol"],
-                    "underlying": name,
-                    "lot_size": lot_size,
-                    "expiry_text": expiry_text,
-                }
-
-        if t_int in active_watches:
-            watch = active_watches[t_int]
-            if now >= watch["end_time"]:
-                oi_chg = curr_oi - watch["start_oi"]
-                p_chg = ltp - watch["start_price"]
-                final_lot_size = _normalize_lot_size(watch.get("lot_size")) or lot_size
-                final_lots = int(abs(oi_chg) / final_lot_size)
-                final_threshold = get_option_burst_threshold_for_price(watch["underlying"], ltp)
-                if final_lots >= final_threshold:
-                    strength = get_strength_label(final_lots, watch["underlying"])
-                    action = classify_action(watch["symbol"], oi_chg, p_chg)
-                    p_icon = "▲" if p_chg >= 0 else "▼"
-                    alert_text = (
-                        f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n"
-                        f"EXPIRY: {watch.get('expiry_text', 'NA')}\n"
-                        f"━━━━━━━━━━━━━━━\n"
-                        f"LOTS: {final_lots}\nPRICE: {ltp:.2f} ({p_icon})\nFUTURE PRICE: {u_ltp:.2f}\n"
-                        f"━━━━━━━━━━━━━━━\n"
-                        f"EXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {curr_oi:,}\n"
-                        f"TIME: {now.strftime('%H:%M:%S')}"
-                    )
-                    alert_key = f"OPT:{name}:{t_int}:{watch['start_oi']}:{watch['start_price']}"
-                    if not _burst_alert_recent(alert_key):
-                        alerts_list.append(alert_text)
-                del active_watches[t_int]
-
-        history.append({"time": now, "oi": curr_oi, "price": ltp})
-        if len(history) > 20:
-            history.pop(0)
 
 
 def _map_tracked_futures_by_name(fut_symbols, names=None):
@@ -2832,6 +2870,7 @@ def _reset_burst_state_if_session_changed(session):
     active_watches.clear()
     day_open_oi_store.clear()
     burst_alert_store.clear()
+    volume_burst_store.clear()
     _last_burst_session = session
     print(f"Burst state reset for {session.upper()} session.")
 
@@ -2950,10 +2989,10 @@ def calculate_burst_alerts(kite):
 
         d = data[sym]
         ltp = _normalize_burst_price(name, d["last_price"])
-        oi = d.get("oi", 0)
+        volume = d.get("volume", 0)
         target_alerts = bn_alerts if is_index_underlying(name) else stock_alerts
 
-        process_future_burst(sym, name, ltp, oi, target_alerts, stats=stats)
+        process_future_burst(sym, name, ltp, volume, target_alerts, stats=stats)
         process_option_logic(
             name,
             underlying_map.get(name, (pd.DataFrame(), 0)),
@@ -2965,14 +3004,14 @@ def calculate_burst_alerts(kite):
     if stats["future_quotes"] == 0:
         stats["reason"] = "no current future quote"
     elif stats["future_oi_quotes"] == 0 and stats["option_oi_quotes"] == 0:
-        stats["reason"] = "OI missing/zero in quotes"
+        stats["reason"] = "Volume missing/zero in quotes"
     elif (
         stats["max_future_tick_lots"] < stats["future_threshold"]
         and stats["max_option_tick_lots"] < stats["option_threshold"]
     ):
-        stats["reason"] = "OI move below threshold"
+        stats["reason"] = "Volume move below threshold"
     else:
-        stats["reason"] = "watching 15-second confirmation"
+        stats["reason"] = "watching 1-minute confirmation"
     _set_burst_monitor_status(stats)
 
     return bn_alerts, stock_alerts
@@ -3056,10 +3095,10 @@ def calculate_heatmap(kite):
 
         d = data[sym]
         ltp = d["last_price"]
-        oi = d.get("oi", 0)
+        volume = d.get("volume", 0)
         target_alerts = bn_alerts if is_index_underlying(name) else stock_alerts
 
-        process_future_burst(sym, name, ltp, oi, target_alerts)
+        process_future_burst(sym, name, ltp, volume, target_alerts)
         process_option_logic(name, underlying_map.get(name, (pd.DataFrame(), 0)), opt_quotes, target_alerts)
 
     if non_burst_alerts_paused_today():

@@ -450,6 +450,7 @@ class FlowEngine:
             quote = {
                 "last_price": tick.get("last_price", 0),
                 "oi": tick.get("oi", 0),
+                "volume": tick.get("volume_traded") or tick.get("volume", 0),
                 "ohlc": tick.get("ohlc", {}),
                 "timestamp": tick.get("exchange_timestamp") or tick.get("last_trade_time") or now,
             }
