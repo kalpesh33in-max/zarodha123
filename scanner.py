@@ -27,7 +27,7 @@ from websocket_flow import get_ws_status
 IST = ZoneInfo("Asia/Kolkata")
 BURST_SCAN_INTERVAL_SECONDS = 1
 GAP_BATCH_INTERVAL_SECONDS = 30
-HISTORICAL_SCAN_INTERVAL_SECONDS = 30
+HISTORICAL_SCAN_INTERVAL_SECONDS = 60
 WS_HEARTBEAT_INTERVAL_SECONDS = 30
 WS_STALE_SECONDS = 60
 WS_ALERT_COOLDOWN_SECONDS = 300
@@ -208,6 +208,7 @@ def _gap_loop(kite, dispatcher, stop_event):
 
 def _historical_loop(kite, dispatcher, stop_event):
     state = {}
+    last_doji_scan_hour = None
     while not stop_event.is_set():
         now = datetime.now(IST)
         if _is_market_open(now):
@@ -223,6 +224,23 @@ def _historical_loop(kite, dispatcher, stop_event):
                 alerts = calculate_other_historical_alerts(kite)
                 for alert in alerts:
                     dispatcher.send(PRIORITY_HISTORICAL, alert)
+
+                # Doji Option Breakout Scanner
+                try:
+                    from heatmap_engine import check_hourly_doji_patterns, check_doji_breakout_live_alerts
+                    
+                    # Run hourly Doji pattern scan when minute is >= 15 and we haven't run it yet for this hour,
+                    # OR if it's the very first run (last_doji_scan_hour is None)
+                    if (now.minute >= 15 and last_doji_scan_hour != now.hour) or last_doji_scan_hour is None:
+                        last_doji_scan_hour = now.hour
+                        check_hourly_doji_patterns(kite)
+                        
+                    # Check for live breakout alerts on watch list (runs every minute)
+                    doji_alerts = check_doji_breakout_live_alerts(kite)
+                    for alert in doji_alerts:
+                        dispatcher.send(PRIORITY_STATUS, alert)
+                except Exception as e:
+                    print(f"Error in Doji Option Breakout Scanner inside historical loop: {e}")
             except Exception as e:
                 print(f"Error in historical scanner loop: {e}")
                 _send_error(dispatcher, "Historical Scanner", e, state)

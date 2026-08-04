@@ -305,6 +305,17 @@ class FlowEngine:
                 tokens.add(token)
                 option_tokens.add(token)
 
+        # Add Hourly Doji Breakout Watchlist ITM Options
+        try:
+            from heatmap_engine import get_doji_watchlist_options
+            doji_tokens = get_doji_watchlist_options(self.kite)
+            for token in doji_tokens:
+                token = int(token)
+                tokens.add(token)
+                option_tokens.add(token)
+        except Exception as e:
+            print(f"Error adding Doji Option tokens to subscription map: {e}")
+
         tokens = self._apply_subscription_budget(tokens, base_tokens, option_tokens)
         return sorted(tokens), symbol_by_token, base_tokens, option_tokens
 

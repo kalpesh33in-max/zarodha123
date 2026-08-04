@@ -3108,3 +3108,403 @@ def calculate_heatmap(kite):
     gap_alerts.extend(build_stock_future_1hr_s4_alerts(kite))
     gap_alerts.extend(build_weekly_born_breakout_alerts(kite))
     return 0, "", bn_alerts, stock_alerts, gap_alerts
+
+
+# ==============================================================================
+# HOURLY DOJI VOLUME BREAKOUT SCANNER (OPTION-SPECIFIC)
+# ==============================================================================
+
+DOJI_WATCHLIST = [
+    "NIFTY", "BANKNIFTY",
+    "HDFCBANK", "ICICIBANK", "RELIANCE", "BHARTIARTL", "LT",
+    "SBIN", "INFY", "AXISBANK", "TCS", "ITC", "M&M",
+    "HINDUNILVR", "TATAMOTORS", "KOTAKBANK", "BAJFINANCE"
+]
+
+_active_doji_breakouts = {}     # token -> dict with doji details
+_doji_triggered_alerts = set()  # (token, doji_timestamp_str)
+_last_doji_scan_hour = -1       # Keeps track of the last scanned hour to run once per hour
+
+
+def get_doji_watchlist_options(kite):
+    """Resolves and returns a list of NFO option instrument tokens to subscribe to.
+    For Nifty, Bank Nifty, and the top 15 stocks, this fetches the 3 closest ITM CE
+    and 3 closest ITM PE option contracts.
+    """
+    from websocket_flow import get_symbol_quotes
+    tokens = set()
+    symbol_to_name = {}
+    symbols_to_query = []
+
+    for name in DOJI_WATCHLIST:
+        if name in {"NIFTY", "BANKNIFTY"}:
+            sym = "NSE:NIFTY 50" if name == "NIFTY" else "NSE:NIFTY BANK"
+        else:
+            sym = get_active_future(name)
+        if sym:
+            symbol_to_name[sym] = name
+            symbols_to_query.append(sym)
+
+    ltps = {}
+    cached = get_symbol_quotes(symbols_to_query)
+    for sym in symbols_to_query:
+        if sym in cached:
+            ltps[symbol_to_name[sym]] = cached[sym].get("last_price", 0.0)
+
+    missing = [sym for sym in symbols_to_query if symbol_to_name[sym] not in ltps]
+    if missing:
+        try:
+            quotes = kite_quote(kite, missing)
+            for sym, q in quotes.items():
+                ltps[symbol_to_name[sym]] = q.get("last_price", 0.0)
+        except Exception as e:
+            print(f"Error fetching quotes for Doji options bootstrap: {e}")
+
+    options_df = load_options_data()
+    if options_df is None or options_df.empty:
+        return []
+
+    for name in DOJI_WATCHLIST:
+        ltp = ltps.get(name, 0.0)
+        if ltp <= 0:
+            continue
+
+        underlying_options = options_df[options_df["name"] == name]
+        if underlying_options.empty:
+            continue
+
+        expiry = get_monthly_expiry(underlying_options["expiry"].unique())
+        if expiry is None:
+            continue
+
+        expiry_opts = underlying_options[underlying_options["expiry"] == expiry].copy()
+        if expiry_opts.empty:
+            continue
+
+        strikes = sorted(expiry_opts["strike"].unique())
+        if not strikes:
+            continue
+
+        atm = min(strikes, key=lambda x: abs(x - ltp))
+        idx = strikes.index(atm)
+
+        # 3 ITM CE (strikes below ATM)
+        itm_ce_strikes = strikes[max(0, idx - 3):idx]
+        # 3 ITM PE (strikes above ATM)
+        itm_pe_strikes = strikes[idx + 1:min(len(strikes), idx + 4)]
+
+        selected_opts = expiry_opts[
+            (expiry_opts["strike"].isin(itm_ce_strikes) & expiry_opts["instrument_type"].isin(["CE", "CALL"])) |
+            (expiry_opts["strike"].isin(itm_pe_strikes) & expiry_opts["instrument_type"].isin(["PE", "PUT"]))
+        ]
+
+        for _, row in selected_opts.iterrows():
+            tokens.add(int(row["instrument_token"]))
+
+    return list(tokens)
+
+
+def get_option_prev_day_max_hourly_volume(kite, token, start_date):
+    """Walks backward to find the first previous trading day containing hourly candles,
+    and returns the maximum hourly volume recorded on that day.
+    """
+    if hasattr(start_date, "date"):
+        start_date = start_date.date()
+
+    # Convert start_date into a datetime object for _get_previous_trading_day
+    ref_dt = datetime.combine(start_date, datetime.min.time(), tzinfo=IST)
+    ref_day = _get_previous_trading_day(ref_dt)
+
+    for _ in range(5):  # check up to 5 trading days back
+        from_time = datetime.combine(ref_day, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
+        to_time = datetime.combine(ref_day, datetime.strptime("15:30", "%H:%M").time(), tzinfo=IST)
+        try:
+            candles = get_historical_data_cached(kite, token, from_time, to_time, "60minute")
+            if candles:
+                return max(int(candle.get("volume", 0) or 0) for candle in candles)
+        except Exception as e:
+            print(f"Error getting prev day max hourly volume for token {token} on {ref_day}: {e}")
+        
+        # Go back another day if empty
+        ref_dt = datetime.combine(ref_day, datetime.min.time(), tzinfo=IST)
+        ref_day = _get_previous_trading_day(ref_dt)
+    return 0
+
+
+def get_recent_candles(kite, token, now_ist, num_trading_days=4):
+    """Fetches hourly candles going back by num_trading_days to construct a continuous timeline."""
+    day = now_ist.date()
+    trading_days_found = 0
+    while trading_days_found < num_trading_days:
+        day -= timedelta(days=1)
+        if day.weekday() <= 4:
+            trading_days_found += 1
+
+    from_time = datetime.combine(day, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
+    to_time = now_ist
+    try:
+        return get_historical_data_cached(kite, token, from_time, to_time, "60minute")
+    except Exception as e:
+        print(f"Error fetching recent candles for token {token}: {e}")
+    return []
+
+
+def check_hourly_doji_patterns(kite):
+    """Background Hourly candle pattern checks. Scans selected ITM options,
+    detects (Red x N >= 2 -> Doji) setups, validates volumes against previous day,
+    and Populates the live watch list.
+    """
+    global _active_doji_breakouts
+    
+    tokens_to_scan = []
+    token_metadata = {}
+
+    try:
+        options_df = load_options_data()
+        if options_df is None or options_df.empty:
+            return
+
+        from websocket_flow import get_symbol_quotes
+        symbol_to_name = {}
+        symbols_to_query = []
+        for name in DOJI_WATCHLIST:
+            if name in {"NIFTY", "BANKNIFTY"}:
+                sym = "NSE:NIFTY 50" if name == "NIFTY" else "NSE:NIFTY BANK"
+            else:
+                sym = get_active_future(name)
+            if sym:
+                symbol_to_name[sym] = name
+                symbols_to_query.append(sym)
+
+        ltps = {}
+        cached = get_symbol_quotes(symbols_to_query)
+        for sym in symbols_to_query:
+            if sym in cached:
+                ltps[symbol_to_name[sym]] = cached[sym].get("last_price", 0.0)
+
+        missing = [sym for sym in symbols_to_query if symbol_to_name[sym] not in ltps]
+        if missing:
+            quotes = kite_quote(kite, missing)
+            for sym, q in quotes.items():
+                ltps[symbol_to_name[sym]] = q.get("last_price", 0.0)
+
+        for name in DOJI_WATCHLIST:
+            ltp = ltps.get(name, 0.0)
+            if ltp <= 0:
+                continue
+
+            underlying_options = options_df[options_df["name"] == name]
+            if underlying_options.empty:
+                continue
+
+            expiry = get_monthly_expiry(underlying_options["expiry"].unique())
+            if expiry is None:
+                continue
+
+            expiry_opts = underlying_options[underlying_options["expiry"] == expiry]
+            if expiry_opts.empty:
+                continue
+
+            strikes = sorted(expiry_opts["strike"].unique())
+            if not strikes:
+                continue
+
+            atm = min(strikes, key=lambda x: abs(x - ltp))
+            idx = strikes.index(atm)
+
+            itm_ce_strikes = strikes[max(0, idx - 3):idx]
+            itm_pe_strikes = strikes[idx + 1:min(len(strikes), idx + 4)]
+
+            selected_opts = expiry_opts[
+                (expiry_opts["strike"].isin(itm_ce_strikes) & expiry_opts["instrument_type"].isin(["CE", "CALL"])) |
+                (expiry_opts["strike"].isin(itm_pe_strikes) & expiry_opts["instrument_type"].isin(["PE", "PUT"]))
+            ]
+
+            for _, row in selected_opts.iterrows():
+                token = int(row["instrument_token"])
+                tokens_to_scan.append(token)
+                token_metadata[token] = {
+                    "symbol": f"NFO:{row['tradingsymbol']}",
+                    "name": name,
+                    "type": "ITM CE" if row["strike"] < atm else "ITM PE"
+                }
+    except Exception as e:
+        print(f"Error in hourly doji scan bootstrap: {e}")
+        return
+
+    print(f"Running hourly Doji scan on {len(tokens_to_scan)} option contracts...")
+    
+    now_ist = datetime.now(IST)
+    new_breakouts = {}
+
+    for token in tokens_to_scan:
+        meta = token_metadata[token]
+        candles = get_recent_candles(kite, token, now_ist)
+        if len(candles) < 4:
+            continue
+
+        # The last fully closed candle is candles[-2] (candles[-1] is active/live)
+        doji_candle = candles[-2]
+        
+        doji_open = float(doji_candle.get("open", 0) or 0)
+        doji_close = float(doji_candle.get("close", 0) or 0)
+        doji_high = float(doji_candle.get("high", 0) or 0)
+        doji_low = float(doji_candle.get("low", 0) or 0)
+        doji_vol = int(doji_candle.get("volume", 0) or 0)
+        doji_time = doji_candle.get("date")
+
+        body = abs(doji_close - doji_open)
+        c_range = doji_high - doji_low
+        if c_range <= 0:
+            continue
+
+        is_doji = body <= c_range * 0.1
+        if not is_doji:
+            continue
+
+        # Count consecutive red candles before the Doji (candles[-3], candles[-4]...)
+        red_count = 0
+        idx = len(candles) - 3
+        while idx >= 0:
+            c = candles[idx]
+            c_open = float(c.get("open", 0) or 0)
+            c_close = float(c.get("close", 0) or 0)
+            if c_close < c_open:
+                red_count += 1
+                idx -= 1
+            else:
+                break
+
+        if red_count < 2:
+            continue
+
+        # Check strictly increasing volume: vol(Doji) > vol(Red 2) > vol(Red 1)
+        volumes = [int(candles[len(candles) - 2 - i].get("volume", 0) or 0) for i in range(red_count + 1)]
+        # volumes is: [vol(Doji), vol(Red N), ..., vol(Red 1)]
+        volume_increasing = True
+        for i in range(len(volumes) - 1):
+            if volumes[i] <= volumes[i + 1]:
+                volume_increasing = False
+                break
+        if not volume_increasing:
+            continue
+
+        # Check volume of the first red candle (volumes[-1]) > previous candle
+        first_red_idx = len(candles) - 2 - red_count
+        if first_red_idx - 1 >= 0:
+            prev_vol = int(candles[first_red_idx - 1].get("volume", 0) or 0)
+            if volumes[-1] <= prev_vol:
+                continue
+
+        # Fetch volume reference from the trading day prior to the first red candle
+        first_red_date = candles[first_red_idx].get("date")
+        if not first_red_date:
+            continue
+        max_hourly_vol = get_option_prev_day_max_hourly_volume(kite, token, first_red_date)
+        if max_hourly_vol <= 0:
+            continue
+
+        # All pattern candles must have volume > max_hourly_vol
+        all_vols_higher = True
+        for v in volumes:
+            if v <= max_hourly_vol:
+                all_vols_higher = False
+                break
+        if not all_vols_higher:
+            continue
+
+        # Avoid duplicates
+        trigger_key = (token, str(doji_time))
+        if trigger_key in _doji_triggered_alerts:
+            continue
+
+        new_breakouts[token] = {
+            "symbol": meta["symbol"],
+            "name": meta["name"],
+            "itm_type": meta["type"],
+            "doji_high": doji_high,
+            "doji_time": doji_time,
+            "volumes": volumes[::-1], # [vol(Red 1), vol(Red 2), vol(Doji)]
+            "prev_max_vol": max_hourly_vol,
+            "n_reds": red_count
+        }
+
+    _active_doji_breakouts = new_breakouts
+    print(f"Hourly Doji scan finished. Found {len(_active_doji_breakouts)} breakout candidates.")
+
+
+def check_doji_breakout_live_alerts(kite):
+    """1-Minute live check. Scans active breakout candidates and checks if
+    LTP exceeds Doji high. Triggers Telegram alerts on breach.
+    """
+    global _active_doji_breakouts, _doji_triggered_alerts
+    
+    if not _active_doji_breakouts:
+        return []
+
+    alerts = []
+    tokens = list(_active_doji_breakouts.keys())
+
+    from websocket_flow import get_token_quotes
+    token_str_list = [str(t) for t in tokens]
+    cached = get_token_quotes(token_str_list)
+
+    ltps = {}
+    for t in tokens:
+        t_str = str(t)
+        if t_str in cached:
+            ltps[t] = cached[t_str].get("last_price", 0.0)
+
+    missing_tokens = [t for t in tokens if t not in ltps]
+    if missing_tokens:
+        try:
+            symbols_to_query = [_active_doji_breakouts[t]["symbol"] for t in missing_tokens]
+            quotes = kite_quote(kite, symbols_to_query)
+            for t in missing_tokens:
+                sym = _active_doji_breakouts[t]["symbol"]
+                if sym in quotes:
+                    ltps[t] = quotes[sym].get("last_price", 0.0)
+        except Exception as e:
+            print(f"Error fetching live quotes for Doji check: {e}")
+
+    triggered_tokens = []
+    for token, info in _active_doji_breakouts.items():
+        ltp = ltps.get(token, 0.0)
+        if ltp <= 0:
+            continue
+
+        if ltp > info["doji_high"]:
+            vol_strs = []
+            for idx, vol in enumerate(info["volumes"]):
+                label = f"V{idx+1}" if idx < info["n_reds"] else "Doji"
+                vol_strs.append(f"{label}: {vol//1000}k")
+            vol_trend_str = " < ".join(vol_strs)
+
+            clean_opt_symbol = info["symbol"].split(":", 1)[1] if ":" in info["symbol"] else info["symbol"]
+            now_ist = datetime.now(IST)
+            
+            # Format:
+            # 🚨 OPTION DOJI BREAKOUT: 
+            # HDFCBANK26AUG1600CE (ITM CE)
+            # LTP: 48.60 🚀 (Crossed Doji High: 46.20)
+            # Vol Trend: V1: 420k < V2: 510k < Doji: 630k
+            # Prev Max: 180k
+            # Time: 11:18 IST
+            alert_msg = (
+                f"🚨 OPTION DOJI BREAKOUT:\n"
+                f"  {clean_opt_symbol} ({info['itm_type']})\n"
+                f"  LTP: {ltp:.2f} 🚀 (Crossed Doji High: {info['doji_high']:.2f})\n"
+                f"  Vol Trend: {vol_trend_str}\n"
+                f"  Prev Max: {info['prev_max_vol']//1000}k\n"
+                f"  Time: {now_ist.strftime('%H:%M')} IST"
+            )
+            alerts.append(alert_msg)
+
+            _doji_triggered_alerts.add((token, str(info["doji_time"])))
+            triggered_tokens.append(token)
+
+    for token in triggered_tokens:
+        _active_doji_breakouts.pop(token, None)
+
+    return alerts
+
