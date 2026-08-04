@@ -248,10 +248,14 @@ def is_burst_session_open(now_ist=None):
 
 
 def get_active_burst_names(now_ist=None):
+    now_ist = now_ist or datetime.now(IST)
+    t = now_ist.time()
     session = get_burst_session(now_ist)
     if session == "mcx":
         return []
     if session == "nse":
+        if datetime.strptime("09:15", "%H:%M").time() <= t < datetime.strptime("09:21", "%H:%M").time():
+            return []
         return sorted(set(INDEX_BURST_NAMES) | set(STOCK_BURST_NAMES))
     return []
 
@@ -264,6 +268,8 @@ def get_burst_subscription_names(now_ist=None):
 
     if now_ist.weekday() <= 4:
         t = now_ist.time()
+        if datetime.strptime("09:15", "%H:%M").time() <= t < datetime.strptime("09:21", "%H:%M").time():
+            return []  # skip burst alerts between 09:15 and 09:20
         if t < NSE_BURST_START_TIME:
             return sorted(set(INDEX_BURST_NAMES) | set(STOCK_BURST_NAMES))
         if NSE_BURST_END_TIME <= t <= MCX_BURST_END_TIME:
