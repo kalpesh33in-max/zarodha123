@@ -3378,33 +3378,18 @@ def check_hourly_doji_patterns(kite):
         if red_count < 2:
             continue
 
-        # Check strictly increasing volume: vol(Doji) > vol(Red 2) > vol(Red 1)
+        # All pattern candles (including Doji and Red candles) must have volume > Prev Max
         volumes = [int(candles[len(candles) - 2 - i].get("volume", 0) or 0) for i in range(red_count + 1)]
-        # volumes is: [vol(Doji), vol(Red N), ..., vol(Red 1)]
-        volume_increasing = True
-        for i in range(len(volumes) - 1):
-            if volumes[i] <= volumes[i + 1]:
-                volume_increasing = False
-                break
-        if not volume_increasing:
-            continue
-
-        # Check volume of the first red candle (volumes[-1]) > previous candle
         first_red_idx = len(candles) - 2 - red_count
-        if first_red_idx - 1 >= 0:
-            prev_vol = int(candles[first_red_idx - 1].get("volume", 0) or 0)
-            if volumes[-1] <= prev_vol:
-                continue
-
-        # Fetch volume reference from the trading day prior to the first red candle
         first_red_date = candles[first_red_idx].get("date")
         if not first_red_date:
             continue
+
         max_hourly_vol = get_option_prev_day_max_hourly_volume(kite, token, first_red_date)
         if max_hourly_vol <= 0:
             continue
 
-        # All pattern candles must have volume > max_hourly_vol
+        # Verify that all pattern candles are strictly higher than max_hourly_vol
         all_vols_higher = True
         for v in volumes:
             if v <= max_hourly_vol:
@@ -3478,7 +3463,7 @@ def check_doji_breakout_live_alerts(kite):
             for idx, vol in enumerate(info["volumes"]):
                 label = f"V{idx+1}" if idx < info["n_reds"] else "Doji"
                 vol_strs.append(f"{label}: {vol//1000}k")
-            vol_trend_str = " < ".join(vol_strs)
+            vol_trend_str = ", ".join(vol_strs)
 
             clean_opt_symbol = info["symbol"].split(":", 1)[1] if ":" in info["symbol"] else info["symbol"]
             now_ist = datetime.now(IST)
@@ -3487,7 +3472,7 @@ def check_doji_breakout_live_alerts(kite):
             # 🚨 OPTION DOJI BREAKOUT: 
             # HDFCBANK26AUG1600CE (ITM CE)
             # LTP: 48.60 🚀 (Crossed Doji High: 46.20)
-            # Vol Trend: V1: 420k < V2: 510k < Doji: 630k
+            # Vol Trend: V1: 420k, V2: 510k, Doji: 630k
             # Prev Max: 180k
             # Time: 11:18 IST
             alert_msg = (
