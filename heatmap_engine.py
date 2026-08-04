@@ -3188,10 +3188,10 @@ def get_doji_watchlist_options(kite):
         atm = min(strikes, key=lambda x: abs(x - ltp))
         idx = strikes.index(atm)
 
-        # 3 ITM CE (strikes below ATM)
-        itm_ce_strikes = strikes[max(0, idx - 3):idx]
-        # 3 ITM PE (strikes above ATM)
-        itm_pe_strikes = strikes[idx + 1:min(len(strikes), idx + 4)]
+        # 5 ITM CE (strikes below ATM)
+        itm_ce_strikes = strikes[max(0, idx - 5):idx]
+        # 5 ITM PE (strikes above ATM)
+        itm_pe_strikes = strikes[idx + 1:min(len(strikes), idx + 6)]
 
         selected_opts = expiry_opts[
             (expiry_opts["strike"].isin(itm_ce_strikes) & expiry_opts["instrument_type"].isin(["CE", "CALL"])) |
@@ -3312,8 +3312,8 @@ def check_hourly_doji_patterns(kite):
             atm = min(strikes, key=lambda x: abs(x - ltp))
             idx = strikes.index(atm)
 
-            itm_ce_strikes = strikes[max(0, idx - 3):idx]
-            itm_pe_strikes = strikes[idx + 1:min(len(strikes), idx + 4)]
+            itm_ce_strikes = strikes[max(0, idx - 5):idx]
+            itm_pe_strikes = strikes[idx + 1:min(len(strikes), idx + 6)]
 
             selected_opts = expiry_opts[
                 (expiry_opts["strike"].isin(itm_ce_strikes) & expiry_opts["instrument_type"].isin(["CE", "CALL"])) |
