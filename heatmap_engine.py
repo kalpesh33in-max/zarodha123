@@ -3576,18 +3576,23 @@ def check_hourly_doji_patterns(kite):
         else:
             continue
 
-        # Count consecutive red candles before the reversal candle (candles[-3], candles[-4]...)
-        red_count = 0
+        # Count consecutive LOWER-CLOSE red candles before the reversal candle
+        # Each older candle must close HIGHER than the newer one (downtrend structure)
+        red_count  = 0
+        red_closes = []   # stores closes newest-first (reverse chronological)
         idx = len(candles) - 3
         while idx >= 0:
-            c = candles[idx]
-            c_open = float(c.get("open", 0) or 0)
+            c       = candles[idx]
+            c_open  = float(c.get("open",  0) or 0)
             c_close = float(c.get("close", 0) or 0)
-            if c_close < c_open:
-                red_count += 1
-                idx -= 1
-            else:
+            if c_close >= c_open:                          # not a red candle
                 break
+            # Lower-close check: older candle must close HIGHER than newer red
+            if red_closes and c_close <= red_closes[-1]:
+                break                                      # not a consecutive lower close
+            red_closes.append(c_close)
+            red_count += 1
+            idx -= 1
 
         if red_count < 2:
             continue
@@ -3736,8 +3741,9 @@ EXH_LOWER_VOL        = 400_000   # Lower-close candles min volume each
 EXH_REVERSAL_VOL     = 400_000   # Reversal candle min volume
 EXH_MIN_LOWER_CLOSES = 3         # Minimum consecutive lower closes
 
-_exhaustion_triggered       = set()   # (name, rev_time_str) -> avoid duplicate alerts
-_exhaustion_last_check_slot = None    # last 30-min slot index
+_exhaustion_triggered       = set()    # (name, rev_time_str) -> no duplicate alerts
+_exhaustion_active_watch    = {}       # name -> watch info (waiting for live LTP cross)
+_exhaustion_last_check_slot = None     # last 30-min slot index
 
 
 def _classify_reversal_candle_30m(o, c, h, l):
@@ -3817,14 +3823,17 @@ def _get_underlying_ltp_exh(kite, name):
 
 
 def check_exhaustion_reversal_30m(kite):
-    """Scans 30-min candles for the Exhaustion Reversal pattern and fires
-    Telegram option-buy alerts on confirmation.
+    """Scans 30-min candles for the Exhaustion Reversal pattern.
+    When a valid Reversal candle (Hammer/Doji/Rejection) is found after the
+    setup sequence, it is stored in _exhaustion_active_watch.
+    The alert fires LIVE (via check_exhaustion_live_alerts) as soon as
+    the underlying LTP crosses the reversal candle high - no closed candle wait.
 
     Pattern:
       Candle 1  : Vol >= 100k  (preferably bearish)
       Candles N : >= 3 consecutive lower closes, each Vol >= 400k
-      Reversal  : Hammer / Doji / Rejection, Vol >= 400k
-      Confirm   : Green candle, Close > Reversal High  -> ALERT
+      Reversal  : Hammer / Doji / Rejection, Vol >= 400k  -> stored in watch
+      LIVE LTP  : crosses Reversal High                   -> ALERT fires
     """
     global _exhaustion_last_check_slot
 
@@ -3843,7 +3852,6 @@ def check_exhaustion_reversal_30m(kite):
         return []
     _exhaustion_last_check_slot = current_slot
 
-    alerts    = []
     from_time = datetime.combine(now_ist.date(), market_open, tzinfo=IST)
 
     for name in EXHAUSTION_REVERSAL_WATCHLIST:
@@ -3852,7 +3860,6 @@ def check_exhaustion_reversal_30m(kite):
             if ltp <= 0:
                 continue
 
-            # Get futures instrument token for historical data
             futures_df = load_futures_data()
             token = None
             if futures_df is not None and not futures_df.empty:
@@ -3862,20 +3869,19 @@ def check_exhaustion_reversal_30m(kite):
             if token is None:
                 continue
 
-            # Fetch today's 30-min candles
             candles = get_historical_data_cached(
                 kite, token, from_time, now_ist, "30minute"
             )
             if not candles or len(candles) < 5:
                 continue
 
-            # Exclude the live (incomplete) last candle
+            # Work on completed candles only (exclude live last candle)
             completed = candles[:-1]
-            if len(completed) < 5:
+            if len(completed) < 4:
                 continue
 
-            # ---- Scan candle sequence ----
-            for setup_idx in range(len(completed) - 4):
+            # ---- Scan for pattern ----
+            for setup_idx in range(len(completed) - 3):
                 c1       = completed[setup_idx]
                 c1_open  = float(c1.get("open",  0) or 0)
                 c1_close = float(c1.get("close", 0) or 0)
@@ -3922,59 +3928,92 @@ def check_exhaustion_reversal_30m(kite):
                 if not rev_type:
                     continue
 
-                # Confirmation candle right after reversal
-                conf_idx = rev_idx + 1
-                if conf_idx >= len(completed):
-                    continue
-
-                conf      = completed[conf_idx]
-                conf_o    = float(conf.get("open",  0) or 0)
-                conf_c    = float(conf.get("close", 0) or 0)
-                conf_vol  = int(conf.get("volume", 0) or 0)
-                conf_time = conf.get("date")
-
-                # Green AND closes above reversal high
-                if conf_c <= conf_o:
-                    continue
-                if conf_c <= rev_h:
-                    continue
-
                 # Duplicate guard
                 trig_key = (name, str(rev_time))
                 if trig_key in _exhaustion_triggered:
                     continue
-                _exhaustion_triggered.add(trig_key)
 
-                # ---- Build option alerts ----
+                # ---- Store in active watch for LIVE LTP monitoring ----
                 options = _get_exhaustion_options(name, ltp)
                 if not options:
                     continue
 
-                rev_time_str  = rev_time.strftime("%H:%M")  if hasattr(rev_time,  "strftime") else str(rev_time)
-                conf_time_str = conf_time.strftime("%H:%M") if hasattr(conf_time, "strftime") else str(conf_time)
-                rev_emoji = {"HAMMER": "\U0001f528", "DOJI": "\u26a1", "REJECTION": "\U0001f53b"}.get(rev_type, "\u26a1")
-
-                for opt in options:
-                    clean_sym = opt["symbol"].split(":", 1)[1] if ":" in opt["symbol"] else opt["symbol"]
-                    alert_msg = (
-                        f"\U0001f525 EXHAUSTION REVERSAL ({rev_type}) {rev_emoji}\n"
-                        f"\U0001f6a8 OPTION BUY ({opt['option_type']}) \U0001f4c8\n"
-                        f"Symbol: {clean_sym} ({opt['itm_type']})\n"
-                        f"Underlying: {name} @ {ltp:.2f}\n"
-                        f"Expiry: {opt['expiry_text']}\n"
-                        f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-                        f"Setup Candle  : {c1_open:.2f}\u2192{c1_close:.2f} | Vol: {c1_vol//1000}k {chr(128201) + ' Bearish' if is_c1_bearish else chr(128200)}\n"
-                        f"Lower Closes  : {n_lower} candles (Vol \u2265 {EXH_LOWER_VOL//1000}k each)\n"
-                        f"{rev_type} Candle : H={rev_h:.2f} L={rev_l:.2f} | Vol: {rev_vol//1000}k | {rev_time_str} IST\n"
-                        f"Confirm Candle: Close={conf_c:.2f} > {rev_type} H={rev_h:.2f} | Vol: {conf_vol//1000}k | {conf_time_str} IST\n"
-                        f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-                        f"TIME: {now_ist.strftime('%H:%M:%S')} IST"
-                    )
-                    alerts.append(alert_msg)
-
+                rev_time_str = rev_time.strftime("%H:%M") if hasattr(rev_time, "strftime") else str(rev_time)
+                _exhaustion_active_watch[name] = {
+                    "rev_high":     rev_h,
+                    "rev_low":      rev_l,
+                    "rev_vol":      rev_vol,
+                    "rev_type":     rev_type,
+                    "rev_time_str": rev_time_str,
+                    "trig_key":     trig_key,
+                    "c1_open":      c1_open,
+                    "c1_close":     c1_close,
+                    "c1_vol":       c1_vol,
+                    "is_c1_bearish": is_c1_bearish,
+                    "n_lower":      n_lower,
+                    "underlying_ltp": ltp,
+                    "options":      options,
+                }
+                print(f"[ExhaustionReversal30M] Watch set for {name}: {rev_type} H={rev_h:.2f} at {rev_time_str}")
                 break  # one pattern per underlying per slot
 
         except Exception as e:
             print(f"[ExhaustionReversal30M] Error scanning {name}: {e}")
+
+    return []  # alerts fire via check_exhaustion_live_alerts (live LTP)
+
+
+def check_exhaustion_live_alerts(kite):
+    """Live minute-by-minute check. Fires alert as soon as underlying LTP
+    crosses the Reversal candle High - no need to wait for candle close.
+    Call this every minute alongside check_doji_breakout_live_alerts.
+    """
+    global _exhaustion_active_watch
+
+    if not _exhaustion_active_watch:
+        return []
+
+    alerts = []
+    now_ist = datetime.now(IST)
+    triggered_names = []
+
+    for name, watch in _exhaustion_active_watch.items():
+        ltp = _get_underlying_ltp_exh(kite, name)
+        if ltp <= 0:
+            continue
+
+        # Alert fires when live LTP crosses the Reversal candle High
+        if ltp <= watch["rev_high"]:
+            continue
+
+        # Mark as triggered so the scanner doesn't re-add it
+        _exhaustion_triggered.add(watch["trig_key"])
+        triggered_names.append(name)
+
+        rev_type  = watch["rev_type"]
+        rev_emoji = {"HAMMER": "\U0001f528", "DOJI": "\u26a1", "REJECTION": "\U0001f53b"}.get(rev_type, "\u26a1")
+
+        for opt in watch["options"]:
+            clean_sym = opt["symbol"].split(":", 1)[1] if ":" in opt["symbol"] else opt["symbol"]
+            c1_dir = "\U0001f4c9 Bearish" if watch["is_c1_bearish"] else "\U0001f4c8"
+            alert_msg = (
+                f"\U0001f525 EXHAUSTION REVERSAL ({rev_type}) {rev_emoji}\n"
+                f"\U0001f6a8 OPTION BUY ({opt['option_type']}) \U0001f4c8\n"
+                f"Symbol: {clean_sym} ({opt['itm_type']})\n"
+                f"Underlying: {name} @ {ltp:.2f} \U0001f680 (Crossed {rev_type} H: {watch['rev_high']:.2f})\n"
+                f"Expiry: {opt['expiry_text']}\n"
+                f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                f"Setup Candle  : {watch['c1_open']:.2f}\u2192{watch['c1_close']:.2f} | Vol: {watch['c1_vol']//1000}k {c1_dir}\n"
+                f"Lower Closes  : {watch['n_lower']} candles (Vol \u2265 {EXH_LOWER_VOL//1000}k each)\n"
+                f"{rev_type} Candle : H={watch['rev_high']:.2f} L={watch['rev_low']:.2f} | Vol: {watch['rev_vol']//1000}k | {watch['rev_time_str']} IST\n"
+                f"LIVE CROSS    : LTP {ltp:.2f} > {rev_type} High {watch['rev_high']:.2f} \u2705\n"
+                f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                f"TIME: {now_ist.strftime('%H:%M:%S')} IST"
+            )
+            alerts.append(alert_msg)
+
+    # Remove triggered entries
+    for name in triggered_names:
+        _exhaustion_active_watch.pop(name, None)
 
     return alerts
