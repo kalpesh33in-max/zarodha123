@@ -3449,8 +3449,8 @@ def get_recent_candles(kite, token, now_ist, num_trading_days=4):
 
 def check_hourly_doji_patterns(kite):
     """Background Hourly candle pattern checks. Scans selected ITM options,
-    detects (Red x N >= 2 -> Doji) setups, validates volumes against previous day,
-    and Populates the live watch list.
+    detects (Red x N >= 2 -> Hammer/Doji/Rejection) reversal setups, validates
+    volumes against previous day, and populates the live watch list.
     """
     global _active_doji_breakouts
     
@@ -3556,11 +3556,26 @@ def check_hourly_doji_patterns(kite):
         if c_range <= 0:
             continue
 
+        lower_wick = min(doji_open, doji_close) - doji_low
+        upper_wick = doji_high - max(doji_open, doji_close)
+
+        # Doji: tiny body (≤ 10% of range)
         is_doji = body <= c_range * 0.1
-        if not is_doji:
+        # Hammer: small body (≤ 40% range), lower wick ≥ 2x body AND ≥ 50% of range
+        is_hammer = (body <= c_range * 0.4) and (lower_wick >= body * 2) and (lower_wick >= c_range * 0.5)
+        # Rejection: long lower wick (≥ 60% of range) showing rejection of lows
+        is_rejection = (lower_wick >= c_range * 0.6) and (upper_wick <= c_range * 0.2)
+
+        if is_doji:
+            candle_type = "DOJI"
+        elif is_hammer:
+            candle_type = "HAMMER"
+        elif is_rejection:
+            candle_type = "REJECTION"
+        else:
             continue
 
-        # Count consecutive red candles before the Doji (candles[-3], candles[-4]...)
+        # Count consecutive red candles before the reversal candle (candles[-3], candles[-4]...)
         red_count = 0
         idx = len(candles) - 3
         while idx >= 0:
@@ -3576,7 +3591,7 @@ def check_hourly_doji_patterns(kite):
         if red_count < 2:
             continue
 
-        # All pattern candles (including Doji and Red candles) must have volume > Prev Max
+        # All pattern candles (including reversal candle and Red candles) must have volume > Prev Max
         volumes = [int(candles[len(candles) - 2 - i].get("volume", 0) or 0) for i in range(red_count + 1)]
         first_red_idx = len(candles) - 2 - red_count
         first_red_date = candles[first_red_idx].get("date")
@@ -3607,7 +3622,8 @@ def check_hourly_doji_patterns(kite):
             "itm_type": meta["type"],
             "doji_high": doji_high,
             "doji_time": doji_time,
-            "volumes": volumes[::-1], # [vol(Red 1), vol(Red 2), vol(Doji)]
+            "candle_type": candle_type,  # DOJI / HAMMER / REJECTION
+            "volumes": volumes[::-1],    # [vol(Red 1), vol(Red 2), vol(Reversal)]
             "prev_max_vol": max_hourly_vol,
             "n_reds": red_count
         }
@@ -3667,16 +3683,23 @@ def check_doji_breakout_live_alerts(kite):
             now_ist = datetime.now(IST)
             
             # Format:
-            # 🚨 OPTION DOJI BREAKOUT: 
+            # 🚨 OPTION HAMMER BREAKOUT:
             # HDFCBANK26AUG1600CE (ITM CE)
-            # LTP: 48.60 🚀 (Crossed Doji High: 46.20)
-            # Vol Trend: V1: 420k, V2: 510k, Doji: 630k
+            # LTP: 48.60 🚀 (Crossed Hammer High: 46.20)
+            # Vol Trend: V1: 420k, V2: 510k, Hammer: 630k
             # Prev Max: 180k
             # Time: 11:18 IST
+            c_type = info.get("candle_type", "DOJI")
+            c_emoji = {"HAMMER": "🔨", "DOJI": "⚡", "REJECTION": "🔻"}.get(c_type, "⚡")
+            label = c_type.capitalize()
+            # Replace last vol label with candle type name
+            if vol_strs:
+                vol_strs[-1] = f"{label}: {info['volumes'][-1]//1000}k"
+            vol_trend_str = ", ".join(vol_strs)
             alert_msg = (
-                f"🚨 OPTION DOJI BREAKOUT:\n"
+                f"🚨 OPTION {c_type} BREAKOUT: {c_emoji}\n"
                 f"  {clean_opt_symbol} ({info['itm_type']})\n"
-                f"  LTP: {ltp:.2f} 🚀 (Crossed Doji High: {info['doji_high']:.2f})\n"
+                f"  LTP: {ltp:.2f} 🚀 (Crossed {label} High: {info['doji_high']:.2f})\n"
                 f"  Vol Trend: {vol_trend_str}\n"
                 f"  Prev Max: {info['prev_max_vol']//1000}k\n"
                 f"  Time: {now_ist.strftime('%H:%M')} IST"
