@@ -2755,8 +2755,10 @@ def process_volume_burst_logic(key, name, symbol, ltp, volume, lot_size, is_opti
 
             # --- Check if Candle 1 itself is a new burst setup (Lots >= 1000) ---
             if completed_lots >= threshold:
-                burst_time = now - timedelta(minutes=interval_minutes)
-                time_str = burst_time.strftime("%H:%M:00")
+                burst_start_time = now - timedelta(minutes=interval_minutes)
+                start_hm = burst_start_time.strftime("%H:%M")
+                end_hm = now.strftime("%H:%M")
+                time_str = f"{now.strftime('%H:%M:%S')} IST ({start_hm}-{end_hm})"
 
                 state["active_watch"] = {
                     "burst_lots": completed_lots,
