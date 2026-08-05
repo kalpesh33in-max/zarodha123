@@ -3248,6 +3248,7 @@ def calculate_other_historical_alerts(kite):
     alerts.extend(build_weekly_future_volume_mismatch_alerts(kite))
     alerts.extend(build_stock_future_1hr_s4_alerts(kite))
     alerts.extend(build_weekly_born_breakout_alerts(kite))
+    alerts.extend(check_exhaustion_reversal_30m(kite))
     return alerts
 
 
@@ -3714,3 +3715,266 @@ def check_doji_breakout_live_alerts(kite):
 
     return alerts
 
+
+
+# ==============================================================================
+# EXHAUSTION REVERSAL 30-MINUTE SCANNER
+# Setup: Bearish Candle 1 (Vol>=100k) -> 3+ Lower Closes (Vol>=400k each)
+#        -> Hammer/Doji/Rejection (Vol>=400k) -> Green Confirmation above High
+# Targets: Top-15 stocks + NIFTY + BANKNIFTY  (ATM + 5 ITM CE and PE)
+# ==============================================================================
+
+EXHAUSTION_REVERSAL_WATCHLIST = [
+    "NIFTY", "BANKNIFTY",
+    "HDFCBANK", "ICICIBANK", "RELIANCE", "BHARTIARTL", "LT",
+    "SBIN", "INFY", "AXISBANK", "TCS", "ITC", "M&M",
+    "HINDUNILVR", "TATAMOTORS", "KOTAKBANK",
+]
+
+EXH_SETUP_VOL        = 100_000   # Candle 1 min volume
+EXH_LOWER_VOL        = 400_000   # Lower-close candles min volume each
+EXH_REVERSAL_VOL     = 400_000   # Reversal candle min volume
+EXH_MIN_LOWER_CLOSES = 3         # Minimum consecutive lower closes
+
+_exhaustion_triggered       = set()   # (name, rev_time_str) -> avoid duplicate alerts
+_exhaustion_last_check_slot = None    # last 30-min slot index
+
+
+def _classify_reversal_candle_30m(o, c, h, l):
+    """Returns HAMMER / DOJI / REJECTION or None."""
+    body    = abs(c - o)
+    c_range = h - l
+    if c_range <= 0:
+        return None
+    lower_wick = min(o, c) - l
+    upper_wick = h - max(o, c)
+    if body <= c_range * 0.1:
+        return "DOJI"
+    if (body <= c_range * 0.4) and (lower_wick >= body * 2) and (lower_wick >= c_range * 0.5):
+        return "HAMMER"
+    if (lower_wick >= c_range * 0.6) and (upper_wick <= c_range * 0.2):
+        return "REJECTION"
+    return None
+
+
+def _get_exhaustion_options(name, ltp):
+    """Returns option dicts: ATM + 5 ITM CE + 5 ITM PE for the given underlying."""
+    options_df = load_options_data()
+    if options_df is None or options_df.empty:
+        return []
+    underlying_opts = options_df[options_df["name"] == name]
+    if underlying_opts.empty:
+        return []
+    expiry = get_monthly_expiry(underlying_opts["expiry"].unique())
+    if expiry is None:
+        return []
+    exp_opts    = underlying_opts[underlying_opts["expiry"] == expiry].copy()
+    strikes     = sorted(exp_opts["strike"].unique())
+    if not strikes:
+        return []
+    atm         = min(strikes, key=lambda x: abs(x - ltp))
+    idx         = strikes.index(atm)
+    expiry_text = expiry.strftime("%d-%b-%Y").upper()
+    ce_strikes  = strikes[max(0, idx - 5): idx + 1]        # ITM CE + ATM
+    pe_strikes  = strikes[idx: min(len(strikes), idx + 6)] # ATM + ITM PE
+    result = []
+    for _, row in exp_opts.iterrows():
+        itype  = str(row.get("instrument_type", "")).upper()
+        strike = row["strike"]
+        sym    = f"NFO:{row['tradingsymbol']}"
+        tok    = int(row["instrument_token"])
+        if itype in ("CE", "CALL") and strike in ce_strikes:
+            result.append({"symbol": sym, "token": tok,
+                           "itm_type": "ATM CE" if strike == atm else "ITM CE",
+                           "expiry_text": expiry_text, "option_type": "CE"})
+        elif itype in ("PE", "PUT") and strike in pe_strikes:
+            result.append({"symbol": sym, "token": tok,
+                           "itm_type": "ATM PE" if strike == atm else "ITM PE",
+                           "expiry_text": expiry_text, "option_type": "PE"})
+    return result
+
+
+def _get_underlying_ltp_exh(kite, name):
+    """LTP for index or stock (exhaustion scanner)."""
+    from websocket_flow import get_symbol_quotes
+    if name == "NIFTY":
+        sym = "NSE:NIFTY 50"
+    elif name == "BANKNIFTY":
+        sym = "NSE:NIFTY BANK"
+    else:
+        sym = get_active_future(name)
+    if not sym:
+        return 0.0
+    cached = get_symbol_quotes([sym])
+    ltp = cached.get(sym, {}).get("last_price", 0.0)
+    if ltp <= 0:
+        try:
+            q   = kite_quote(kite, [sym])
+            ltp = q.get(sym, {}).get("last_price", 0.0)
+        except Exception:
+            pass
+    return ltp
+
+
+def check_exhaustion_reversal_30m(kite):
+    """Scans 30-min candles for the Exhaustion Reversal pattern and fires
+    Telegram option-buy alerts on confirmation.
+
+    Pattern:
+      Candle 1  : Vol >= 100k  (preferably bearish)
+      Candles N : >= 3 consecutive lower closes, each Vol >= 400k
+      Reversal  : Hammer / Doji / Rejection, Vol >= 400k
+      Confirm   : Green candle, Close > Reversal High  -> ALERT
+    """
+    global _exhaustion_last_check_slot
+
+    now_ist = datetime.now(IST)
+    if now_ist.weekday() > 4:
+        return []
+
+    market_open  = datetime.strptime("09:15", "%H:%M").time()
+    market_close = datetime.strptime("15:30", "%H:%M").time()
+    if not (market_open <= now_ist.time() <= market_close):
+        return []
+
+    # Run once per 30-min slot
+    current_slot = (now_ist.hour * 60 + now_ist.minute) // 30
+    if current_slot == _exhaustion_last_check_slot:
+        return []
+    _exhaustion_last_check_slot = current_slot
+
+    alerts    = []
+    from_time = datetime.combine(now_ist.date(), market_open, tzinfo=IST)
+
+    for name in EXHAUSTION_REVERSAL_WATCHLIST:
+        try:
+            ltp = _get_underlying_ltp_exh(kite, name)
+            if ltp <= 0:
+                continue
+
+            # Get futures instrument token for historical data
+            futures_df = load_futures_data()
+            token = None
+            if futures_df is not None and not futures_df.empty:
+                frow = futures_df[futures_df["name"] == name]
+                if not frow.empty:
+                    token = int(frow.iloc[0]["instrument_token"])
+            if token is None:
+                continue
+
+            # Fetch today's 30-min candles
+            candles = get_historical_data_cached(
+                kite, token, from_time, now_ist, "30minute"
+            )
+            if not candles or len(candles) < 5:
+                continue
+
+            # Exclude the live (incomplete) last candle
+            completed = candles[:-1]
+            if len(completed) < 5:
+                continue
+
+            # ---- Scan candle sequence ----
+            for setup_idx in range(len(completed) - 4):
+                c1       = completed[setup_idx]
+                c1_open  = float(c1.get("open",  0) or 0)
+                c1_close = float(c1.get("close", 0) or 0)
+                c1_vol   = int(c1.get("volume", 0) or 0)
+
+                if c1_vol < EXH_SETUP_VOL:
+                    continue
+                is_c1_bearish = c1_close < c1_open
+
+                # Count consecutive lower closes after Candle 1
+                lower_close_end = setup_idx + 1
+                prev_close = c1_close
+                while lower_close_end < len(completed):
+                    cn       = completed[lower_close_end]
+                    cn_close = float(cn.get("close", 0) or 0)
+                    cn_vol   = int(cn.get("volume", 0) or 0)
+                    if cn_close < prev_close and cn_vol >= EXH_LOWER_VOL:
+                        prev_close = cn_close
+                        lower_close_end += 1
+                    else:
+                        break
+
+                n_lower = lower_close_end - setup_idx - 1
+                if n_lower < EXH_MIN_LOWER_CLOSES:
+                    continue
+
+                # Reversal candle right after lower closes
+                rev_idx = lower_close_end
+                if rev_idx >= len(completed):
+                    continue
+
+                rev      = completed[rev_idx]
+                rev_o    = float(rev.get("open",  0) or 0)
+                rev_c    = float(rev.get("close", 0) or 0)
+                rev_h    = float(rev.get("high",  0) or 0)
+                rev_l    = float(rev.get("low",   0) or 0)
+                rev_vol  = int(rev.get("volume", 0) or 0)
+                rev_time = rev.get("date")
+
+                if rev_vol < EXH_REVERSAL_VOL:
+                    continue
+
+                rev_type = _classify_reversal_candle_30m(rev_o, rev_c, rev_h, rev_l)
+                if not rev_type:
+                    continue
+
+                # Confirmation candle right after reversal
+                conf_idx = rev_idx + 1
+                if conf_idx >= len(completed):
+                    continue
+
+                conf      = completed[conf_idx]
+                conf_o    = float(conf.get("open",  0) or 0)
+                conf_c    = float(conf.get("close", 0) or 0)
+                conf_vol  = int(conf.get("volume", 0) or 0)
+                conf_time = conf.get("date")
+
+                # Green AND closes above reversal high
+                if conf_c <= conf_o:
+                    continue
+                if conf_c <= rev_h:
+                    continue
+
+                # Duplicate guard
+                trig_key = (name, str(rev_time))
+                if trig_key in _exhaustion_triggered:
+                    continue
+                _exhaustion_triggered.add(trig_key)
+
+                # ---- Build option alerts ----
+                options = _get_exhaustion_options(name, ltp)
+                if not options:
+                    continue
+
+                rev_time_str  = rev_time.strftime("%H:%M")  if hasattr(rev_time,  "strftime") else str(rev_time)
+                conf_time_str = conf_time.strftime("%H:%M") if hasattr(conf_time, "strftime") else str(conf_time)
+                rev_emoji = {"HAMMER": "\U0001f528", "DOJI": "\u26a1", "REJECTION": "\U0001f53b"}.get(rev_type, "\u26a1")
+
+                for opt in options:
+                    clean_sym = opt["symbol"].split(":", 1)[1] if ":" in opt["symbol"] else opt["symbol"]
+                    alert_msg = (
+                        f"\U0001f525 EXHAUSTION REVERSAL ({rev_type}) {rev_emoji}\n"
+                        f"\U0001f6a8 OPTION BUY ({opt['option_type']}) \U0001f4c8\n"
+                        f"Symbol: {clean_sym} ({opt['itm_type']})\n"
+                        f"Underlying: {name} @ {ltp:.2f}\n"
+                        f"Expiry: {opt['expiry_text']}\n"
+                        f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                        f"Setup Candle  : {c1_open:.2f}\u2192{c1_close:.2f} | Vol: {c1_vol//1000}k {chr(128201) + ' Bearish' if is_c1_bearish else chr(128200)}\n"
+                        f"Lower Closes  : {n_lower} candles (Vol \u2265 {EXH_LOWER_VOL//1000}k each)\n"
+                        f"{rev_type} Candle : H={rev_h:.2f} L={rev_l:.2f} | Vol: {rev_vol//1000}k | {rev_time_str} IST\n"
+                        f"Confirm Candle: Close={conf_c:.2f} > {rev_type} H={rev_h:.2f} | Vol: {conf_vol//1000}k | {conf_time_str} IST\n"
+                        f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                        f"TIME: {now_ist.strftime('%H:%M:%S')} IST"
+                    )
+                    alerts.append(alert_msg)
+
+                break  # one pattern per underlying per slot
+
+        except Exception as e:
+            print(f"[ExhaustionReversal30M] Error scanning {name}: {e}")
+
+    return alerts
