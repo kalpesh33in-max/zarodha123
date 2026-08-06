@@ -2647,8 +2647,8 @@ def process_volume_burst_logic(key, name, symbol, ltp, volume, lot_size, is_opti
     use_new_logic = is_banknifty or is_stock
 
     if use_new_logic:
-        interval_minutes = 5 if is_stock else 1
-        threshold = 1000
+        interval_minutes = 5
+        threshold = 5000 if is_banknifty else 2000
         current_interval = (now.hour * 60 + now.minute) // interval_minutes
         interval_type = f"{interval_minutes}min"
 
@@ -2708,12 +2708,11 @@ def process_volume_burst_logic(key, name, symbol, ltp, volume, lot_size, is_opti
             # --- Check active watch (Candle 2 completion check) ---
             if state["active_watch"] is not None and not state["active_watch"]["candle_2_checked"]:
                 watch = state["active_watch"]
-                candle_2_close = completed_close_price
                 candle_1_high = watch["candle_1_high"]
                 candle_1_low = watch["candle_1_low"]
 
                 trigger = False
-                if candle_2_close > candle_1_high:
+                if completed_close_price > candle_1_high:
                     p_icon = "▲"
                     if is_option:
                         is_call = option_type == "CE"
@@ -2721,7 +2720,7 @@ def process_volume_burst_logic(key, name, symbol, ltp, volume, lot_size, is_opti
                     else:
                         action = "FUTURE BUY (LONG) 📈"
                     trigger = True
-                elif candle_2_close < candle_1_low:
+                elif completed_close_price < candle_1_low:
                     p_icon = "▼"
                     if is_option:
                         is_call = option_type == "CE"
@@ -2733,13 +2732,13 @@ def process_volume_burst_logic(key, name, symbol, ltp, volume, lot_size, is_opti
                 if trigger:
                     strength = get_strength_label(watch["burst_lots"], name)
                     expiry_line = f"EXPIRY: {expiry_text}\n" if expiry_text else ""
-                    future_price_line = f"FUTURE PRICE: {u_ltp:.2f}\n" if is_option else f"FUTURE PRICE: {candle_2_close:.2f}\n"
+                    future_price_line = f"FUTURE PRICE: {u_ltp:.2f}\n" if is_option else f"FUTURE PRICE: {completed_close_price:.2f}\n"
 
                     alert_text = (
                         f"{strength}\n🚨 {action}\nSymbol: {symbol}\n"
                         f"{expiry_line}"
                         f"━━━━━━━━━━━━━━━\n"
-                        f"LOTS: {watch['burst_lots']}\nPRICE: {candle_2_close:.2f} ({p_icon})\n{future_price_line}"
+                        f"LOTS: {watch['burst_lots']}\nPRICE: {completed_close_price:.2f} ({p_icon})\n{future_price_line}"
                         f"━━━━━━━━━━━━━━━\n"
                         f"START VOLUME: {watch['candle_1_start_volume']:,}\nVOLUME DELTA: +{watch['candle_1_volume_delta']:,}\nEND VOLUME  : {watch['candle_1_end_volume']:,}\n"
                         f"TIME: {watch['time_str']}"
@@ -2751,9 +2750,15 @@ def process_volume_burst_logic(key, name, symbol, ltp, volume, lot_size, is_opti
 
                     state["active_watch"] = None # Clear watch
                 else:
-                    watch["candle_2_checked"] = True
+                    # Candle 2 closed inside the range. Check volume condition.
+                    if completed_lots >= threshold:
+                        # Candle 2 is ALSO a burst candle. Skip previous.
+                        state["active_watch"] = None
+                    else:
+                        # Valid setup: Candle 1 was burst, Candle 2 cooled off and closed inside.
+                        watch["candle_2_checked"] = True
 
-            # --- Check if Candle 1 itself is a new burst setup (Lots >= 1000) ---
+            # --- Check if Candle 1 itself is a new burst setup (Lots >= threshold) ---
             if completed_lots >= threshold:
                 burst_start_time = now - timedelta(minutes=interval_minutes)
                 start_hm = burst_start_time.strftime("%H:%M")
@@ -2779,13 +2784,13 @@ def process_volume_burst_logic(key, name, symbol, ltp, volume, lot_size, is_opti
             state["candle_high"] = ltp
             state["candle_low"] = ltp
 
-        # --- Live Tick Cross Check for Candles 3 to 9 ---
+        # --- Live Tick Cross Check for Candles 3 to 5 ---
         if state["active_watch"] is not None and state["active_watch"]["candle_2_checked"]:
             watch = state["active_watch"]
             intervals_elapsed = current_interval - watch["watch_start_interval"]
 
-            # Candles 3 to 9 check
-            if 2 <= intervals_elapsed <= 8:
+            # Candles 3 to 5 check
+            if 2 <= intervals_elapsed <= 4:
                 candle_1_high = watch["candle_1_high"]
                 candle_1_low = watch["candle_1_low"]
 
@@ -2827,8 +2832,8 @@ def process_volume_burst_logic(key, name, symbol, ltp, volume, lot_size, is_opti
                         alerts_list.append(alert_text)
 
                     state["active_watch"] = None # Clear watch
-            elif intervals_elapsed > 8:
-                # We have completed Candle 9 without a trigger, invalidate the setup
+            elif intervals_elapsed > 4:
+                # We have completed Candle 5 without a trigger, invalidate the setup
                 state["active_watch"] = None
 
     else:
