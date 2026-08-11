@@ -128,7 +128,13 @@ class DirectionEngine:
                     pe_data=self.snapshots[closest_pe]
                 )
                 
-                print(f"[IV ENGINE] BANKNIFTY Direction Score: {score:.1f}/100 | "
+                signal_label = "⚪ NEUTRAL"
+                if score > 70:
+                    signal_label = "🟢 BULLISH TRIAL (>70)"
+                elif score < 30:
+                    signal_label = "🔴 BEARISH TRIAL (<30)"
+                
+                print(f"[IV ENGINE] BANKNIFTY Score: {score:.1f}/100 {signal_label} | "
                       f"FUT: {fut_price} | "
                       f"CE ROC: {self.iv_roc.get(closest_ce, 0):.2f}% | "
                       f"PE ROC: {self.iv_roc.get(closest_pe, 0):.2f}%")
