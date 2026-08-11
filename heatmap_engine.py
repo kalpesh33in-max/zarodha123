@@ -2890,7 +2890,14 @@ def process_volume_burst_logic(key, name, symbol, ltp, volume, lot_size, is_opti
             completed_lots = int(delta_volume / lot_size) if delta_volume > 0 else 0
 
             # --- HISTORICAL DATA FETCH FOR EXACT CANDLE MATCH ---
-            if kite and token:
+            # Optimize: Only fetch if we are actively watching or if live volume is near threshold
+            needs_history = False
+            if state["active_watch"] is not None:
+                needs_history = True
+            elif completed_lots >= (threshold * 0.5):
+                needs_history = True
+
+            if needs_history and kite and token:
                 try:
                     import time
                     from datetime import timedelta
@@ -2930,12 +2937,12 @@ def process_volume_burst_logic(key, name, symbol, ltp, volume, lot_size, is_opti
                 intervals_elapsed = completed_interval - watch["watch_start_interval"]
 
                 if intervals_elapsed == 1:
-                    # Candle 2 completion: Must be RED (Pullback)
-                    if completed_close_price < completed_start_price:
+                    # Candle 2 completion: Must be RED (Pullback) AND have LOW VOLUME (< threshold)
+                    if completed_close_price < completed_start_price and completed_lots < threshold:
                         # Valid pullback
                         watch["candle_2_checked"] = True
                     else:
-                        # Invalid pullback (not red), clear watch
+                        # Invalid pullback (not red, or high volume), clear watch
                         state["active_watch"] = None
                 elif 2 <= intervals_elapsed <= 5 and watch.get("candle_2_checked"):
                     # Candle 3, 4, 5, 6 completion: Must close ABOVE Candle 1 High
