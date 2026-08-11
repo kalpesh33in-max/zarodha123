@@ -457,8 +457,12 @@ class FlowEngine:
     def on_ticks(self, ws, ticks):
         now = time.time()
         for tick in ticks:
-            token = str(tick.get("instrument_token"))
+            raw_token = tick.get("instrument_token")
+            if not raw_token:
+                continue
+            token = str(raw_token)
             quote = {
+                "instrument_token": int(raw_token),
                 "last_price": tick.get("last_price", 0),
                 "oi": tick.get("oi", 0),
                 "volume": tick.get("volume_traded") or tick.get("volume", 0),
