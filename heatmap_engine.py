@@ -2816,300 +2816,190 @@ def build_weekly_born_breakout_alerts(kite):
 
 def process_volume_burst_logic(key, name, symbol, ltp, volume, lot_size, is_option, option_type, expiry_text, u_ltp, alerts_list, stats=None, kite=None, token=None):
     if not lot_size:
-        return
+    return
 
     now = datetime.now(IST)
     current_minute = now.minute
 
     # Update stats for telemetry/monitoring
     if stats is not None:
-        if is_option:
-            stats["option_quotes"] = stats.get("option_quotes", 0) + 1
-            if volume > 0:
-                stats["option_oi_quotes"] = stats.get("option_oi_quotes", 0) + 1
-        else:
-            stats["future_quotes"] = stats.get("future_quotes", 0) + 1
-            if volume > 0:
-                stats["future_oi_quotes"] = stats.get("future_oi_quotes", 0) + 1
+    if is_option:
+        stats["option_quotes"] = stats.get("option_quotes", 0) + 1
+        if volume > 0:
+            stats["option_oi_quotes"] = stats.get("option_oi_quotes", 0) + 1
+    else:
+        stats["future_quotes"] = stats.get("future_quotes", 0) + 1
+        if volume > 0:
+            stats["future_oi_quotes"] = stats.get("future_oi_quotes", 0) + 1
 
     # Determine parameter values based on underlying
     is_banknifty = (name == "BANKNIFTY")
-    is_stock = (name in STOCK_BURST_NAMES)
-    use_new_logic = is_banknifty or is_stock
+    interval_minutes = 5
+    threshold = 5000 if is_banknifty else 2000
+    current_interval = (now.hour * 60 + now.minute) // interval_minutes
+    interval_type = f"{interval_minutes}min"
 
-    if use_new_logic:
-        interval_minutes = 5
-        threshold = 5000 if is_banknifty else 2000
-        current_interval = (now.hour * 60 + now.minute) // interval_minutes
-        interval_type = f"{interval_minutes}min"
+    if key not in volume_burst_store or volume_burst_store[key].get("interval_type") != interval_type:
+        volume_burst_store[key] = {
+            "interval_type": interval_type,
+            "start_interval": current_interval,
+            "start_price": ltp,
+            "start_volume": volume,
+            "last_seen_price": ltp,
+            "last_seen_volume": volume,
+            "candle_high": ltp,
+            "candle_low": ltp,
+            "active_watch": None
+        }
 
-        # Initialize store for this contract key if not exists or type mismatch
-        if key not in volume_burst_store or volume_burst_store[key].get("interval_type") != interval_type:
-            volume_burst_store[key] = {
-                "interval_type": interval_type,
-                "start_interval": current_interval,
-                "start_price": ltp,
-                "start_volume": volume,
-                "last_seen_price": ltp,
-                "last_seen_volume": volume,
-                "candle_high": ltp,
-                "candle_low": ltp,
-                "active_watch": None
-            }
+    state = volume_burst_store[key]
 
-        state = volume_burst_store[key]
-
-        # Update high/low and last seen values for the current candle
-        if ltp > 0:
-            if state.get("candle_high", 0) <= 0:
-                state["candle_high"] = ltp
-            else:
-                state["candle_high"] = max(state["candle_high"], ltp)
-
-            if state.get("candle_low", 0) <= 0:
-                state["candle_low"] = ltp
-            else:
-                state["candle_low"] = min(state["candle_low"], ltp)
-
-            state["last_seen_price"] = ltp
-        if volume > 0:
-            state["last_seen_volume"] = volume
-
-        # Check if the interval has rolled over
-        if current_interval != state["start_interval"]:
-            # Completed candle calculations
-            completed_start_price = state["start_price"]
-            completed_close_price = state["last_seen_price"]
-            completed_high = state["candle_high"]
-            completed_low = state["candle_low"]
-            completed_start_volume = state["start_volume"]
-            completed_close_volume = state["last_seen_volume"]
-            completed_interval = state["start_interval"]
-
-            delta_volume = completed_close_volume - completed_start_volume
-            completed_lots = int(delta_volume / lot_size) if delta_volume > 0 else 0
-
-            # --- HISTORICAL DATA FETCH FOR EXACT CANDLE MATCH ---
-            # Optimize: Only fetch if we are actively watching or if live volume is near threshold
-            needs_history = False
-            if state["active_watch"] is not None:
-                needs_history = True
-            elif completed_lots >= (threshold * 0.5):
-                needs_history = True
-
-            if needs_history and kite and token:
-                try:
-                    import time
-                    from datetime import timedelta
-                    time.sleep(0.34) # Throttle to respect 3 req/sec limit
-                    
-                    # Calculate exact start time of the completed candle
-                    interval_start_min = completed_interval * interval_minutes
-                    h = interval_start_min // 60
-                    m = interval_start_min % 60
-                    from_time = now.replace(hour=h, minute=m, second=0, microsecond=0)
-                    to_time = from_time + timedelta(minutes=interval_minutes - 1, seconds=59)
-                    
-                    hist = kite.historical_data(token, from_time, to_time, "5minute")
-                    if hist and len(hist) > 0:
-                        last_candle = hist[-1]
-                        delta_volume = last_candle["volume"]
-                        completed_high = last_candle["high"]
-                        completed_low = last_candle["low"]
-                        completed_close_price = last_candle["close"]
-                        
-                        # Recalculate lots with historical volume
-                        completed_lots = int(delta_volume / lot_size) if delta_volume > 0 else 0
-                except Exception as e:
-                    print(f"[BURST] Failed historical fetch for {symbol}: {e}")
-
-
-            # Telemetry stats update
-            if stats is not None:
-                if is_option:
-                    stats["max_option_tick_lots"] = max(stats.get("max_option_tick_lots", 0), completed_lots)
-                else:
-                    stats["max_future_tick_lots"] = max(stats.get("max_future_tick_lots", 0), completed_lots)
-
-            # --- Check active watch (Candles 2 to 6 completion check) ---
-            if state["active_watch"] is not None:
-                watch = state["active_watch"]
-                intervals_elapsed = completed_interval - watch["watch_start_interval"]
-
-                if intervals_elapsed == 1:
-                    # Candle 2 completion: Must be RED (Pullback) AND have LOW VOLUME (< threshold)
-                    if completed_close_price < completed_start_price and completed_lots < threshold:
-                        # Valid pullback
-                        watch["candle_2_checked"] = True
-                    else:
-                        # Invalid pullback (not red, or high volume), clear watch
-                        state["active_watch"] = None
-                elif 2 <= intervals_elapsed <= 5 and watch.get("candle_2_checked"):
-                    # Candle 3, 4, 5, 6 completion: Must close ABOVE Candle 1 High
-                    if completed_close_price > watch["candle_1_high"]:
-                        p_icon = "▲"
-                        if is_option:
-                            is_call = option_type == "CE"
-                            action = "CALL BUY 🔵" if is_call else "PUT BUY 🔴"
-                        else:
-                            action = "FUTURE BUY 📈"
-
-                        strength = get_strength_label(watch["burst_lots"], name)
-                        expiry_line = f"EXPIRY: {expiry_text}\n" if expiry_text else ""
-                        future_price_line = f"FUTURE PRICE: {u_ltp:.2f}\n" if is_option else f"FUTURE PRICE: {completed_close_price:.2f}\n"
-
-                        alert_text = (
-                            f"{strength}\n🚨 {action}\nSymbol: {symbol}\n"
-                            f"{expiry_line}"
-                            f"━━━━━━━━━━━━━━━\n"
-                            f"LOTS: {watch['burst_lots']}\nPRICE: {completed_close_price:.2f} ({p_icon})\n{future_price_line}"
-                            f"━━━━━━━━━━━━━━━\n"
-                            f"START VOLUME: {watch['candle_1_start_volume']:,}\nVOLUME DELTA: +{watch['candle_1_volume_delta']:,}\nEND VOLUME  : {watch['candle_1_end_volume']:,}\n"
-                            f"TIME: {watch['time_str']}"
-                        )
-
-                        alert_key = f"VOL_BURST:{name}:{symbol}:{watch['candle_1_start_volume']}:{watch['candle_1_high']}"
-                        if not _burst_alert_recent(alert_key):
-                            alerts_list.append(alert_text)
-
-                        state["active_watch"] = None # Clear watch
-                elif intervals_elapsed > 5:
-                    # Candle 6 closed without breakout, invalidate setup
-                    state["active_watch"] = None
-
-            # --- Check if Candle 1 itself is a new burst setup (Lots >= threshold) ---
-            # Time filter: only after 9:30 AM (interval 114)
-            if completed_lots >= threshold and completed_interval >= 114:
-                burst_start_time = now - timedelta(minutes=interval_minutes)
-                start_hm = burst_start_time.strftime("%H:%M")
-                end_hm = now.strftime("%H:%M")
-                time_str = f"{now.strftime('%H:%M:%S')} IST ({start_hm}-{end_hm})"
-
-                state["active_watch"] = {
-                    "burst_lots": completed_lots,
-                    "candle_1_high": completed_high,
-                    "candle_1_low": completed_low,
-                    "candle_1_start_volume": completed_start_volume,
-                    "candle_1_volume_delta": delta_volume,
-                    "candle_1_end_volume": completed_close_volume,
-                    "watch_start_interval": completed_interval,
-                    "time_str": time_str,
-                    "candle_2_checked": False
-                }
-
-            # Reset starting state for the new interval
-            state["start_interval"] = current_interval
-            state["start_price"] = ltp
-            state["start_volume"] = volume
+    # Update high/low and last seen values for the current candle
+    if ltp > 0:
+        if state.get("candle_high", 0) <= 0:
             state["candle_high"] = ltp
+        else:
+            state["candle_high"] = max(state["candle_high"], ltp)
+
+        if state.get("candle_low", 0) <= 0:
             state["candle_low"] = ltp
+        else:
+            state["candle_low"] = min(state["candle_low"], ltp)
 
-    else:
-        # Existing 1-minute logic for MCX / other indices
-        if key not in volume_burst_store or volume_burst_store[key].get("interval_type") == "5min":
-            volume_burst_store[key] = {
-                "interval_type": "1min",
-                "start_minute": current_minute,
-                "start_price": ltp,
-                "start_volume": volume,
-                "last_seen_price": ltp,
-                "last_seen_volume": volume,
-                "active_watch": None
-            }
-
-        state = volume_burst_store[key]
-
-        # Check if a minute has rolled over
-        if current_minute != state["start_minute"]:
-            # The previous minute has completed!
-            minute_1_close_price = state["last_seen_price"]
-            minute_1_close_volume = state["last_seen_volume"]
-            minute_1_start_price = state["start_price"]
-            minute_1_start_volume = state["start_volume"]
-
-            # Calculate Minute 1 details
-            delta_volume_1 = minute_1_close_volume - minute_1_start_volume
-            lots_1 = int(delta_volume_1 / lot_size) if delta_volume_1 > 0 else 0
-            threshold = 1000 if name == "BANKNIFTY" else 150
-
-            # Update monitoring stats
-            if stats is not None:
-                if is_option:
-                    stats["max_option_tick_lots"] = max(stats.get("max_option_tick_lots", 0), lots_1)
-                else:
-                    stats["max_future_tick_lots"] = max(stats.get("max_future_tick_lots", 0), lots_1)
-
-            # Handle active watch first if we had a burst in the previous minute (Minute 2 completion check)
-            if state["active_watch"] is not None:
-                watch = state["active_watch"]
-                # Minute 2 has completed!
-                minute_2_close_price = minute_1_close_price
-                minute_2_open_price = watch["watch_open_price"] if watch["watch_open_price"] is not None else watch["burst_end_price"]
-
-                p_chg_2 = minute_2_close_price - minute_2_open_price
-                p_icon = "▲" if p_chg_2 >= 0 else "▼"
-
-                if is_option:
-                    is_call = option_type == "CE"
-                    if p_chg_2 >= 0:
-                        action = "CALL BUY 🔵" if is_call else "PUT WRITER ✍️"
-                    else:
-                        action = "CALL WRITER ✍️" if is_call else "PUT BUY 🔴"
-                else:
-                    action = "FUTURE BUY (LONG) 📈" if p_chg_2 >= 0 else "FUTURE SELL (SHORT) 📉"
-
-                strength = get_strength_label(watch["burst_lots"], name)
-
-                # Format Alert
-                expiry_line = f"EXPIRY: {expiry_text}\n" if expiry_text else ""
-                future_price_line = f"FUTURE PRICE: {u_ltp:.2f}\n" if is_option else f"FUTURE PRICE: {minute_2_close_price:.2f}\n"
-
-                alert_text = (
-                    f"{strength}\n🚨 {action}\nSymbol: {symbol}\n"
-                    f"{expiry_line}"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"LOTS: {watch['burst_lots']}\nPRICE: {minute_2_close_price:.2f} ({p_icon})\n{future_price_line}"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"START VOLUME: {watch['burst_start_volume']:,}\nVOLUME DELTA: +{watch['burst_volume_delta']:,}\nEND VOLUME  : {watch['burst_end_volume']:,}\n"
-                    f"TIME: {watch['burst_time']}" if 'burst_time' in watch else f"TIME: {watch['time_str']}"
-                )
-
-                alert_key = f"VOL_BURST:{name}:{symbol}:{watch['burst_start_volume']}:{watch['burst_start_price']}"
-                if not _burst_alert_recent(alert_key):
-                    alerts_list.append(alert_text)
-
-                # Clear watch
-                state["active_watch"] = None
-
-            # Check if Minute 1 itself is a new burst
-            if lots_1 >= threshold:
-                burst_time = now - timedelta(minutes=1)
-                time_str = burst_time.strftime("%H:%M:00")
-
-                state["active_watch"] = {
-                    "burst_lots": lots_1,
-                    "burst_start_price": minute_1_start_price,
-                    "burst_end_price": minute_1_close_price,
-                    "burst_start_volume": minute_1_start_volume,
-                    "burst_volume_delta": delta_volume_1,
-                    "burst_end_volume": minute_1_close_volume,
-                    "watch_minute": current_minute,
-                    "watch_open_price": None,
-                    "time_str": time_str
-                }
-
-            # Reset starting state for the new minute
-            state["start_minute"] = current_minute
-            state["start_price"] = ltp
-            state["start_volume"] = volume
-
-        # Update rolling values for the current minute
         state["last_seen_price"] = ltp
+    if volume > 0:
         state["last_seen_volume"] = volume
 
-        # If we are in the middle of Minute 2 (the watch minute), capture its open price on first tick
-        if state["active_watch"] is not None and state["active_watch"]["watch_open_price"] is None:
-            state["active_watch"]["watch_open_price"] = ltp
+    # Check if the interval has rolled over
+    if current_interval != state["start_interval"]:
+        # Completed candle calculations
+        completed_start_price = state["start_price"]
+        completed_close_price = state["last_seen_price"]
+        completed_high = state["candle_high"]
+        completed_low = state["candle_low"]
+        completed_start_volume = state["start_volume"]
+        completed_close_volume = state["last_seen_volume"]
+        completed_interval = state["start_interval"]
+
+        delta_volume = completed_close_volume - completed_start_volume
+        completed_lots = int(delta_volume / lot_size) if delta_volume > 0 else 0
+
+        # --- HISTORICAL DATA FETCH FOR EXACT CANDLE MATCH ---
+        # Optimize: Only fetch if we are actively watching or if live volume is near threshold
+        needs_history = False
+        if state["active_watch"] is not None:
+            needs_history = True
+        elif completed_lots >= (threshold * 0.5):
+            needs_history = True
+
+        if needs_history and kite and token:
+            try:
+                import time
+                from datetime import timedelta
+                time.sleep(0.34) # Throttle to respect 3 req/sec limit
+                
+                # Calculate exact start time of the completed candle
+                interval_start_min = completed_interval * interval_minutes
+                h = interval_start_min // 60
+                m = interval_start_min % 60
+                from_time = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                to_time = from_time + timedelta(minutes=interval_minutes - 1, seconds=59)
+                
+                hist = kite.historical_data(token, from_time, to_time, "5minute")
+                if hist and len(hist) > 0:
+                    last_candle = hist[-1]
+                    delta_volume = last_candle["volume"]
+                    completed_high = last_candle["high"]
+                    completed_low = last_candle["low"]
+                    completed_close_price = last_candle["close"]
+                    
+                    # Recalculate lots with historical volume
+                    completed_lots = int(delta_volume / lot_size) if delta_volume > 0 else 0
+            except Exception as e:
+                print(f"[BURST] Failed historical fetch for {symbol}: {e}")
+
+
+        # Telemetry stats update
+        if stats is not None:
+            if is_option:
+                stats["max_option_tick_lots"] = max(stats.get("max_option_tick_lots", 0), completed_lots)
+            else:
+                stats["max_future_tick_lots"] = max(stats.get("max_future_tick_lots", 0), completed_lots)
+
+        # --- Check active watch (Candles 2 to 6 completion check) ---
+        if state["active_watch"] is not None:
+            watch = state["active_watch"]
+            intervals_elapsed = completed_interval - watch["watch_start_interval"]
+
+            if intervals_elapsed == 1:
+                # Candle 2 completion: Must be RED (Pullback) AND have LOW VOLUME (< threshold)
+                if completed_close_price < completed_start_price and completed_lots < threshold:
+                    # Valid pullback
+                    watch["candle_2_checked"] = True
+                else:
+                    # Invalid pullback (not red, or high volume), clear watch
+                    state["active_watch"] = None
+            elif 2 <= intervals_elapsed <= 5 and watch.get("candle_2_checked"):
+                # Candle 3, 4, 5, 6 completion: Must close ABOVE Candle 1 High
+                if completed_close_price > watch["candle_1_high"]:
+                    p_icon = "▲"
+                    if is_option:
+                        is_call = option_type == "CE"
+                        action = "CALL BUY 🔵" if is_call else "PUT BUY 🔴"
+                    else:
+                        action = "FUTURE BUY 📈"
+
+                    strength = get_strength_label(watch["burst_lots"], name)
+                    expiry_line = f"EXPIRY: {expiry_text}\n" if expiry_text else ""
+                    future_price_line = f"FUTURE PRICE: {u_ltp:.2f}\n" if is_option else f"FUTURE PRICE: {completed_close_price:.2f}\n"
+
+                    alert_text = (
+                        f"{strength}\n🚨 {action}\nSymbol: {symbol}\n"
+                        f"{expiry_line}"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"LOTS: {watch['burst_lots']}\nPRICE: {completed_close_price:.2f} ({p_icon})\n{future_price_line}"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"START VOLUME: {watch['candle_1_start_volume']:,}\nVOLUME DELTA: +{watch['candle_1_volume_delta']:,}\nEND VOLUME  : {watch['candle_1_end_volume']:,}\n"
+                        f"TIME: {watch['time_str']}"
+                    )
+
+                    alert_key = f"VOL_BURST:{name}:{symbol}:{watch['candle_1_start_volume']}:{watch['candle_1_high']}"
+                    if not _burst_alert_recent(alert_key):
+                        alerts_list.append(alert_text)
+
+                    state["active_watch"] = None # Clear watch
+            elif intervals_elapsed > 5:
+                # Candle 6 closed without breakout, invalidate setup
+                state["active_watch"] = None
+
+        # --- Check if Candle 1 itself is a new burst setup (Lots >= threshold) ---
+        # Time filter: only after 9:30 AM (interval 114)
+        if completed_lots >= threshold and completed_interval >= 114:
+            burst_start_time = now - timedelta(minutes=interval_minutes)
+            start_hm = burst_start_time.strftime("%H:%M")
+            end_hm = now.strftime("%H:%M")
+            time_str = f"{now.strftime('%H:%M:%S')} IST ({start_hm}-{end_hm})"
+
+            state["active_watch"] = {
+                "burst_lots": completed_lots,
+                "candle_1_high": completed_high,
+                "candle_1_low": completed_low,
+                "candle_1_start_volume": completed_start_volume,
+                "candle_1_volume_delta": delta_volume,
+                "candle_1_end_volume": completed_close_volume,
+                "watch_start_interval": completed_interval,
+                "time_str": time_str,
+                "candle_2_checked": False
+            }
+
+        # Reset starting state for the new interval
+        state["start_interval"] = current_interval
+        state["start_price"] = ltp
+        state["start_volume"] = volume
+        state["candle_high"] = ltp
+        state["candle_low"] = ltp
+
+
 
 
 def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=None):
