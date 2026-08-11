@@ -1310,13 +1310,12 @@ def build_first_5m_future_volume_mismatch_alerts(kite):
         if volume <= FIRST_5M_MISMATCH_MIN_VOLUME or volume <= previous_volume_max: continue
         
         gap_pct = ((open_price - previous_close) / previous_close) * 100
-        if abs(gap_pct) < FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT: continue
         
         price_color = _candle_color(open_price, close)
         volume_color = _volume_candle_color(historical_previous_close, close)
         if not price_color or not volume_color or price_color == volume_color: continue
         
-        option_type = "PE" if gap_pct > 0 else "CE"
+        option_type = "PE" if price_color == "Bearish" else "CE"
         option_rows = []
         options = _get_exhaustion_options(contract["name"], float(contract.get("ltp", 0) or close))
         for option in options:
@@ -1333,7 +1332,6 @@ def build_first_5m_future_volume_mismatch_alerts(kite):
             if opt_prev_close <= 0 or opt_open <= 0 or opt_close <= 0: continue
             if opt_vol <= FIRST_5M_MISMATCH_MIN_VOLUME or opt_vol <= opt_prev_vol_max: continue
             opt_gap_pct = ((opt_open - opt_prev_close) / opt_prev_close) * 100
-            if abs(opt_gap_pct) < FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT: continue
             opt_price_color = _candle_color(opt_open, opt_close)
             opt_volume_color = _volume_candle_color(opt_prev_close, opt_close)
             if not opt_price_color or not opt_volume_color or opt_price_color == opt_volume_color: continue
@@ -1392,7 +1390,7 @@ def build_first_5m_future_volume_mismatch_alerts(kite):
                         f"Price {option['price_color']} vs Volume {option['volume_color']}"
                     )
         body = "\n".join(body_lines)
-        alerts.append(f"FIRST 5M GAP VOLUME MISMATCH\n\n{body}")
+        alerts.append(f"FIRST 5M VOLUME MISMATCH\n\n{body}")
     return alerts
 
 
