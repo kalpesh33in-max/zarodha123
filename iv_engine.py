@@ -70,6 +70,9 @@ def calculate_iv(target_price, S, K, T, r=RISK_FREE_RATE, option_type="CE", max_
     return sigma
 
 
+import threading
+import time
+
 # ---- 1-MINUTE ENGINE ----
 
 class DirectionEngine:
@@ -79,6 +82,60 @@ class DirectionEngine:
         # Store active IV and ROC for fast lookups
         self.current_iv = {}
         self.iv_roc = {}
+        
+        # Start a background thread to log scores for BankNifty
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._logging_loop, daemon=True)
+        self._thread.start()
+        
+    def _logging_loop(self):
+        """Silently logs the BankNifty Direction Score every minute for testing."""
+        while not self._stop_event.is_set():
+            time.sleep(60)
+            try:
+                # We need the symbols for BN Futures, CE and PE. 
+                # Since we don't have them hardcoded, we will infer them from the snapshots.
+                bn_fut = next((sym for sym in self.snapshots if sym.startswith("BANKNIFTY") and sym.endswith("FUT")), None)
+                if not bn_fut:
+                    continue
+                    
+                # Find ATM Options (closest strike to Future price)
+                fut_price = self.snapshots[bn_fut].get("close_price", 0)
+                if fut_price <= 0:
+                    continue
+                    
+                ce_syms = [s for s in self.snapshots if s.endswith("CE") and "BANKNIFTY" in s]
+                pe_syms = [s for s in self.snapshots if s.endswith("PE") and "BANKNIFTY" in s]
+                
+                if not ce_syms or not pe_syms:
+                    continue
+                    
+                # Parse strikes from symbols (e.g. BANKNIFTY26AUG45000CE)
+                def get_strike(sym):
+                    import re
+                    match = re.search(r'(\d+)(CE|PE)$', sym)
+                    return int(match.group(1)) if match else 0
+                    
+                closest_ce = min(ce_syms, key=lambda s: abs(get_strike(s) - fut_price))
+                closest_pe = min(pe_syms, key=lambda s: abs(get_strike(s) - fut_price))
+                
+                score = self.calculate_score(
+                    future_symbol=bn_fut,
+                    ce_symbol=closest_ce,
+                    pe_symbol=closest_pe,
+                    future_data=self.snapshots[bn_fut],
+                    ce_data=self.snapshots[closest_ce],
+                    pe_data=self.snapshots[closest_pe]
+                )
+                
+                print(f"[IV ENGINE] BANKNIFTY Direction Score: {score:.1f}/100 | "
+                      f"FUT: {fut_price} | "
+                      f"CE ROC: {self.iv_roc.get(closest_ce, 0):.2f}% | "
+                      f"PE ROC: {self.iv_roc.get(closest_pe, 0):.2f}%")
+                      
+            except Exception as e:
+                print(f"[IV ENGINE] Error in logging loop: {e}")
+
         
     def _get_time_to_expiry_years(self, expiry_date):
         """Calculate T in years from now until 15:30 IST on expiry date."""
@@ -104,48 +161,36 @@ class DirectionEngine:
         now = datetime.now()
         current_minute = now.strftime("%Y-%m-%d %H:%M")
         
-        # Determine Option properties
         is_option = instrument_data.get("instrument_type") in ["CE", "PE"]
-        if not is_option:
-            return  # We only calculate IV for options
-            
-        option_type = instrument_data.get("instrument_type")
-        strike = instrument_data.get("strike")
-        expiry = instrument_data.get("expiry")
         
-        # We need the underlying Future price to calculate IV properly
-        # For V1, we require the caller to pass the underlying LTP in the instrument_data
-        underlying_ltp = instrument_data.get("u_ltp")
-        if not underlying_ltp or underlying_ltp <= 0:
-            return
-
-        T = self._get_time_to_expiry_years(expiry)
-        
-        # Calculate Live IV
-        iv = calculate_iv(ltp, underlying_ltp, strike, T, option_type=option_type)
-        self.current_iv[symbol] = iv
-
-        # Snapshot Logic for IV ROC (1-minute)
+        # Snapshot Logic (1-minute) for both futures and options
         state = self.snapshots[symbol]
         
+        iv = 0
+        if is_option:
+            option_type = instrument_data.get("instrument_type")
+            strike = instrument_data.get("strike")
+            expiry = instrument_data.get("expiry")
+            
+            underlying_ltp = instrument_data.get("u_ltp")
+            if underlying_ltp and underlying_ltp > 0:
+                T = self._get_time_to_expiry_years(expiry)
+                iv = calculate_iv(ltp, underlying_ltp, strike, T, option_type=option_type)
+                self.current_iv[symbol] = iv
+
         if state.get("minute") != current_minute:
-            # A new minute has started! The old minute is now completed.
-            if "minute" in state:
-                # Calculate ROC using the previous minute's close IV vs the start IV
+            if "minute" in state and is_option:
                 prev_iv = state.get("open_iv", iv)
                 close_iv = state.get("close_iv", iv)
-                
                 if prev_iv > 0:
                     roc = ((close_iv - prev_iv) / prev_iv) * 100
                     self.iv_roc[symbol] = roc
             
-            # Reset state for the new minute
             state["minute"] = current_minute
             state["open_iv"] = iv
             state["open_price"] = ltp
             state["open_volume"] = volume
             
-        # Continuously update the close values for the current minute
         state["close_iv"] = iv
         state["close_price"] = ltp
         state["close_volume"] = volume

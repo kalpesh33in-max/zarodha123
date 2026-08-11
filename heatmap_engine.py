@@ -3,6 +3,7 @@ import time
 import pandas as pd
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from iv_engine import direction_engine
 from kite_rate_limiter import kite_historical_data, kite_quote
 from websocket_flow import get_symbol_quotes, get_token_quotes
 
@@ -3016,6 +3017,17 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=
     volume = oi
     key = f"FUT_{symbol}"
 
+    if direction_engine:
+        try:
+            direction_engine.process_tick(
+                symbol=symbol,
+                ltp=ltp,
+                volume=volume,
+                instrument_data={"instrument_type": "FUT"}
+            )
+        except Exception as e:
+            print(f"Error in IV Engine (Future): {e}")
+
     process_volume_burst_logic(
         key=key,
         name=name,
@@ -3085,6 +3097,22 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
             if pd.notna(row.get("expiry"))
             else "NA"
         )
+        
+        if direction_engine and name == "BANKNIFTY":
+            try:
+                direction_engine.process_tick(
+                    symbol=row["tradingsymbol"],
+                    ltp=ltp,
+                    volume=volume,
+                    instrument_data={
+                        "instrument_type": option_type,
+                        "strike": float(row["strike"]),
+                        "expiry": row["expiry"],
+                        "u_ltp": u_ltp
+                    }
+                )
+            except Exception as e:
+                print(f"Error in IV Engine (Option): {e}")
         
         process_volume_burst_logic(
             key=t_int,
