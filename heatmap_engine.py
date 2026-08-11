@@ -2816,21 +2816,21 @@ def build_weekly_born_breakout_alerts(kite):
 
 def process_volume_burst_logic(key, name, symbol, ltp, volume, lot_size, is_option, option_type, expiry_text, u_ltp, alerts_list, stats=None, kite=None, token=None):
     if not lot_size:
-    return
+        return
 
     now = datetime.now(IST)
     current_minute = now.minute
 
     # Update stats for telemetry/monitoring
     if stats is not None:
-    if is_option:
-        stats["option_quotes"] = stats.get("option_quotes", 0) + 1
-        if volume > 0:
-            stats["option_oi_quotes"] = stats.get("option_oi_quotes", 0) + 1
-    else:
-        stats["future_quotes"] = stats.get("future_quotes", 0) + 1
-        if volume > 0:
-            stats["future_oi_quotes"] = stats.get("future_oi_quotes", 0) + 1
+        if is_option:
+            stats["option_quotes"] = stats.get("option_quotes", 0) + 1
+            if volume > 0:
+                stats["option_oi_quotes"] = stats.get("option_oi_quotes", 0) + 1
+        else:
+            stats["future_quotes"] = stats.get("future_quotes", 0) + 1
+            if volume > 0:
+                stats["future_oi_quotes"] = stats.get("future_oi_quotes", 0) + 1
 
     # Determine parameter values based on underlying
     is_banknifty = (name == "BANKNIFTY")
