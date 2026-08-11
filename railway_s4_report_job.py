@@ -9,7 +9,7 @@ import pandas as pd
 import requests
 from kiteconnect import KiteConnect
 
-from env_config import API_KEY, TELE_TOKEN, TELE_CHAT_ID
+from env_config import API_KEY, TELE_TOKEN_REPORTS, TELE_CHAT_ID_REPORTS
 from heatmap_engine import get_historical_data_cached, load_stock_futures_data
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -191,8 +191,8 @@ def build_report():
 
 
 def upload_to_telegram(df, now_ist):
-    if not TELE_TOKEN or not TELE_CHAT_ID:
-        raise RuntimeError("telegram token/chat_id missing")
+    if not TELE_TOKEN_REPORTS or not TELE_CHAT_ID_REPORTS:
+        raise RuntimeError("telegram reports token/chat_id missing")
 
     filename = f"s4_report_{now_ist.strftime('%Y%m%d')}.xlsx"
     buffer = io.BytesIO()
@@ -210,9 +210,9 @@ def upload_to_telegram(df, now_ist):
             ws.column_dimensions[column].width = min(max_len + 2, 28)
     buffer.seek(0)
 
-    url = f"https://api.telegram.org/bot{TELE_TOKEN}/sendDocument"
+    url = f"https://api.telegram.org/bot{TELE_TOKEN_REPORTS}/sendDocument"
     files = {"document": (filename, buffer, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
-    data = {"chat_id": TELE_CHAT_ID, "caption": f"S4 report for {now_ist.strftime('%Y-%m-%d')} IST"}
+    data = {"chat_id": TELE_CHAT_ID_REPORTS, "caption": f"S4 report for {now_ist.strftime('%Y-%m-%d')} IST"}
     response = requests.post(url, data=data, files=files, timeout=60)
     response.raise_for_status()
     return response.json()
