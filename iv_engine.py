@@ -1,6 +1,8 @@
 import math
 from datetime import datetime, timedelta
 import collections
+from telegram_utils import send_telegram_message
+from env_config import TELE_TOKEN_REPORTS, TELE_CHAT_ID_REPORTS
 
 # Risk-free rate (approximate for India)
 RISK_FREE_RATE = 0.07
@@ -134,10 +136,18 @@ class DirectionEngine:
                 elif score < 30:
                     signal_label = "🔴 BEARISH TRIAL (<30)"
                 
-                print(f"[IV ENGINE] BANKNIFTY Score: {score:.1f}/100 {signal_label} | "
-                      f"FUT: {fut_price} | "
-                      f"CE ROC: {self.iv_roc.get(closest_ce, 0):.2f}% | "
-                      f"PE ROC: {self.iv_roc.get(closest_pe, 0):.2f}%")
+                msg = (f"[IV ENGINE] BANKNIFTY Score: {score:.1f}/100 {signal_label} | "
+                       f"FUT: {fut_price} | "
+                       f"CE ROC: {self.iv_roc.get(closest_ce, 0):.2f}% | "
+                       f"PE ROC: {self.iv_roc.get(closest_pe, 0):.2f}%")
+                print(msg)
+                
+                # Send to Report Telegram if Bullish or Bearish
+                if score > 70 or score < 30:
+                    try:
+                        send_telegram_message(msg, chat_id=TELE_CHAT_ID_REPORTS, token=TELE_TOKEN_REPORTS)
+                    except Exception as te:
+                        print(f"Failed to send IV ROC to telegram: {te}")
                       
             except Exception as e:
                 print(f"[IV ENGINE] Error in logging loop: {e}")
