@@ -216,7 +216,6 @@ def _gap_loop(kite, dispatcher, stop_event):
 
 def _historical_loop(kite, dispatcher, stop_event):
     state = {}
-    last_doji_scan_hour = None
     while not stop_event.is_set():
         now = datetime.now(IST)
         if _is_market_open(now):

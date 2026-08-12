@@ -156,14 +156,23 @@ class DirectionEngine:
     def _get_time_to_expiry_years(self, expiry_date):
         """Calculate T in years from now until 15:30 IST on expiry date."""
         now = datetime.now()
-        # Parse expiry date (assuming format "DD-MM-YYYY")
+        
+        # Ensure expiry is a datetime object
         if isinstance(expiry_date, str):
             try:
-                expiry = datetime.strptime(expiry_date, "%d-%m-%Y").replace(hour=15, minute=30, second=0)
+                expiry = datetime.strptime(expiry_date, "%d-%m-%Y")
             except ValueError:
                 return 0.01 # Fallback
-        else:
+        elif hasattr(expiry_date, "date"):
+            # It's already a datetime or timestamp
             expiry = expiry_date
+        else:
+            # It's likely a datetime.date object
+            expiry = datetime.combine(expiry_date, datetime.min.time())
+            
+        # Standardize the expiry time to end of trading day (15:30)
+        if isinstance(expiry, datetime):
+            expiry = expiry.replace(hour=15, minute=30, second=0, microsecond=0)
             
         diff = (expiry - now).total_seconds()
         years = max(diff / (365 * 24 * 3600), 0.00001)
@@ -226,21 +235,21 @@ class DirectionEngine:
         score = 50  # Neutral baseline
         
         # 1. Futures Momentum (30 pts)
-        fut_open = future_data.get("open", future_data["ltp"])
-        fut_ltp = future_data["ltp"]
+        fut_ltp = future_data.get("close_price", 0)
+        fut_open = future_data.get("open_price", fut_ltp)
         if fut_ltp > fut_open:
             score += 15
         elif fut_ltp < fut_open:
             score -= 15
             
         # 2. Futures Volume (20 pts) -> Need average volume for "2.4x normal", simplistic for V1
-        fut_vol = future_data.get("volume", 0)
+        fut_vol = future_data.get("close_volume", 0)
         
         # 3. CE/PE Price Pressure (20 pts)
-        ce_ltp = ce_data.get("ltp", 0)
-        ce_open = ce_data.get("open", ce_ltp)
-        pe_ltp = pe_data.get("ltp", 0)
-        pe_open = pe_data.get("open", pe_ltp)
+        ce_ltp = ce_data.get("close_price", 0)
+        ce_open = ce_data.get("open_price", ce_ltp)
+        pe_ltp = pe_data.get("close_price", 0)
+        pe_open = pe_data.get("open_price", pe_ltp)
         
         if ce_ltp > ce_open and pe_ltp < pe_open:
             score += 10
@@ -248,8 +257,8 @@ class DirectionEngine:
             score -= 10
             
         # 4. CE/PE Volume (15 pts)
-        ce_vol = ce_data.get("volume", 0)
-        pe_vol = pe_data.get("volume", 0)
+        ce_vol = ce_data.get("close_volume", 0)
+        pe_vol = pe_data.get("close_volume", 0)
         if ce_vol > pe_vol * 1.5:
             score += 7.5
         elif pe_vol > ce_vol * 1.5:
