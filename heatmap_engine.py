@@ -222,11 +222,8 @@ def get_burst_session(now_ist=None):
     # NSE session ends at 15:30:00
     if NSE_BURST_START_TIME <= t < NSE_BURST_END_TIME:
         return "nse"
-    # MCX session starts at 15:30:00
-    if (
-        ENABLE_MCX_BURST_ALERTS
-        and MCX_BURST_START_TIME <= t <= MCX_BURST_END_TIME
-    ):
+    # MCX evening session (15:30 to 23:30 IST)
+    if MCX_BURST_START_TIME <= t <= MCX_BURST_END_TIME:
         return "mcx"
     return None
 
