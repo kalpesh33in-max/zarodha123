@@ -105,24 +105,26 @@ class DirectionEngine:
                     # Find future symbol matching name
                     fut_symbol = next((sym for sym in self.snapshots if sym.startswith(name) or (f":{name}" in sym and ("FUT" in sym or sym.endswith("-I")))), None)
                     if not fut_symbol:
-                        # Fallback: search any snapshot key starting with name or contains name and FUT
                         fut_symbol = next((sym for sym in self.snapshots if name in sym and ("FUT" in sym or sym.endswith("-I"))), None)
                     if not fut_symbol:
+                        print(f"[IV ENGINE DIAGNOSTIC] {name}: No future symbol found in snapshots (snapshots count={len(self.snapshots)})")
                         continue
                         
                     fut_price = self.snapshots[fut_symbol].get("close_price", 0)
                     if fut_price <= 0:
+                        print(f"[IV ENGINE DIAGNOSTIC] {name}: Future price is 0 for {fut_symbol}")
                         continue
                         
-                    ce_syms = [s for s in self.snapshots if s.endswith("CE") and name in s]
-                    pe_syms = [s for s in self.snapshots if s.endswith("PE") and name in s]
+                    ce_syms = [s for s in self.snapshots if "CE" in s and name in s]
+                    pe_syms = [s for s in self.snapshots if "PE" in s and name in s]
                     
                     if not ce_syms or not pe_syms:
+                        print(f"[IV ENGINE DIAGNOSTIC] {name}: CE/PE symbols missing (ce={len(ce_syms)}, pe={len(pe_syms)})")
                         continue
                         
                     def get_strike(sym):
                         import re
-                        match = re.search(r'(\d+)(CE|PE)$', sym)
+                        match = re.search(r'(\d+)\s*(CE|PE)', sym)
                         return int(match.group(1)) if match else 0
                         
                     closest_ce = min(ce_syms, key=lambda s: abs(get_strike(s) - fut_price))
@@ -144,17 +146,17 @@ class DirectionEngine:
                         signal_label = "🔴 BEARISH TRIAL (<50)"
                     
                     msg = (f"[IV ENGINE] {name} Score: {score:.1f}/100 {signal_label} | "
-                           f"FUT: {fut_price} | "
+                           f"FUT: {fut_price:.2f} | "
+                           f"CE: {closest_ce} | PE: {closest_pe} | "
                            f"CE ROC: {self.iv_roc.get(closest_ce, 0):.2f}% | "
                            f"PE ROC: {self.iv_roc.get(closest_pe, 0):.2f}%")
                     print(msg)
                     
-                    # Send to Reports Telegram channel if Bullish (>50) or Bearish (<50)
-                    if score != 50:
-                        try:
-                            send_telegram_message(msg, chat_id=TELE_CHAT_ID_REPORTS, token=TELE_TOKEN_REPORTS)
-                        except Exception as te:
-                            print(f"Failed to send IV ROC alert to telegram: {te}")
+                    # Always dispatch Telegram alert when score calculation runs
+                    try:
+                        send_telegram_message(msg, chat_id=TELE_CHAT_ID_REPORTS, token=TELE_TOKEN_REPORTS)
+                    except Exception as te:
+                        print(f"Failed to send IV ROC alert to telegram: {te}")
                           
             except Exception as e:
                 print(f"[IV ENGINE] Error in logging loop: {e}")
