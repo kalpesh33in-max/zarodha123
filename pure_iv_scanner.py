@@ -13,9 +13,28 @@ from iv_engine import calculate_iv, _get_time_to_expiry_years
 
 # TARGETS
 TARGET_SYMBOLS = [
-    "BANKNIFTY", "CRUDEOIL", "CRUDEOILM", 
-    "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", 
-    "ITC", "LT", "SBIN", "BHARTIARTL", "KOTAKBANK"
+    "BANKNIFTY", "CRUDEOIL", "CRUDEOILM",
+    "360ONE", "ADANIENSOL", "ADANIENT", "ADANIGREEN", "ADANIPORTS",
+    "APLAPOLLO", "ASIANPAINT", "ASTRAL", "AUROPHARMA", "AXISBANK",
+    "ABB", "BAJAJ-AUTO", "BAJAJFINSV", "BAJFINANCE", "BDL",
+    "BHARATFORG", "BHARTIARTL", "BLUESTARCO", "BSE", "BRITANNIA", "CDSL",
+    "CGPOWER", "CHOLAFIN", "CIPLA", "COCHINSHIP", "COFORGE",
+    "COLPAL", "CUMMINSIND", "DALBHARAT", "DMART", "DIVISLAB",
+    "DRREDDY", "EICHERMOT", "GLENMARK", "GODFRYPHLP", "GODREJCP",
+    "GODREJPROP", "GRASIM", "GVT&D", "HAL", "HAVELLS",
+    "HCLTECH", "HDFCAMC", "HDFCBANK", "HEROMOTOCO", "HINDALCO",
+    "HINDUNILVR", "HYUNDAI", "ICICIBANK", "ICICIGI", "INDUSINDBK",
+    "JINDALSTEL", "JSWSTEEL", "KAYNES", "KPITTECH", "LAURUSLABS",
+    "LODHA", "LT", "LTM", "LUPIN", "M&M",
+    "MANKIND", "MARUTI", "MAXHEALTH", "MAZDOCK", "MCX",
+    "MFSL", "MOTILALOFS", "MPHASIS", "MUTHOOTFIN", "NAM-INDIA",
+    "NAUKRI", "NESTLEIND", "OBEROIRLTY", "OFSS", "PAYTM",
+    "PERSISTENT", "PHOENIXLTD", "PIIND", "PNBHOUSING", "POLICYBZR",
+    "PRESTIGE", "RADICO", "RELIANCE", "SBICARD", "SBILIFE",
+    "SBIN", "SHRIRAMFIN", "SHREECEM", "SIEMENS", "SRF",
+    "SUNPHARMA", "SUPREMEIND", "TATACONSUM", "TATAELXSI", "TCS",
+    "TECHM", "TIINDIA", "TITAN", "TORNTPHARM", "TRENT",
+    "TVSMOTOR", "UNITDSPR", "ULTRACEMCO", "UNOMINDA", "VOLTAS"
 ]
 
 # State Management
@@ -149,7 +168,9 @@ def start_pure_iv_scanner():
                 else:
                     strike_step = 50
                     
-                ce_strikes, pe_strikes = get_atm_and_itm_strikes(ltp, strike_step, num_itm=10)
+                # Use 10 ITM for BANKNIFTY and CRUDEOIL, 5 ITM for stocks
+                num_itm = 10 if name in ["BANKNIFTY", "CRUDEOIL", "CRUDEOILM"] else 5
+                ce_strikes, pe_strikes = get_atm_and_itm_strikes(ltp, strike_step, num_itm=num_itm)
                 
                 # Find exactly these options in the dataframe for the closest expiry
                 closest_expiry = opts["expiry"].min()
