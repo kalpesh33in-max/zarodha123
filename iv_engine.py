@@ -95,11 +95,13 @@ class DirectionEngine:
         while not self._stop_event.is_set():
             time.sleep(60)
             try:
-                # Determine target underlyings based on time (BANKNIFTY during day, CRUDEOIL/CRUDEOILM after 15:30)
-                now = datetime.now()
-                target_names = ["BANKNIFTY"]
-                if now.hour >= 15 and now.minute >= 30 or now.hour > 15:
-                    target_names = ["CRUDEOIL", "CRUDEOILM", "BANKNIFTY"]
+                # Determine target underlyings based on time (BANKNIFTY during day, CRUDEOIL/CRUDEOILM after 15:30 IST)
+                from zoneinfo import ZoneInfo
+                now = datetime.now(ZoneInfo("Asia/Kolkata"))
+                if 9 <= now.hour < 15 or (now.hour == 15 and now.minute < 30):
+                    target_names = ["BANKNIFTY"]
+                else:
+                    target_names = ["CRUDEOIL", "CRUDEOILM"]
 
                 for name in target_names:
                     # Find future symbol matching name in snapshots (handles MCX:CRUDEOIL26AUGFUT, CRUDEOIL26AUGFUT, BANKNIFTY26AUGFUT, etc.)
