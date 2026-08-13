@@ -2876,7 +2876,7 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
             else "NA"
         )
         
-        if direction_engine and (name in {"BANKNIFTY", "CRUDEOIL", "CRUDEOILM", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"}):
+        if direction_engine:
             try:
                 direction_engine.process_tick(
                     symbol=row["tradingsymbol"],

@@ -99,7 +99,29 @@ class DirectionEngine:
                 from zoneinfo import ZoneInfo
                 now = datetime.now(ZoneInfo("Asia/Kolkata"))
                 if 9 <= now.hour < 15 or (now.hour == 15 and now.minute < 30):
-                    target_names = ["BANKNIFTY", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"]
+                    target_names = [
+                        "BANKNIFTY", "360ONE", "ADANIENSOL", "ADANIENT", "ADANIGREEN", "ADANIPORTS",
+                        "APLAPOLLO", "ASIANPAINT", "ASTRAL", "AUROPHARMA", "AXISBANK",
+                        "ABB", "BAJAJ-AUTO", "BAJAJFINSV", "BAJFINANCE", "BDL",
+                        "BHARATFORG", "BHARTIARTL", "BLUESTARCO", "BSE", "BRITANNIA", "CDSL",
+                        "CGPOWER", "CHOLAFIN", "CIPLA", "COCHINSHIP", "COFORGE",
+                        "COLPAL", "CUMMINSIND", "DALBHARAT", "DMART", "DIVISLAB",
+                        "DRREDDY", "EICHERMOT", "GLENMARK", "GODFRYPHLP", "GODREJCP",
+                        "GODREJPROP", "GRASIM", "GVT&D", "HAL", "HAVELLS",
+                        "HCLTECH", "HDFCAMC", "HDFCBANK", "HEROMOTOCO", "HINDALCO",
+                        "HINDUNILVR", "HYUNDAI", "ICICIBANK", "ICICIGI", "INDUSINDBK",
+                        "JINDALSTEL", "JSWSTEEL", "KAYNES", "KPITTECH", "LAURUSLABS",
+                        "LODHA", "LT", "LTM", "LUPIN", "M&M",
+                        "MANKIND", "MARUTI", "MAXHEALTH", "MAZDOCK", "MCX",
+                        "MFSL", "MOTILALOFS", "MPHASIS", "MUTHOOTFIN", "NAM-INDIA",
+                        "NAUKRI", "NESTLEIND", "OBEROIRLTY", "OFSS", "PAYTM",
+                        "PERSISTENT", "PHOENIXLTD", "PIIND", "PNBHOUSING", "POLICYBZR",
+                        "PRESTIGE", "RADICO", "RELIANCE", "SBICARD", "SBILIFE",
+                        "SBIN", "SHRIRAMFIN", "SHREECEM", "SIEMENS", "SRF",
+                        "SUNPHARMA", "SUPREMEIND", "TATACONSUM", "TATAELXSI", "TCS",
+                        "TECHM", "TIINDIA", "TITAN", "TORNTPHARM", "TRENT",
+                        "TVSMOTOR", "UNITDSPR", "ULTRACEMCO", "UNOMINDA", "VOLTAS"
+                    ]
                 else:
                     target_names = ["CRUDEOIL", "CRUDEOILM"]
 
@@ -151,10 +173,10 @@ class DirectionEngine:
                     )
                     
                     signal_label = "⚪ NEUTRAL"
-                    if score > 80:
-                        signal_label = "🟢 BULLISH TRIAL (>80)"
-                    elif score < 20:
-                        signal_label = "🔴 BEARISH TRIAL (<20)"
+                    if score > 70:
+                        signal_label = "🟢 BULLISH TRIAL (>70)"
+                    elif score < 30:
+                        signal_label = "🔴 BEARISH TRIAL (<30)"
                     
                     ce_roc_val = self.iv_roc.get(closest_ce, 0)
                     pe_roc_val = self.iv_roc.get(closest_pe, 0)
@@ -168,9 +190,9 @@ class DirectionEngine:
                     
                     # STRICT FILTER: Dispatch Telegram alert only when score crosses thresholds AND ROC conditions are perfectly met
                     send_alert = False
-                    if score > 80 and ce_roc_val > 0 and pe_roc_val < 0:
+                    if score > 70 and ce_roc_val > 0 and pe_roc_val < 0:
                         send_alert = True
-                    elif score < 20 and pe_roc_val > 0 and ce_roc_val < 0:
+                    elif score < 30 and pe_roc_val > 0 and ce_roc_val < 0:
                         send_alert = True
                         
                     if send_alert:
