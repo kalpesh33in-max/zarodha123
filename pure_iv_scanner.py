@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from kiteconnect import KiteTicker
 
 # Import your existing credentials and functions
-from env_config import API_KEY, TELE_TOKEN_REPORTS, TELE_CHAT_ID_REPORTS
+from env_config import API_KEY, TELE_TOKEN_BN, TELE_CHAT_ID_BN
 from telegram_utils import send_telegram_message
 from iv_engine import calculate_iv, _get_time_to_expiry_years
 
@@ -80,7 +80,7 @@ def process_pure_iv_pairs(symbol_base, strike, expiry, spot_price, ce_ltp, pe_lt
                        f"{symbol_base} | {strike} | EXP: {expiry.strftime('%Y-%m-%d')} | "
                        f"LTP CE: {ce_ltp} | LTP PE: {pe_ltp} | IV CE: {roc_ce:.0f} | IV PE: {roc_pe:.0f}")
                 
-                send_telegram_message(msg, chat_id=TELE_CHAT_ID_REPORTS, token=TELE_TOKEN_REPORTS)
+                send_telegram_message(msg, chat_id=TELE_CHAT_ID_BN, token=TELE_TOKEN_BN)
                 print(msg)
 
         state["minute"] = current_minute
