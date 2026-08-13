@@ -95,11 +95,11 @@ class DirectionEngine:
         while not self._stop_event.is_set():
             time.sleep(60)
             try:
-                # Determine target underlyings based on time (BANKNIFTY during day, CRUDEOIL/CRUDEOILM after 15:30 IST)
+                # Determine target underlyings based on time (Day session vs MCX evening session)
                 from zoneinfo import ZoneInfo
                 now = datetime.now(ZoneInfo("Asia/Kolkata"))
                 if 9 <= now.hour < 15 or (now.hour == 15 and now.minute < 30):
-                    target_names = ["BANKNIFTY"]
+                    target_names = ["BANKNIFTY", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"]
                 else:
                     target_names = ["CRUDEOIL", "CRUDEOILM"]
 
@@ -115,8 +115,9 @@ class DirectionEngine:
                     )
                     
                     if not fut_symbol:
-                        # Skip diagnostic log for BankNifty when in MCX evening session
-                        if name != "BANKNIFTY" or (now.hour < 15 or (now.hour == 15 and now.minute < 30)):
+                        # Skip diagnostic log for day-session stocks when in MCX evening session
+                        is_evening = now.hour >= 15 and (now.hour > 15 or now.minute >= 30)
+                        if not (is_evening and name not in {"CRUDEOIL", "CRUDEOILM"}):
                             print(f"[IV ENGINE DIAGNOSTIC] {name}: No future symbol found in snapshots (snapshots count={len(self.snapshots)})")
                         continue
                         
@@ -155,15 +156,24 @@ class DirectionEngine:
                     elif score < 20:
                         signal_label = "🔴 BEARISH TRIAL (<20)"
                     
+                    ce_roc_val = self.iv_roc.get(closest_ce, 0)
+                    pe_roc_val = self.iv_roc.get(closest_pe, 0)
+                    
                     msg = (f"[IV ENGINE] {name} Score: {score:.1f}/100 {signal_label} | "
                            f"FUT: {fut_price:.2f} | "
                            f"CE: {closest_ce} | PE: {closest_pe} | "
-                           f"CE ROC: {self.iv_roc.get(closest_ce, 0):.2f}% | "
-                           f"PE ROC: {self.iv_roc.get(closest_pe, 0):.2f}%")
+                           f"CE ROC: {ce_roc_val:.2f}% | "
+                           f"PE ROC: {pe_roc_val:.2f}%")
                     print(msg)
                     
-                    # Dispatch Telegram alert only when score crosses thresholds
-                    if score > 80 or score < 20:
+                    # STRICT FILTER: Dispatch Telegram alert only when score crosses thresholds AND ROC conditions are perfectly met
+                    send_alert = False
+                    if score > 80 and ce_roc_val > 0 and pe_roc_val < 0:
+                        send_alert = True
+                    elif score < 20 and pe_roc_val > 0 and ce_roc_val < 0:
+                        send_alert = True
+                        
+                    if send_alert:
                         try:
                             send_telegram_message(msg, chat_id=TELE_CHAT_ID_REPORTS, token=TELE_TOKEN_REPORTS)
                         except Exception as te:
