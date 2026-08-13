@@ -2794,10 +2794,11 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=
     volume = oi
     key = f"FUT_{symbol}"
 
+    clean_symbol = symbol.split(":", 1)[1] if ":" in symbol else symbol
     if direction_engine:
         try:
             direction_engine.process_tick(
-                symbol=symbol,
+                symbol=clean_symbol,
                 ltp=ltp,
                 volume=volume,
                 instrument_data={"instrument_type": "FUT"}
