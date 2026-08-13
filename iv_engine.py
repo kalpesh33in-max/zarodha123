@@ -104,13 +104,16 @@ class DirectionEngine:
                     target_names = ["CRUDEOIL", "CRUDEOILM"]
 
                 for name in target_names:
-                    # Find future symbol matching name in snapshots (handles MCX:CRUDEOIL26AUGFUT, CRUDEOIL26AUGFUT, BANKNIFTY26AUGFUT, etc.)
+                    import re
+                    # Match exact name (CRUDEOIL, CRUDEOILM, BANKNIFTY) followed by digits (e.g. 26AUG...)
+                    # This prevents CRUDEOIL from accidentally matching CRUDEOILM
+                    name_pattern = re.compile(rf"^(?:MCX:|NSE:)?{name}\d+")
+                    
                     fut_symbol = next(
-                        (sym for sym in self.snapshots if ("FUT" in sym or sym.endswith("-I")) and (sym.startswith(name) or f":{name}" in sym or f"MCX:{name}" in sym)),
+                        (sym for sym in self.snapshots if name_pattern.match(sym) and ("FUT" in sym or sym.endswith("-I"))),
                         None
                     )
-                    if not fut_symbol:
-                        fut_symbol = next((sym for sym in self.snapshots if name in sym and ("FUT" in sym or sym.endswith("-I"))), None)
+                    
                     if not fut_symbol:
                         # Skip diagnostic log for BankNifty when in MCX evening session
                         if name != "BANKNIFTY" or (now.hour < 15 or (now.hour == 15 and now.minute < 30)):
@@ -122,8 +125,8 @@ class DirectionEngine:
                         print(f"[IV ENGINE DIAGNOSTIC] {name}: Future price is 0 for {fut_symbol}")
                         continue
                         
-                    ce_syms = [s for s in self.snapshots if "CE" in s and name in s]
-                    pe_syms = [s for s in self.snapshots if "PE" in s and name in s]
+                    ce_syms = [s for s in self.snapshots if name_pattern.match(s) and "CE" in s]
+                    pe_syms = [s for s in self.snapshots if name_pattern.match(s) and "PE" in s]
                     
                     if not ce_syms or not pe_syms:
                         print(f"[IV ENGINE DIAGNOSTIC] {name}: CE/PE symbols missing (ce={len(ce_syms)}, pe={len(pe_syms)})")
