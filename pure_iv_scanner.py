@@ -9,7 +9,19 @@ from kiteconnect import KiteTicker
 # Import your existing credentials and functions
 from env_config import API_KEY, TELE_TOKEN_BN, TELE_CHAT_ID_BN
 from telegram_utils import send_telegram_message
-from iv_engine import calculate_iv, _get_time_to_expiry_years
+from iv_engine import calculate_iv
+
+def _get_time_to_expiry_years(expiry_date):
+    """Calculate T in years from now until 15:30 IST on expiry date."""
+    now = datetime.now()
+    if hasattr(expiry_date, "date") and not isinstance(expiry_date, datetime):
+        expiry = datetime.combine(expiry_date, datetime.min.time())
+    else:
+        expiry = expiry_date
+    if isinstance(expiry, datetime):
+        expiry = expiry.replace(hour=15, minute=30, second=0, microsecond=0)
+    diff = (expiry - now).total_seconds()
+    return max(diff / (365 * 24 * 3600), 0.00001)
 
 # TARGETS
 TARGET_SYMBOLS = [
