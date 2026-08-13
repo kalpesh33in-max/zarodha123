@@ -91,64 +91,67 @@ class DirectionEngine:
         self._thread.start()
         
     def _logging_loop(self):
-        """Silently logs the BankNifty Direction Score every minute for testing."""
+        """Silently logs Direction Score every minute for BANKNIFTY (day session) and CRUDEOIL/CRUDEOILM (after 15:30)."""
         while not self._stop_event.is_set():
             time.sleep(60)
             try:
-                # We need the symbols for BN Futures, CE and PE. 
-                # Since we don't have them hardcoded, we will infer them from the snapshots.
-                bn_fut = next((sym for sym in self.snapshots if sym.startswith("BANKNIFTY") and sym.endswith("FUT")), None)
-                if not bn_fut:
-                    continue
+                # Determine target underlyings based on time (BANKNIFTY during day, CRUDEOIL/CRUDEOILM after 15:30)
+                now = datetime.now()
+                target_names = ["BANKNIFTY"]
+                if now.hour >= 15 and now.minute >= 30 or now.hour > 15:
+                    target_names = ["CRUDEOIL", "CRUDEOILM", "BANKNIFTY"]
+
+                for name in target_names:
+                    fut_symbol = next((sym for sym in self.snapshots if sym.startswith(name) and ("FUT" in sym or sym.endswith("-I"))), None)
+                    if not fut_symbol:
+                        continue
+                        
+                    fut_price = self.snapshots[fut_symbol].get("close_price", 0)
+                    if fut_price <= 0:
+                        continue
+                        
+                    ce_syms = [s for s in self.snapshots if s.endswith("CE") and name in s]
+                    pe_syms = [s for s in self.snapshots if s.endswith("PE") and name in s]
                     
-                # Find ATM Options (closest strike to Future price)
-                fut_price = self.snapshots[bn_fut].get("close_price", 0)
-                if fut_price <= 0:
-                    continue
+                    if not ce_syms or not pe_syms:
+                        continue
+                        
+                    def get_strike(sym):
+                        import re
+                        match = re.search(r'(\d+)(CE|PE)$', sym)
+                        return int(match.group(1)) if match else 0
+                        
+                    closest_ce = min(ce_syms, key=lambda s: abs(get_strike(s) - fut_price))
+                    closest_pe = min(pe_syms, key=lambda s: abs(get_strike(s) - fut_price))
                     
-                ce_syms = [s for s in self.snapshots if s.endswith("CE") and "BANKNIFTY" in s]
-                pe_syms = [s for s in self.snapshots if s.endswith("PE") and "BANKNIFTY" in s]
-                
-                if not ce_syms or not pe_syms:
-                    continue
+                    score = self.calculate_score(
+                        future_symbol=fut_symbol,
+                        ce_symbol=closest_ce,
+                        pe_symbol=closest_pe,
+                        future_data=self.snapshots[fut_symbol],
+                        ce_data=self.snapshots[closest_ce],
+                        pe_data=self.snapshots[closest_pe]
+                    )
                     
-                # Parse strikes from symbols (e.g. BANKNIFTY26AUG45000CE)
-                def get_strike(sym):
-                    import re
-                    match = re.search(r'(\d+)(CE|PE)$', sym)
-                    return int(match.group(1)) if match else 0
+                    signal_label = "⚪ NEUTRAL"
+                    if score > 50:
+                        signal_label = "🟢 BULLISH TRIAL (>50)"
+                    elif score < 50:
+                        signal_label = "🔴 BEARISH TRIAL (<50)"
                     
-                closest_ce = min(ce_syms, key=lambda s: abs(get_strike(s) - fut_price))
-                closest_pe = min(pe_syms, key=lambda s: abs(get_strike(s) - fut_price))
-                
-                score = self.calculate_score(
-                    future_symbol=bn_fut,
-                    ce_symbol=closest_ce,
-                    pe_symbol=closest_pe,
-                    future_data=self.snapshots[bn_fut],
-                    ce_data=self.snapshots[closest_ce],
-                    pe_data=self.snapshots[closest_pe]
-                )
-                
-                signal_label = "⚪ NEUTRAL"
-                if score > 70:
-                    signal_label = "🟢 BULLISH TRIAL (>70)"
-                elif score < 30:
-                    signal_label = "🔴 BEARISH TRIAL (<30)"
-                
-                msg = (f"[IV ENGINE] BANKNIFTY Score: {score:.1f}/100 {signal_label} | "
-                       f"FUT: {fut_price} | "
-                       f"CE ROC: {self.iv_roc.get(closest_ce, 0):.2f}% | "
-                       f"PE ROC: {self.iv_roc.get(closest_pe, 0):.2f}%")
-                print(msg)
-                
-                # Send to Report Telegram if Bullish or Bearish
-                if score > 70 or score < 30:
-                    try:
-                        send_telegram_message(msg, chat_id=TELE_CHAT_ID_REPORTS, token=TELE_TOKEN_REPORTS)
-                    except Exception as te:
-                        print(f"Failed to send IV ROC to telegram: {te}")
-                      
+                    msg = (f"[IV ENGINE] {name} Score: {score:.1f}/100 {signal_label} | "
+                           f"FUT: {fut_price} | "
+                           f"CE ROC: {self.iv_roc.get(closest_ce, 0):.2f}% | "
+                           f"PE ROC: {self.iv_roc.get(closest_pe, 0):.2f}%")
+                    print(msg)
+                    
+                    # Send to Reports Telegram channel if Bullish (>50) or Bearish (<50)
+                    if score != 50:
+                        try:
+                            send_telegram_message(msg, chat_id=TELE_CHAT_ID_REPORTS, token=TELE_TOKEN_REPORTS)
+                        except Exception as te:
+                            print(f"Failed to send IV ROC alert to telegram: {te}")
+                          
             except Exception as e:
                 print(f"[IV ENGINE] Error in logging loop: {e}")
 

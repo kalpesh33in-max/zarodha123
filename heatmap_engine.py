@@ -42,10 +42,7 @@ STOCK_BURST_NAMES = {
     "TVSMOTOR", "UNITDSPR", "ULTRACEMCO", "UNOMINDA", "VOLTAS"
 }
 NSE_BURST_TRACK_NAMES = []
-MCX_BURST_TRACK_NAMES = [
-    "CRUDEOIL",
-    "CRUDEOILM",
-]
+MCX_BURST_TRACK_NAMES = []
 MCX_BURST_NAMES = set(MCX_BURST_TRACK_NAMES)
 BURST_TRACK_NAMES = NSE_BURST_TRACK_NAMES
 ENABLE_INDEX_BURST_ALERTS = os.getenv("ENABLE_INDEX_BURST_ALERTS", "false").lower() in (
@@ -2618,7 +2615,7 @@ def process_volume_burst_logic(key, name, symbol, ltp, volume, lot_size, is_opti
     # Determine parameter values based on underlying
     is_banknifty = (name == "BANKNIFTY")
     interval_minutes = 5
-    threshold = 5000 if is_banknifty else 2000
+    threshold = 3000 if is_banknifty else 1000
     current_interval = (now.hour * 60 + now.minute) // interval_minutes
     interval_type = f"{interval_minutes}min"
 
