@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from kiteconnect import KiteTicker
 
 # Import your existing credentials and functions
-from env_config import KITE_API_KEY, KITE_ACCESS_TOKEN, TELE_TOKEN_REPORTS, TELE_CHAT_ID_REPORTS
+from env_config import API_KEY, TELE_TOKEN_REPORTS, TELE_CHAT_ID_REPORTS
 from telegram_utils import send_telegram_message
 from iv_engine import calculate_iv, _get_time_to_expiry_years
 
@@ -120,7 +120,7 @@ def start_pure_iv_scanner():
             }
             
     # 2. Start WebSocket
-    kws = KiteTicker(KITE_API_KEY, token)
+    kws = KiteTicker(API_KEY, token)
     
     # We will update subscriptions dynamically when Future ticks come in
     subscribed_options = set()
