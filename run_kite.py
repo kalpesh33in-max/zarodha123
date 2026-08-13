@@ -84,6 +84,12 @@ def validate_and_start_scanner(source):
             scanner_thread = threading.Thread(target=run_scanner, args=(kite,))
             scanner_thread.daemon = True
             scanner_thread.start()
+            
+            from pure_iv_scanner import start_pure_iv_scanner
+            pure_iv_thread = threading.Thread(target=start_pure_iv_scanner)
+            pure_iv_thread.daemon = True
+            pure_iv_thread.start()
+            
             return True
         except Exception as e:
             print(f"[{source}] Validation failed: {e}")
