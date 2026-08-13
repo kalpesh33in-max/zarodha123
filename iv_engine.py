@@ -102,7 +102,11 @@ class DirectionEngine:
                     target_names = ["CRUDEOIL", "CRUDEOILM", "BANKNIFTY"]
 
                 for name in target_names:
-                    fut_symbol = next((sym for sym in self.snapshots if sym.startswith(name) and ("FUT" in sym or sym.endswith("-I"))), None)
+                    # Find future symbol matching name
+                    fut_symbol = next((sym for sym in self.snapshots if sym.startswith(name) or (f":{name}" in sym and ("FUT" in sym or sym.endswith("-I")))), None)
+                    if not fut_symbol:
+                        # Fallback: search any snapshot key starting with name or contains name and FUT
+                        fut_symbol = next((sym for sym in self.snapshots if name in sym and ("FUT" in sym or sym.endswith("-I"))), None)
                     if not fut_symbol:
                         continue
                         
