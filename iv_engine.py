@@ -102,12 +102,17 @@ class DirectionEngine:
                     target_names = ["CRUDEOIL", "CRUDEOILM", "BANKNIFTY"]
 
                 for name in target_names:
-                    # Find future symbol matching name
-                    fut_symbol = next((sym for sym in self.snapshots if sym.startswith(name) or (f":{name}" in sym and ("FUT" in sym or sym.endswith("-I")))), None)
+                    # Find future symbol matching name in snapshots (handles MCX:CRUDEOIL26AUGFUT, CRUDEOIL26AUGFUT, BANKNIFTY26AUGFUT, etc.)
+                    fut_symbol = next(
+                        (sym for sym in self.snapshots if ("FUT" in sym or sym.endswith("-I")) and (sym.startswith(name) or f":{name}" in sym or f"MCX:{name}" in sym)),
+                        None
+                    )
                     if not fut_symbol:
                         fut_symbol = next((sym for sym in self.snapshots if name in sym and ("FUT" in sym or sym.endswith("-I"))), None)
                     if not fut_symbol:
-                        print(f"[IV ENGINE DIAGNOSTIC] {name}: No future symbol found in snapshots (snapshots count={len(self.snapshots)})")
+                        # Skip diagnostic log for BankNifty when in MCX evening session
+                        if name != "BANKNIFTY" or (now.hour < 15 or (now.hour == 15 and now.minute < 30)):
+                            print(f"[IV ENGINE DIAGNOSTIC] {name}: No future symbol found in snapshots (snapshots count={len(self.snapshots)})")
                         continue
                         
                     fut_price = self.snapshots[fut_symbol].get("close_price", 0)
