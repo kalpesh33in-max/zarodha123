@@ -140,31 +140,7 @@ def _burst_loop(kite, dispatcher, stop_event):
                     else:
                         print(message)
 
-                if (
-                    monitor_status.get("session") == "mcx"
-                    and not bn_alerts
-                    and not stock_alerts
-                    and time.time() - state.get("last_mcx_monitor_alert", 0)
-                    >= MCX_MONITOR_STATUS_COOLDOWN_SECONDS
-                ):
-                    state["last_mcx_monitor_alert"] = time.time()
-                    message = (
-                        "MCX burst monitor active: "
-                        f"{monitor_status.get('names', '')} | "
-                        f"source={monitor_status.get('source', '')} | "
-                        f"futures={monitor_status.get('future_quotes', 0)}/{monitor_status.get('future_symbols', 0)} "
-                        f"oi={monitor_status.get('future_oi_quotes', 0)} | "
-                        f"options={monitor_status.get('option_quotes', 0)}/{monitor_status.get('option_tokens', 0)} "
-                        f"oi={monitor_status.get('option_oi_quotes', 0)} | "
-                        f"max move fut/opt={monitor_status.get('max_future_tick_lots', 0)}/"
-                        f"{monitor_status.get('max_option_tick_lots', 0)} lots | "
-                        f"threshold={monitor_status.get('threshold', 0)} | "
-                        f"reason={monitor_status.get('reason', '')}"
-                    )
-                    if SEND_MCX_MONITOR_STATUS:
-                        dispatcher.send(PRIORITY_STATUS, message)
-                    else:
-                        print(message)
+
 
                 # All burst alerts: Index, Stock Futures, and MCX
                 # Destination: Telegram BN channel (TELE_CHAT_ID_BN)
