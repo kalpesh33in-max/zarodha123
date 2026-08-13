@@ -150,10 +150,10 @@ class DirectionEngine:
                     )
                     
                     signal_label = "⚪ NEUTRAL"
-                    if score > 50:
-                        signal_label = "🟢 BULLISH TRIAL (>50)"
-                    elif score < 50:
-                        signal_label = "🔴 BEARISH TRIAL (<50)"
+                    if score > 80:
+                        signal_label = "🟢 BULLISH TRIAL (>80)"
+                    elif score < 20:
+                        signal_label = "🔴 BEARISH TRIAL (<20)"
                     
                     msg = (f"[IV ENGINE] {name} Score: {score:.1f}/100 {signal_label} | "
                            f"FUT: {fut_price:.2f} | "
@@ -162,11 +162,12 @@ class DirectionEngine:
                            f"PE ROC: {self.iv_roc.get(closest_pe, 0):.2f}%")
                     print(msg)
                     
-                    # Always dispatch Telegram alert when score calculation runs
-                    try:
-                        send_telegram_message(msg, chat_id=TELE_CHAT_ID_REPORTS, token=TELE_TOKEN_REPORTS)
-                    except Exception as te:
-                        print(f"Failed to send IV ROC alert to telegram: {te}")
+                    # Dispatch Telegram alert only when score crosses thresholds
+                    if score > 80 or score < 20:
+                        try:
+                            send_telegram_message(msg, chat_id=TELE_CHAT_ID_REPORTS, token=TELE_TOKEN_REPORTS)
+                        except Exception as te:
+                            print(f"Failed to send IV ROC alert to telegram: {te}")
                           
             except Exception as e:
                 print(f"[IV ENGINE] Error in logging loop: {e}")
