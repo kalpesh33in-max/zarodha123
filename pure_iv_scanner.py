@@ -5,6 +5,7 @@ from datetime import datetime
 import pandas as pd
 from zoneinfo import ZoneInfo
 from kiteconnect import KiteTicker
+import threading
 
 # Import your existing credentials and functions
 from env_config import API_KEY, TELE_TOKEN_BN, TELE_CHAT_ID_BN
@@ -52,6 +53,8 @@ TARGET_SYMBOLS = [
 # State Management
 snapshots = collections.defaultdict(dict)
 iv_state = collections.defaultdict(dict)
+symbol_metadata = {}
+spot_prices = {}
 
 def get_atm_and_itm_strikes(spot_price, strike_step=50, num_itm=10):
     """Calculate ATM and the next 10 ITM strikes"""
@@ -81,16 +84,24 @@ def process_pure_iv_pairs(symbol_base, strike, expiry, spot_price, ce_ltp, pe_lt
             prev_iv_ce = state.get("open_iv_ce", iv_ce)
             prev_iv_pe = state.get("open_iv_pe", iv_pe)
             
-            roc_ce = close_iv_ce - prev_iv_ce if 'close_iv_ce' in locals() else iv_ce - prev_iv_ce
-            roc_pe = close_iv_pe - prev_iv_pe if 'close_iv_pe' in locals() else iv_pe - prev_iv_pe
+            # Fetch the previous minute's close from state
+            close_iv_ce = state.get("close_iv_ce", iv_ce)
+            close_iv_pe = state.get("close_iv_pe", iv_pe)
             
-            # Use absolute IV change based on the user's logic
-            # Fire alert if either CE or PE IV jumps by > 10
+            # Calculate ROC in percentage terms (multiply by 100)
+            # We measure the change from the previous minute's open to the previous minute's close
+            roc_ce = (close_iv_ce - prev_iv_ce) * 100
+            roc_pe = (close_iv_pe - prev_iv_pe) * 100
+            
+            state["roc_ce"] = roc_ce
+            state["roc_pe"] = roc_pe
+            
+            # Individual spike alert
             if roc_ce > 10 or roc_pe > 10:
                 emoji = "🔴" if roc_ce > 10 else "🟢"
                 msg = (f"{emoji} | {now.strftime('%H:%M:%S')} | {now.strftime('%Y-%m-%d')} | "
                        f"{symbol_base} | {strike} | EXP: {expiry.strftime('%Y-%m-%d')} | "
-                       f"LTP CE: {ce_ltp} | LTP PE: {pe_ltp} | IV CE: {roc_ce:.0f} | IV PE: {roc_pe:.0f}")
+                       f"LTP CE: {ce_ltp} | LTP PE: {pe_ltp} | IV CE: {roc_ce:.2f}% | IV PE: {roc_pe:.2f}%")
                 
                 send_telegram_message(msg, chat_id=TELE_CHAT_ID_BN, token=TELE_TOKEN_BN)
                 print(msg)
@@ -138,7 +149,7 @@ def start_pure_iv_scanner():
     # 1. Find the Futures to get the spot price (we use Future price as spot for IV)
     # We will subscribe to futures to keep the spot price updated
     future_tokens = []
-    spot_prices = {}
+    global spot_prices
     for name in TARGET_SYMBOLS:
         futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
         if not futs.empty:
@@ -183,6 +194,13 @@ def start_pure_iv_scanner():
                 # Use 10 ITM for BANKNIFTY and CRUDEOIL, 5 ITM for stocks
                 num_itm = 10 if name in ["BANKNIFTY", "CRUDEOIL", "CRUDEOILM"] else 5
                 ce_strikes, pe_strikes = get_atm_and_itm_strikes(ltp, strike_step, num_itm=num_itm)
+                
+                closest_expiry = opts["expiry"].min()
+                symbol_metadata[name] = {
+                    "ce_strikes": ce_strikes,
+                    "pe_strikes": pe_strikes,
+                    "expiry": pd.to_datetime(closest_expiry)
+                }
                 
                 # Find exactly these options in the dataframe for the closest expiry
                 closest_expiry = opts["expiry"].min()
@@ -244,6 +262,68 @@ def start_pure_iv_scanner():
 
     def on_close(ws, code, reason):
         print(f"WebSocket closed: {code} - {reason}")
+
+    def reporting_loop():
+        last_reported = None
+        while True:
+            time.sleep(1)
+            now = datetime.now(ZoneInfo("Asia/Kolkata"))
+            current_minute = now.strftime("%Y-%m-%d %H:%M")
+            
+            # Fire at the 02-second mark of each new minute
+            if now.second == 2 and current_minute != last_reported:
+                last_reported = current_minute
+                
+                for name, meta in symbol_metadata.items():
+                    # For now, let's only log targets that are actively ticked and have ROC data
+                    spot = spot_prices.get(name, 0)
+                    if not spot: continue
+                    
+                    ce_s = meta["ce_strikes"]
+                    pe_s = meta["pe_strikes"]
+                    expiry = meta["expiry"]
+                    
+                    # We need at least ATM + 4 ITM strikes (total 5)
+                    if len(ce_s) < 5 or len(pe_s) < 5:
+                        continue
+                        
+                    def get_roc(strike, opt_type):
+                        key = f"{name}_{strike}_{expiry.strftime('%Y-%m-%d')}"
+                        return iv_state[key].get(f"roc_{opt_type.lower()}", 0.0)
+                        
+                    # Build the arrays (CE: ITM4 to ATM)
+                    ce_rocs = [get_roc(ce_s[4], "CE"), get_roc(ce_s[3], "CE"), get_roc(ce_s[2], "CE"), get_roc(ce_s[1], "CE"), get_roc(ce_s[0], "CE")]
+                    # PE: ATM to ITM4
+                    pe_rocs = [get_roc(pe_s[0], "PE"), get_roc(pe_s[1], "PE"), get_roc(pe_s[2], "PE"), get_roc(pe_s[3], "PE"), get_roc(pe_s[4], "PE")]
+                    
+                    # Only send if there's some volatility (not all 0)
+                    if all(r == 0 for r in ce_rocs) and all(r == 0 for r in pe_rocs):
+                        continue
+                        
+                    def fmt(v): return f"{v:4.1f}"
+                    
+                    # Exact format requested (Excel style WITH borders)
+                    c0, c1, c2, c3, c4 = ce_rocs
+                    p0, p1, p2, p3, p4 = pe_rocs
+                    
+                    ce_str = "".join(f"{v:6.1f}" for v in ce_rocs)
+                    pe_str = "".join(f"{v:6.1f}" for v in pe_rocs)
+                    
+                    msg =  f"```\n"
+                    msg += "-" * 75 + "\n"
+                    msg += f"{'CE IV ROC %':^30} | {name:^9} | {'PE IV ROC %':^30}\n"
+                    msg += "-" * 31 + "+" + "-" * 11 + "+" + "-" * 31 + "\n"
+                    msg += f"  ITM4  ITM3  ITM2  ITM1   ATM |  FUTURE   |   ATM  ITM1  ITM2  ITM3  ITM4\n"
+                    msg += "-" * 31 + "+" + "-" * 11 + "+" + "-" * 31 + "\n"
+                    msg += f"{ce_str} | {int(spot):^9} | {pe_str}\n"
+                    msg += "-" * 75 + "\n"
+                    msg += f"```"
+                    
+                    print(f"Reporting per-minute IV for {name}")
+                    send_telegram_message(msg, chat_id=TELE_CHAT_ID_BN, token=TELE_TOKEN_BN)
+
+    # Start reporter thread
+    threading.Thread(target=reporting_loop, daemon=True).start()
 
     kws.on_ticks = on_ticks
     kws.on_connect = on_connect
