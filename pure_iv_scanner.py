@@ -289,8 +289,16 @@ def start_pure_iv_scanner():
                     # PE: ATM to ITM4
                     pe_rocs = [get_roc(pe_s[0], "PE"), get_roc(pe_s[1], "PE"), get_roc(pe_s[2], "PE"), get_roc(pe_s[3], "PE"), get_roc(pe_s[4], "PE")]
                     
-                    # Only send if there's some volatility (not all 0)
-                    if all(r == 0 for r in ce_rocs) and all(r == 0 for r in pe_rocs):
+                    # Volatility Filter Logic
+                    threshold = 0.5 if name in ["CRUDEOIL", "CRUDEOILM"] else 3.0
+                    
+                    has_spike = False
+                    for r in ce_rocs + pe_rocs:
+                        if abs(r) >= threshold:
+                            has_spike = True
+                            break
+                            
+                    if not has_spike:
                         continue
                         
                     def fmt(v): return f"{v:4.1f}"
