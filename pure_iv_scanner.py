@@ -295,11 +295,20 @@ def start_pure_iv_scanner():
                     threshold = 0.5 if name in ["CRUDEOIL", "CRUDEOILM"] else 3.0
                     
                     has_spike = False
-                    for r in ce_rocs + pe_rocs:
-                        if abs(r) >= threshold:
+                    
+                    # Check CE ITM & ATM (Indices 0 to 4)
+                    for i in range(5):
+                        if abs(ce_rocs[i]) >= threshold:
                             has_spike = True
                             break
                             
+                    # Check PE ATM & ITM (Indices 4 to 8)
+                    if not has_spike:
+                        for i in range(4, 9):
+                            if abs(pe_rocs[i]) >= threshold:
+                                has_spike = True
+                                break
+                                
                     if not has_spike:
                         continue
                         
