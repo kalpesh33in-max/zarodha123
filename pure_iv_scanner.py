@@ -96,15 +96,8 @@ def process_pure_iv_pairs(symbol_base, strike, expiry, spot_price, ce_ltp, pe_lt
             state["roc_ce"] = roc_ce
             state["roc_pe"] = roc_pe
             
-            # Individual spike alert
-            if roc_ce > 10 or roc_pe > 10:
-                emoji = "🔴" if roc_ce > 10 else "🟢"
-                msg = (f"{emoji} | {now.strftime('%H:%M:%S')} | {now.strftime('%Y-%m-%d')} | "
-                       f"{symbol_base} | {strike} | EXP: {expiry.strftime('%Y-%m-%d')} | "
-                       f"LTP CE: {ce_ltp} | LTP PE: {pe_ltp} | IV CE: {roc_ce:.2f}% | IV PE: {roc_pe:.2f}%")
-                
-                send_telegram_message(msg, chat_id=TELE_CHAT_ID_BN, token=TELE_TOKEN_BN)
-                print(msg)
+            # Individual spike alerts (> 10%) have been removed as per request.
+            # Now relying entirely on the 1-minute summary tables.
 
         state["minute"] = current_minute
         state["open_iv_ce"] = iv_ce
