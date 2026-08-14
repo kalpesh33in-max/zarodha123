@@ -1265,8 +1265,6 @@ def build_first_5m_future_volume_mismatch_alerts(kite):
         day_open = float(ohlc.get("open", 0) or 0)
         ltp = float(quote.get("last_price", 0) or day_open)
         if previous_close <= 0 or day_open <= 0: continue
-        rough_gap_pct = ((day_open - previous_close) / previous_close) * 100
-        if abs(rough_gap_pct) < FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT: continue
         item = dict(contract)
         item["previous_close"] = previous_close
         item["ltp"] = ltp

@@ -173,10 +173,10 @@ class DirectionEngine:
                     )
                     
                     signal_label = "⚪ NEUTRAL"
-                    if score > 70:
-                        signal_label = "🟢 BULLISH TRIAL (>70)"
-                    elif score < 30:
-                        signal_label = "🔴 BEARISH TRIAL (<30)"
+                    if score > 80:
+                        signal_label = "🟢 BULLISH TRIAL (>80)"
+                    elif score < 20:
+                        signal_label = "🔴 BEARISH TRIAL (<20)"
                     
                     ce_roc_val = self.iv_roc.get(closest_ce, 0)
                     pe_roc_val = self.iv_roc.get(closest_pe, 0)
@@ -190,9 +190,9 @@ class DirectionEngine:
                     
                     # STRICT FILTER: Dispatch Telegram alert only when score crosses thresholds AND ROC conditions are perfectly met
                     send_alert = False
-                    if score > 70 and ce_roc_val > 0 and pe_roc_val < 0:
+                    if score > 80 and ce_roc_val > 0 and pe_roc_val < 0:
                         send_alert = True
-                    elif score < 30 and pe_roc_val > 0 and ce_roc_val < 0:
+                    elif score < 20 and pe_roc_val > 0 and ce_roc_val < 0:
                         send_alert = True
                         
                     if send_alert:
