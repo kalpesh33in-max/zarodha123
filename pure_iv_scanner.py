@@ -302,21 +302,25 @@ def start_pure_iv_scanner():
                         
                     def fmt(v): return f"{v:4.1f}"
                     
-                    # Exact format requested (Excel style WITH borders)
-                    c0, c1, c2, c3, c4 = ce_rocs
-                    p0, p1, p2, p3, p4 = pe_rocs
-                    
-                    ce_str = "".join(f"{v:6.1f}" for v in ce_rocs)
-                    pe_str = "".join(f"{v:6.1f}" for v in pe_rocs)
+                    # Strike-based Option Chain format
+                    def f(v): return f"{v:5.1f}"
                     
                     msg =  f"```\n"
-                    msg += "-" * 75 + "\n"
-                    msg += f"{'CE IV ROC %':^30} | {name:^9} | {'PE IV ROC %':^30}\n"
-                    msg += "-" * 31 + "+" + "-" * 11 + "+" + "-" * 31 + "\n"
-                    msg += f"  ITM4  ITM3  ITM2  ITM1   ATM |  FUTURE   |   ATM  ITM1  ITM2  ITM3  ITM4\n"
-                    msg += "-" * 31 + "+" + "-" * 11 + "+" + "-" * 31 + "\n"
-                    msg += f"{ce_str} | {int(spot):^9} | {pe_str}\n"
-                    msg += "-" * 75 + "\n"
+                    msg += f"🏦 {name} ({int(spot)})\n"
+                    msg += f"Strike | CE ROC | PE ROC\n"
+                    msg += f"-------+--------+--------\n"
+                    
+                    # CE ITM4 to ITM1 (Lowest strikes)
+                    for idx, strike_idx in enumerate([4, 3, 2, 1]):
+                        msg += f"{int(ce_s[strike_idx]):>6} | {f(ce_rocs[idx])}% |  ---  \n"
+                        
+                    # ATM Strike
+                    msg += f"{int(ce_s[0]):>6} | {f(ce_rocs[4])}% | {f(pe_rocs[0])}%\n"
+                    
+                    # PE ITM1 to ITM4 (Highest strikes)
+                    for idx, strike_idx in enumerate([1, 2, 3, 4], start=1):
+                        msg += f"{int(pe_s[strike_idx]):>6} |  ---   | {f(pe_rocs[idx])}%\n"
+                        
                     msg += f"```"
                     
                     print(f"Reporting per-minute IV for {name}")
