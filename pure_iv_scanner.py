@@ -321,6 +321,11 @@ def start_pure_iv_scanner():
                     for idx, strike_idx in enumerate([1, 2, 3, 4], start=1):
                         msg += f"{int(pe_s[strike_idx]):>6} |  ---   | {f(pe_rocs[idx])}%\n"
                         
+                    ce_total = sum(ce_rocs)
+                    pe_total = sum(pe_rocs)
+                    
+                    msg += f"-------+--------+--------\n"
+                    msg += f" TOTAL | {f(ce_total)}% | {f(pe_total)}%\n"
                     msg += f"```"
                     
                     print(f"Reporting per-minute IV for {name}")
