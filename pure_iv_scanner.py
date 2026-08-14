@@ -57,13 +57,14 @@ symbol_metadata = {}
 spot_prices = {}
 
 def get_atm_and_itm_strikes(spot_price, strike_step=50, num_itm=10):
-    """Calculate ATM and the next 10 ITM strikes"""
+    """Calculate ATM and the surrounding strikes in both directions"""
     atm_strike = round(spot_price / strike_step) * strike_step
     
-    ce_strikes = [atm_strike - (i * strike_step) for i in range(num_itm + 1)] # ITM Calls have Strike < Spot
-    pe_strikes = [atm_strike + (i * strike_step) for i in range(num_itm + 1)] # ITM Puts have Strike > Spot
+    # CE and PE strikes are exactly the same now! 
+    # We go from -num_itm to +num_itm so ATM is perfectly in the middle.
+    strikes = [atm_strike + (i * strike_step) for i in range(-num_itm, num_itm + 1)]
     
-    return ce_strikes, pe_strikes
+    return strikes, strikes
 
 def process_pure_iv_pairs(symbol_base, strike, expiry, spot_price, ce_ltp, pe_ltp):
     now = datetime.now(ZoneInfo("Asia/Kolkata"))
@@ -276,18 +277,19 @@ def start_pure_iv_scanner():
                     pe_s = meta["pe_strikes"]
                     expiry = meta["expiry"]
                     
-                    # We need at least ATM + 4 ITM strikes (total 5)
-                    if len(ce_s) < 5 or len(pe_s) < 5:
+                    # We need at least 9 strikes to do -4 to +4
+                    if len(ce_s) < 9:
                         continue
                         
                     def get_roc(strike, opt_type):
                         key = f"{name}_{strike}_{expiry.strftime('%Y-%m-%d')}"
                         return iv_state[key].get(f"roc_{opt_type.lower()}", 0.0)
                         
-                    # Build the arrays (CE: ITM4 to ATM)
-                    ce_rocs = [get_roc(ce_s[4], "CE"), get_roc(ce_s[3], "CE"), get_roc(ce_s[2], "CE"), get_roc(ce_s[1], "CE"), get_roc(ce_s[0], "CE")]
-                    # PE: ATM to ITM4
-                    pe_rocs = [get_roc(pe_s[0], "PE"), get_roc(pe_s[1], "PE"), get_roc(pe_s[2], "PE"), get_roc(pe_s[3], "PE"), get_roc(pe_s[4], "PE")]
+                    atm_idx = len(ce_s) // 2
+                    target_strikes = ce_s[atm_idx-4 : atm_idx+5]
+                    
+                    ce_rocs = [get_roc(s, "CE") for s in target_strikes]
+                    pe_rocs = [get_roc(s, "PE") for s in target_strikes]
                     
                     # Volatility Filter Logic
                     threshold = 0.5 if name in ["CRUDEOIL", "CRUDEOILM"] else 3.0
@@ -301,32 +303,28 @@ def start_pure_iv_scanner():
                     if not has_spike:
                         continue
                         
-                    def fmt(v): return f"{v:4.1f}"
-                    
-                    # Strike-based Option Chain format
                     def f(v): return f"{v:5.1f}"
                     
                     msg =  f"```\n"
                     msg += f"🏦 {name} ({int(spot)})\n"
-                    msg += f"Strike | CE ROC | PE ROC\n"
-                    msg += f"-------+--------+--------\n"
+                    msg += f" Strike |  CE % |  PE %\n"
+                    msg += f"--------+-------+-------\n"
                     
-                    # CE ITM4 to ITM1 (Lowest strikes)
-                    for idx, strike_idx in enumerate([4, 3, 2, 1]):
-                        msg += f"{int(ce_s[strike_idx]):>6} | {f(ce_rocs[idx])}% |  ---  \n"
+                    for i in range(4):
+                        msg += f" {int(target_strikes[i]):<6} | {f(ce_rocs[i])} | {f(pe_rocs[i])}\n"
                         
-                    # ATM Strike
-                    msg += f"{int(ce_s[0]):>6} | {f(ce_rocs[4])}% | {f(pe_rocs[0])}%\n"
+                    msg += f"--------+-------+-------\n"
+                    msg += f"🎯{int(target_strikes[4])}🎯| {f(ce_rocs[4])} | {f(pe_rocs[4])}\n"
+                    msg += f"--------+-------+-------\n"
                     
-                    # PE ITM1 to ITM4 (Highest strikes)
-                    for idx, strike_idx in enumerate([1, 2, 3, 4], start=1):
-                        msg += f"{int(pe_s[strike_idx]):>6} |  ---   | {f(pe_rocs[idx])}%\n"
+                    for i in range(5, 9):
+                        msg += f" {int(target_strikes[i]):<6} | {f(ce_rocs[i])} | {f(pe_rocs[i])}\n"
                         
                     ce_total = sum(ce_rocs)
                     pe_total = sum(pe_rocs)
                     
-                    msg += f"-------+--------+--------\n"
-                    msg += f" TOTAL | {f(ce_total)}% | {f(pe_total)}%\n"
+                    msg += f"--------+-------+-------\n"
+                    msg += f"  TOTAL | {f(ce_total)} | {f(pe_total)}\n"
                     msg += f"```"
                     
                     print(f"Reporting per-minute IV for {name}")
