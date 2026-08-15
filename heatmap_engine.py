@@ -2660,29 +2660,17 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=
                 action = classify_action(watch["symbol"], oi_chg, p_chg)
                 p_icon = "▲" if p_chg >= 0 else "▼"
                 expiry_line = (
-                    f"EXPIRY: {watch['expiry_text']}
-"
+                    f"EXPIRY: {watch['expiry_text']}\\n"
                     if watch.get("expiry_text")
                     else ""
                 )
                 alert_text = (
-                    f"{strength}
-🚨 {action}
-Symbol: {watch['symbol']}
-"
+                    f"{strength}\\n🚨 {action}\\nSymbol: {watch['symbol']}\\n"
                     f"{expiry_line}"
-                    f"━━━━━━━━━━━━━━━
-"
-                    f"LOTS: {final_lots}
-PRICE: {ltp:.2f} ({p_icon})
-FUTURE PRICE: {ltp:.2f}
-"
-                    f"━━━━━━━━━━━━━━━
-"
-                    f"EXISTING OI: {watch['start_oi']:,}
-OI CHANGE  : {oi_chg:+,d}
-NEW OI     : {oi:,}
-"
+                    f"━━━━━━━━━━━━━━━\\n"
+                    f"LOTS: {final_lots}\\nPRICE: {ltp:.2f} ({p_icon})\\nFUTURE PRICE: {ltp:.2f}\\n"
+                    f"━━━━━━━━━━━━━━━\\n"
+                    f"EXISTING OI: {watch['start_oi']:,}\\nOI CHANGE  : {oi_chg:+,d}\\nNEW OI     : {oi:,}\\n"
                     f"TIME: {now.strftime('%H:%M:%S')}"
                 )
                 alert_key = f"FUT:{name}:{watch['symbol']}:{watch['start_oi']}:{watch['start_price']}"
@@ -2814,24 +2802,12 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
                     strength = get_strength_label(final_lots, watch["underlying"])
                     p_icon = "▲" if p_chg >= 0 else "▼"
                     alert_text = (
-                        f"{strength}
-🚨 {action}
-Symbol: {watch['symbol']}
-"
-                        f"EXPIRY: {watch.get('expiry_text', 'NA')}
-"
-                        f"━━━━━━━━━━━━━━━
-"
-                        f"LOTS: {final_lots}
-PRICE: {ltp:.2f} ({p_icon})
-FUTURE PRICE: {u_ltp:.2f}
-"
-                        f"━━━━━━━━━━━━━━━
-"
-                        f"EXISTING OI: {watch['start_oi']:,}
-OI CHANGE  : {oi_chg:+,d}
-NEW OI     : {curr_oi:,}
-"
+                        f"{strength}\\n🚨 {action}\\nSymbol: {watch['symbol']}\\n"
+                        f"EXPIRY: {watch.get('expiry_text', 'NA')}\\n"
+                        f"━━━━━━━━━━━━━━━\\n"
+                        f"LOTS: {final_lots}\\nPRICE: {ltp:.2f} ({p_icon})\\nFUTURE PRICE: {u_ltp:.2f}\\n"
+                        f"━━━━━━━━━━━━━━━\\n"
+                        f"EXISTING OI: {watch['start_oi']:,}\\nOI CHANGE  : {oi_chg:+,d}\\nNEW OI     : {curr_oi:,}\\n"
                         f"TIME: {now.strftime('%H:%M:%S')}"
                     )
                     alert_key = f"OPT:{name}:{t_int}:{watch['start_oi']}:{watch['start_price']}"
