@@ -92,13 +92,22 @@ class DirectionEngine:
         
     def _logging_loop(self):
         """Silently logs Direction Score every minute for BANKNIFTY (day session) and CRUDEOIL/CRUDEOILM (after 15:30)."""
+        from env_config import NSE_HOLIDAYS
         while not self._stop_event.is_set():
             time.sleep(60)
             try:
                 # Determine target underlyings based on time (Day session vs MCX evening session)
                 from zoneinfo import ZoneInfo
                 now = datetime.now(ZoneInfo("Asia/Kolkata"))
+                
+                if now.weekday() > 4:
+                    continue
+                    
+                is_nse_holiday = now.date().isoformat() in NSE_HOLIDAYS
+                
                 if 9 <= now.hour < 15 or (now.hour == 15 and now.minute < 30):
+                    if is_nse_holiday:
+                        continue
                     target_names = [
                         "BANKNIFTY", "360ONE", "ADANIENSOL", "ADANIENT", "ADANIGREEN", "ADANIPORTS",
                         "APLAPOLLO", "ASIANPAINT", "ASTRAL", "AUROPHARMA", "AXISBANK",
@@ -173,10 +182,10 @@ class DirectionEngine:
                     )
                     
                     signal_label = "⚪ NEUTRAL"
-                    if score > 80:
-                        signal_label = "🟢 BULLISH TRIAL (>80)"
-                    elif score < 20:
-                        signal_label = "🔴 BEARISH TRIAL (<20)"
+                    if score >= 85:
+                        signal_label = "🟢 BULLISH TRIAL (>=85)"
+                    elif score <= 15:
+                        signal_label = "🔴 BEARISH TRIAL (<=15)"
                     
                     ce_roc_val = self.iv_roc.get(closest_ce, 0)
                     pe_roc_val = self.iv_roc.get(closest_pe, 0)
@@ -190,9 +199,9 @@ class DirectionEngine:
                     
                     # STRICT FILTER: Dispatch Telegram alert only when score crosses thresholds AND ROC conditions are perfectly met
                     send_alert = False
-                    if score > 80 and ce_roc_val > 0 and pe_roc_val < 0:
+                    if score >= 85 and ce_roc_val > 0 and pe_roc_val < 0:
                         send_alert = True
-                    elif score < 20 and pe_roc_val > 0 and ce_roc_val < 0:
+                    elif score <= 15 and pe_roc_val > 0 and ce_roc_val < 0:
                         send_alert = True
                         
                     if send_alert:
@@ -286,13 +295,13 @@ class DirectionEngine:
         """
         score = 50  # Neutral baseline
         
-        # 1. Futures Momentum (30 pts)
+        # 1. Futures Momentum (20 pts)
         fut_ltp = future_data.get("close_price", 0)
         fut_open = future_data.get("open_price", fut_ltp)
         if fut_ltp > fut_open:
-            score += 15
+            score += 10
         elif fut_ltp < fut_open:
-            score -= 15
+            score -= 10
             
         # 2. Futures Volume (20 pts) -> Need average volume for "2.4x normal", simplistic for V1
         fut_vol = future_data.get("close_volume", 0)
@@ -308,24 +317,24 @@ class DirectionEngine:
         elif pe_ltp > pe_open and ce_ltp < ce_open:
             score -= 10
             
-        # 4. CE/PE Volume (15 pts)
+        # 4. CE/PE Volume (10 pts)
         ce_vol = ce_data.get("close_volume", 0)
         pe_vol = pe_data.get("close_volume", 0)
-        if ce_vol > pe_vol * 1.5:
-            score += 7.5
-        elif pe_vol > ce_vol * 1.5:
-            score -= 7.5
+        if ce_vol > pe_vol * 2.0:
+            score += 5
+        elif pe_vol > ce_vol * 2.0:
+            score -= 5
             
-        # 5. IV & IV ROC (15 pts)
+        # 5. IV & IV ROC (30 pts)
         ce_roc = self.iv_roc.get(ce_symbol, 0)
         pe_roc = self.iv_roc.get(pe_symbol, 0)
         
         if ce_roc > 5 and pe_roc <= 0:
             # Bullish IV expansion
-            score += 7.5
+            score += 15
         elif pe_roc > 5 and ce_roc <= 0:
             # Bearish IV expansion
-            score -= 7.5
+            score -= 15
 
         return min(max(score, 0), 100) # Clamp between 0 and 100
 

@@ -95,9 +95,12 @@ class AlertDispatcher:
 
 
 def _is_market_open(now):
+    from env_config import NSE_HOLIDAYS
+    if now.weekday() > 4 or now.date().isoformat() in NSE_HOLIDAYS:
+        return False
     start_time = datetime.strptime("09:00", "%H:%M").time()
     end_time = datetime.strptime("15:30", "%H:%M").time()
-    return now.weekday() <= 4 and start_time <= now.time() <= end_time
+    return start_time <= now.time() <= end_time
 
 
 def _is_any_scanner_session(now):

@@ -8,7 +8,7 @@ from kiteconnect import KiteTicker
 import threading
 
 # Import your existing credentials and functions
-from env_config import API_KEY, TELE_TOKEN_BN, TELE_CHAT_ID_BN
+from env_config import API_KEY, TELE_TOKEN_REPORTS, TELE_CHAT_ID_REPORTS
 from telegram_utils import send_telegram_message
 from iv_engine import calculate_iv
 
@@ -236,8 +236,10 @@ def start_pure_iv_scanner():
                 
                 if inst["type"] == "CE":
                     state["ce_ltp"] = ltp
+                    state["ce_vol_total"] = tick.get("volume_traded", 0)
                 else:
                     state["pe_ltp"] = ltp
+                    state["pe_vol_total"] = tick.get("volume_traded", 0)
                     
                 ce_ltp = state.get("ce_ltp")
                 pe_ltp = state.get("pe_ltp")
@@ -258,10 +260,16 @@ def start_pure_iv_scanner():
         print(f"WebSocket closed: {code} - {reason}")
 
     def reporting_loop():
+        from env_config import NSE_HOLIDAYS
         last_reported = None
         while True:
             time.sleep(1)
             now = datetime.now(ZoneInfo("Asia/Kolkata"))
+            
+            if now.weekday() > 4 or now.date().isoformat() in NSE_HOLIDAYS:
+                time.sleep(59)
+                continue
+                
             current_minute = now.strftime("%Y-%m-%d %H:%M")
             
             # Fire at the 02-second mark of each new minute
@@ -285,14 +293,30 @@ def start_pure_iv_scanner():
                         key = f"{name}_{strike}_{expiry.strftime('%Y-%m-%d')}"
                         return iv_state[key].get(f"roc_{opt_type.lower()}", 0.0)
                         
+                    def get_1m_vol(strike, opt_type):
+                        key = f"{name}_{strike}_{expiry.strftime('%Y-%m-%d')}"
+                        state = iv_state[key]
+                        vol_key = f"{opt_type.lower()}_vol_total"
+                        prev_key = f"{opt_type.lower()}_vol_prev"
+                        
+                        current_vol = state.get(vol_key, 0)
+                        prev_vol = state.get(prev_key, current_vol)
+                        
+                        one_min_vol = current_vol - prev_vol
+                        state[prev_key] = current_vol
+                        return max(0, one_min_vol)
+                        
                     atm_idx = len(ce_s) // 2
                     target_strikes = ce_s[atm_idx-4 : atm_idx+5]
                     
                     ce_rocs = [get_roc(s, "CE") for s in target_strikes]
                     pe_rocs = [get_roc(s, "PE") for s in target_strikes]
                     
+                    ce_vols = [get_1m_vol(s, "CE") for s in target_strikes]
+                    pe_vols = [get_1m_vol(s, "PE") for s in target_strikes]
+                    
                     # Volatility Filter Logic
-                    threshold = 0.5 if name in ["CRUDEOIL", "CRUDEOILM"] else 3.0
+                    threshold = 1.0 if name in ["CRUDEOIL", "CRUDEOILM"] else 5.0
                     
                     has_spike = False
                     
@@ -312,32 +336,42 @@ def start_pure_iv_scanner():
                     if not has_spike:
                         continue
                         
-                    def f(v): return f"{v:5.1f}"
+                    def f(v): return f"{v:4.1f}"
+                    
+                    def fmt_vol(v):
+                        if v >= 1_000_000:
+                            return f"{v/1_000_000:.1f}M"
+                        elif v >= 1_000:
+                            return f"{v/1_000:.1f}K"
+                        return str(int(v))
                     
                     msg =  f"```\n"
                     msg += f"🏦 {name} ({int(spot)})\n"
-                    msg += f" Strike |  CE % |  PE %\n"
-                    msg += f"--------+-------+-------\n"
+                    msg += f" Strike | CE %| PE %| C.Vol| P.Vol\n"
+                    msg += f"--------+-----+-----+------+------\n"
                     
                     for i in range(4):
-                        msg += f" {int(target_strikes[i]):<6} | {f(ce_rocs[i])} | {f(pe_rocs[i])}\n"
+                        msg += f" {int(target_strikes[i]):<6} | {f(ce_rocs[i]):>4} | {f(pe_rocs[i]):>4} | {fmt_vol(ce_vols[i]):>4} | {fmt_vol(pe_vols[i]):>4}\n"
                         
-                    msg += f"--------+-------+-------\n"
-                    msg += f"🎯{int(target_strikes[4])}🎯| {f(ce_rocs[4])} | {f(pe_rocs[4])}\n"
-                    msg += f"--------+-------+-------\n"
+                    msg += f"--------+-----+-----+------+------\n"
+                    # ATM Row
+                    msg += f" {int(target_strikes[4]):<6} | {f(ce_rocs[4]):>4} | {f(pe_rocs[4]):>4} | {fmt_vol(ce_vols[4]):>4} | {fmt_vol(pe_vols[4]):>4}🎯\n"
+                    msg += f"--------+-----+-----+------+------\n"
                     
                     for i in range(5, 9):
-                        msg += f" {int(target_strikes[i]):<6} | {f(ce_rocs[i])} | {f(pe_rocs[i])}\n"
+                        msg += f" {int(target_strikes[i]):<6} | {f(ce_rocs[i]):>4} | {f(pe_rocs[i]):>4} | {fmt_vol(ce_vols[i]):>4} | {fmt_vol(pe_vols[i]):>4}\n"
                         
                     ce_total = sum(ce_rocs)
                     pe_total = sum(pe_rocs)
+                    ce_vtotal = sum(ce_vols)
+                    pe_vtotal = sum(pe_vols)
                     
-                    msg += f"--------+-------+-------\n"
-                    msg += f"  TOTAL | {f(ce_total)} | {f(pe_total)}\n"
+                    msg += f"--------+-----+-----+------+------\n"
+                    msg += f"  TOTAL | {f(ce_total):>4} | {f(pe_total):>4} | {fmt_vol(ce_vtotal):>4} | {fmt_vol(pe_vtotal):>4}\n"
                     msg += f"```"
                     
                     print(f"Reporting per-minute IV for {name}")
-                    send_telegram_message(msg, chat_id=TELE_CHAT_ID_BN, token=TELE_TOKEN_BN)
+                    send_telegram_message(msg, chat_id=TELE_CHAT_ID_REPORTS, token=TELE_TOKEN_REPORTS)
 
     # Start reporter thread
     threading.Thread(target=reporting_loop, daemon=True).start()
