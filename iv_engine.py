@@ -68,6 +68,8 @@ def calculate_iv(target_price, S, K, T, r=RISK_FREE_RATE, option_type="CE", max_
         
         if sigma <= 0:
             sigma = 0.001  # Prevent negative IV
+        elif sigma > 5.0:
+            sigma = 5.0  # Cap maximum IV at 500% to prevent math explosion
             
     return sigma
 
