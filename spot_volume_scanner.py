@@ -146,11 +146,26 @@ def start_spot_volume_scanner():
         from telegram_utils import TelegramDispatcher
         dispatcher = TelegramDispatcher()
         
+        # Send startup message to all 3 main telegram IDs
+        try:
+            msg = f"🟢 Spot Volume Scanner (3rd WebSocket) Started Successfully!\nTracking {len(target_tokens)} Spot/Future instruments."
+            dispatcher.send_sync(0, msg, chat_id=env_config.TELE_CHAT_ID, token=env_config.TELE_TOKEN)
+            dispatcher.send_sync(0, msg, chat_id=env_config.TELE_CHAT_ID_BN, token=env_config.TELE_TOKEN_BN)
+            dispatcher.send_sync(0, msg, chat_id=env_config.TELE_CHAT_ID_VELOCITY, token=env_config.TELE_TOKEN_VELOCITY)
+        except Exception as e:
+            print(f"Error sending startup message: {e}")
+        
         last_reported_minute = None
         
         while True:
             time.sleep(0.5)
             now = datetime.now(IST)
+            
+            # Silent mode on weekends and holidays
+            if now.weekday() > 4 or now.date().isoformat() in env_config.NSE_HOLIDAYS:
+                time.sleep(60)
+                continue
+                
             current_minute = now.strftime("%Y-%m-%d %H:%M")
             
             # Fire at the 02-second mark of each new minute
