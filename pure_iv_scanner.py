@@ -316,7 +316,7 @@ def start_pure_iv_scanner():
                     pe_vols = [get_1m_vol(s, "PE") for s in target_strikes]
                     
                     # Volatility Filter Logic
-                    threshold = 1.0 if name in ["CRUDEOIL", "CRUDEOILM"] else 5.0
+                    threshold = 5.0
                     
                     has_spike = False
                     
