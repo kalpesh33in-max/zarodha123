@@ -193,11 +193,11 @@ def start_spot_volume_scanner():
                                 f"Symbol: {meta['symbol']}\n"
                                 f"LOTS: {lots}\n"
                                 f"spot PRICE : {c_close:.2f}\n"
-                                f"TIME: {now.strftime('%H:%M:%S')}\n"
                                 f"Candle high: {c_high:.2f}\n"
                                 f"Candle low: {c_low:.2f}\n"
                                 f"Candle mid: {c_mid:.2f}\n"
-                                f"Buying price: {buy_price:.2f}"
+                                f"Buying price: {buy_price:.2f}\n"
+                                f"TIME: {now.strftime('%H:%M:%S')}"
                             )
                             alerts.append(msg)
                             
