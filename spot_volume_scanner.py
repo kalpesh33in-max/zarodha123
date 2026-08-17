@@ -193,7 +193,7 @@ def start_spot_volume_scanner():
                         # Calculate Lots
                         lots = int(minute_vol / meta["lot_size"])
                         
-                        if lots >= 500:
+                        if lots >= 10:  # TEMP FOR TESTING
                             # User requested calculations
                             c_high = c_state["high"]
                             c_low = c_state["low"]
