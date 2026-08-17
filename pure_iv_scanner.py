@@ -236,10 +236,10 @@ def start_pure_iv_scanner():
                 
                 if inst["type"] == "CE":
                     state["ce_ltp"] = ltp
-                    state["ce_vol_total"] = tick.get("volume_traded", 0)
+                    state["ce_vol_total"] = tick.get("volume_traded") or tick.get("volume", 0)
                 else:
                     state["pe_ltp"] = ltp
-                    state["pe_vol_total"] = tick.get("volume_traded", 0)
+                    state["pe_vol_total"] = tick.get("volume_traded") or tick.get("volume", 0)
                     
                 ce_ltp = state.get("ce_ltp")
                 pe_ltp = state.get("pe_ltp")
