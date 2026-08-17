@@ -1294,7 +1294,6 @@ def build_first_5m_future_volume_mismatch_alerts(kite):
         volume = float(candle.get("volume", 0) or 0)
         
         if previous_close <= 0 or historical_previous_close <= 0 or open_price <= 0 or close <= 0: continue
-        if volume <= FIRST_5M_MISMATCH_MIN_VOLUME or volume <= previous_volume_max: continue
         
         gap_pct = ((open_price - previous_close) / previous_close) * 100
         
@@ -1317,7 +1316,6 @@ def build_first_5m_future_volume_mismatch_alerts(kite):
             opt_vol = float(opt_candle.get("volume", 0) or 0)
             
             if opt_prev_close <= 0 or opt_open <= 0 or opt_close <= 0: continue
-            if opt_vol <= FIRST_5M_MISMATCH_MIN_VOLUME or opt_vol <= opt_prev_vol_max: continue
             opt_gap_pct = ((opt_open - opt_prev_close) / opt_prev_close) * 100
             opt_price_color = _candle_color(opt_open, opt_close)
             opt_volume_color = _volume_candle_color(opt_prev_close, opt_close)
