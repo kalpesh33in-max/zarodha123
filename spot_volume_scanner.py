@@ -27,7 +27,7 @@ def start_spot_volume_scanner():
     
     # Need API keys from env_config
     import env_config
-    from heatmap_engine import STOCK_BURST_NAMES, INDEX_BURST_NAMES
+    from heatmap_engine import STOCK_BURST_NAMES, INDEX_BURST_NAMES, MCX_BURST_NAMES
     
     token = load_access_token()
     if not token:
@@ -78,6 +78,22 @@ def start_spot_volume_scanner():
                 "type": "FUTURE"
             }
             
+    # 3. Commodities (CRUDEOIL): We want the FUTURE instrument and FUTURE lot size
+    for name in MCX_BURST_NAMES:
+        futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
+        if not futs.empty:
+            futs = futs.sort_values(by="expiry")
+            fut = futs.iloc[0]
+            lot_size = int(fut.get("lot_size", 1))
+            tkn = int(fut["instrument_token"])
+            target_tokens.append(tkn)
+            token_metadata[tkn] = {
+                "name": name,
+                "symbol": fut["tradingsymbol"],
+                "lot_size": lot_size,
+                "type": "FUTURE"
+            }
+
     if not target_tokens:
         print("No targets found for Spot Volume Scanner.")
         return

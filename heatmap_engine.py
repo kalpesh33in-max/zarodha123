@@ -41,8 +41,7 @@ STOCK_BURST_NAMES = {
 }
 NSE_BURST_TRACK_NAMES = []
 MCX_BURST_TRACK_NAMES = [
-    "CRUDEOIL",
-    "CRUDEOILM",
+    "CRUDEOIL"
 ]
 MCX_BURST_NAMES = set(MCX_BURST_TRACK_NAMES)
 BURST_TRACK_NAMES = NSE_BURST_TRACK_NAMES
@@ -241,7 +240,7 @@ def get_active_burst_names(now_ist=None):
     t = now_ist.time()
     session = get_burst_session(now_ist)
     if session == "mcx":
-        return ["CRUDEOIL", "CRUDEOILM"]
+        return ["CRUDEOIL"]
     if session == "nse":
         if datetime.strptime("09:15", "%H:%M").time() <= t < datetime.strptime("09:21", "%H:%M").time():
             return []
@@ -262,7 +261,7 @@ def get_burst_subscription_names(now_ist=None):
         if t < NSE_BURST_START_TIME:
             return sorted(set(INDEX_BURST_NAMES) | set(STOCK_BURST_NAMES))
         if NSE_BURST_END_TIME <= t <= MCX_BURST_END_TIME:
-            return ["CRUDEOIL", "CRUDEOILM"]
+            return ["CRUDEOIL"]
 
     return sorted(set(INDEX_BURST_NAMES) | set(STOCK_BURST_NAMES))
 

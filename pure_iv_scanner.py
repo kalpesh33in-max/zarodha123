@@ -26,7 +26,7 @@ def _get_time_to_expiry_years(expiry_date):
 
 # TARGETS
 TARGET_SYMBOLS = [
-    "BANKNIFTY", "CRUDEOIL", "CRUDEOILM",
+    "BANKNIFTY", "CRUDEOIL",
     "360ONE", "ADANIENSOL", "ADANIENT", "ADANIGREEN", "ADANIPORTS",
     "APLAPOLLO", "ASIANPAINT", "ASTRAL", "AUROPHARMA", "AXISBANK",
     "ABB", "BAJAJ-AUTO", "BAJAJFINSV", "BAJFINANCE", "BDL",
@@ -185,7 +185,7 @@ def start_pure_iv_scanner():
                     strike_step = 50
                     
                 # Use 10 ITM for BANKNIFTY and CRUDEOIL, 5 ITM for stocks
-                num_itm = 10 if name in ["BANKNIFTY", "CRUDEOIL", "CRUDEOILM"] else 5
+                num_itm = 10 if name in ["BANKNIFTY", "CRUDEOIL"] else 5
                 ce_strikes, pe_strikes = get_atm_and_itm_strikes(ltp, strike_step, num_itm=num_itm)
                 
                 closest_expiry = opts["expiry"].min()
