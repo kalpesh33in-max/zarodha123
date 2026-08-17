@@ -204,8 +204,8 @@ def start_spot_volume_scanner():
                             lot_size = meta['lot_size']
                             # Format Telegram message
                             msg = (
-                                f"Symbol: {meta['symbol']}({lot_size}lot)\n"
-                                f"volume:({lots}*{lot_size}={minute_vol})\n"
+                                f"Symbol: {meta['symbol']} ({lot_size} lots)\n"
+                                f"volume: {minute_vol}\n"
                                 f"LOTS: {lots}\n"
                                 f"spot PRICE : {c_close:.2f}\n"
                                 f"Candle high: {c_high:.2f}\n"
