@@ -96,7 +96,7 @@ def start_spot_volume_scanner():
             "close": -1.0
         }
 
-    kws = KiteTicker(env_config.API_KEY, token)
+    from websocket_flow import register_ws_callbacks, add_shared_tokens
 
     def on_ticks(ws, ticks):
         with state_lock:
@@ -104,7 +104,6 @@ def start_spot_volume_scanner():
                 tkn = tick["instrument_token"]
                 ltp = tick["last_price"]
                 
-                # Fetch volume from MODE_QUOTE or MODE_FULL safely
                 vol = tick.get("volume_traded") or tick.get("volume", 0)
                 
                 if tkn not in candle_state:
@@ -119,28 +118,13 @@ def start_spot_volume_scanner():
                 c_state["current_vol"] = vol
 
     def on_connect(ws, response):
-        print("Spot Volume Scanner connected to WebSocket. Subscribing...")
-        ws.subscribe(target_tokens)
-        ws.set_mode(ws.MODE_QUOTE, target_tokens)
+        print("Spot Volume Scanner subscribing...")
+        add_shared_tokens(target_tokens)
 
     def on_close(ws, code, reason):
         print(f"Spot Volume WebSocket closed: {code} - {reason}")
 
-    kws.on_ticks = on_ticks
-    kws.on_connect = on_connect
-    kws.on_close = on_close
-
-    # Start WS in a background thread
-    def run_ws():
-        while True:
-            try:
-                kws.connect()
-                time.sleep(5)  # Prevent infinite loop log spam if connection drops instantly
-            except Exception as e:
-                print(f"Spot Volume WS error: {e}")
-                time.sleep(5)
-                
-    threading.Thread(target=run_ws, daemon=True).start()
+    register_ws_callbacks(on_connect, on_ticks)
 
     # Reporting Loop
     def reporting_loop():

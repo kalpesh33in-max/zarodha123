@@ -155,11 +155,10 @@ def start_pure_iv_scanner():
                 "type": "FUT", "name": name, "symbol": fut["tradingsymbol"]
             }
             
-    # 2. Start WebSocket
-    kws = KiteTicker(API_KEY, token)
-    
     # We will update subscriptions dynamically when Future ticks come in
     subscribed_options = set()
+    
+    from websocket_flow import register_ws_callbacks, add_shared_tokens
     
     def on_ticks(ws, ticks):
         for tick in ticks:
@@ -220,8 +219,7 @@ def start_pure_iv_scanner():
                             "strike": row["strike"],
                             "expiry": pd.to_datetime(row["expiry"])
                         }
-                    ws.subscribe(list(to_subscribe))
-                    ws.set_mode(ws.MODE_QUOTE, list(to_subscribe))
+                    add_shared_tokens(list(to_subscribe))
                     subscribed_options.update(to_subscribe)
                     
             elif inst["type"] in ["CE", "PE"]:
@@ -253,8 +251,7 @@ def start_pure_iv_scanner():
     def on_connect(ws, response):
         print("Connected to WebSocket. Subscribing to Futures...")
         if future_tokens:
-            ws.subscribe(future_tokens)
-            ws.set_mode(ws.MODE_QUOTE, future_tokens)
+            add_shared_tokens(future_tokens)
 
     def on_close(ws, code, reason):
         print(f"WebSocket closed: {code} - {reason}")
@@ -376,12 +373,8 @@ def start_pure_iv_scanner():
     # Start reporter thread
     threading.Thread(target=reporting_loop, daemon=True).start()
 
-    kws.on_ticks = on_ticks
-    kws.on_connect = on_connect
-    kws.on_close = on_close
-
-    print("Connecting to Zerodha WebSocket...")
-    kws.connect(threaded=False)
+    register_ws_callbacks(on_connect, on_ticks)
+    print("Pure IV Scanner registered with shared WebSocket.")
 
 if __name__ == "__main__":
     start_pure_iv_scanner()

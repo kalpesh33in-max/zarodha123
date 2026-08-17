@@ -23,6 +23,26 @@ _meta = {
 _active_engine = None
 _active_engine_lock = threading.Lock()
 
+_ws_on_connect_callbacks = []
+_ws_on_ticks_callbacks = []
+_shared_extra_tokens = set()
+
+def register_ws_callbacks(on_connect, on_ticks):
+    if on_connect:
+        _ws_on_connect_callbacks.append(on_connect)
+    if on_ticks:
+        _ws_on_ticks_callbacks.append(on_ticks)
+
+def add_shared_tokens(tokens):
+    with _cache_lock:
+        _shared_extra_tokens.update(tokens)
+    if _active_engine and _active_engine.kws:
+        try:
+            # Re-subscribe just in case it missed the initial connection
+            _active_engine.kws.subscribe(list(tokens))
+            _active_engine.kws.set_mode(_active_engine.kws.MODE_QUOTE, list(tokens))
+        except Exception as e:
+            print(f"Error adding shared tokens: {e}")
 
 def mark_connected(is_connected):
     with _cache_lock:
@@ -318,6 +338,11 @@ class FlowEngine:
         except Exception as e:
             print(f"Error adding Doji Option tokens to subscription map: {e}")
 
+        with _cache_lock:
+            for t in _shared_extra_tokens:
+                tokens.add(t)
+                base_tokens.add(t) # Treat as base token so budget logic keeps it
+
         tokens = self._apply_subscription_budget(tokens, base_tokens, option_tokens)
         return sorted(tokens), symbol_by_token, base_tokens, option_tokens
 
@@ -455,6 +480,12 @@ class FlowEngine:
 
         print(f"WebSocket connected. Subscribing {len(self._tokens)} tokens.")
         self._subscribe_tokens(ws, self._tokens)
+        
+        for cb in _ws_on_connect_callbacks:
+            try:
+                cb(ws, response)
+            except Exception as e:
+                print(f"Error in ws_on_connect callback: {e}")
 
     def on_ticks(self, ws, ticks):
         now = time.time()
@@ -476,6 +507,12 @@ class FlowEngine:
             symbol = self._symbol_by_token.get(int(token)) if token.isdigit() else None
             if symbol:
                 update_symbol_quote(symbol, quote)
+
+        for cb in _ws_on_ticks_callbacks:
+            try:
+                cb(ws, ticks)
+            except Exception as e:
+                print(f"Error in ws_on_ticks callback: {e}")
 
     def on_close(self, ws, code, reason):
         mark_connected(False)
