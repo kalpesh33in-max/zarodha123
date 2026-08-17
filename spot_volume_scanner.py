@@ -135,6 +135,7 @@ def start_spot_volume_scanner():
         while True:
             try:
                 kws.connect()
+                time.sleep(5)  # Prevent infinite loop log spam if connection drops instantly
             except Exception as e:
                 print(f"Spot Volume WS error: {e}")
                 time.sleep(5)
