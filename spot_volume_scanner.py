@@ -128,8 +128,7 @@ def start_spot_volume_scanner():
 
     # Reporting Loop
     def reporting_loop():
-        from telegram_utils import TelegramDispatcher
-        dispatcher = TelegramDispatcher()
+        from telegram_utils import send_telegram_message
         
         msg = f"🟢 Spot Volume Scanner (3rd WebSocket) Started Successfully!\nTracking {len(target_tokens)} Spot/Future instruments."
         
@@ -139,7 +138,7 @@ def start_spot_volume_scanner():
             (env_config.TELE_CHAT_ID_STOCKS, env_config.TELE_TOKEN_STOCKS)
         ]:
             try:
-                dispatcher.send_sync(0, msg, chat_id=chat, token=token)
+                send_telegram_message(msg, chat_id=chat, token=token)
             except Exception as e:
                 print(f"Error sending startup message to {chat}: {e}")
         
@@ -213,7 +212,7 @@ def start_spot_volume_scanner():
                 
                 for alert in alerts:
                     try:
-                        dispatcher.send_sync(0, alert, chat_id=chat_stocks, token=token_stocks)
+                        send_telegram_message(alert, chat_id=chat_stocks, token=token_stocks)
                     except Exception as e:
                         print(f"Error sending spot volume alert: {e}")
 
