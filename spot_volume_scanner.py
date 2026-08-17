@@ -50,7 +50,7 @@ def start_spot_volume_scanner():
         lot_size = int(futs.iloc[0].get("lot_size", 1))
         
         # Get Spot instrument for price/volume
-        spots = df[(df["name"] == name) & (df["segment"] == "NSE")]
+        spots = df[(df["tradingsymbol"] == name) & (df["segment"] == "NSE")]
         if not spots.empty:
             spot = spots.iloc[0]
             tkn = int(spot["instrument_token"])
@@ -148,15 +148,10 @@ def start_spot_volume_scanner():
         
         msg = f"🟢 Spot Volume Scanner (3rd WebSocket) Started Successfully!\nTracking {len(target_tokens)} Spot/Future instruments."
         
-        for chat, token in [
-            (env_config.TELE_CHAT_ID, env_config.TELE_TOKEN),
-            (env_config.TELE_CHAT_ID_BN, env_config.TELE_TOKEN_BN),
-            (env_config.TELE_CHAT_ID_STOCKS, env_config.TELE_TOKEN_STOCKS)
-        ]:
-            try:
-                send_telegram_message(msg, chat_id=chat, token=token)
-            except Exception as e:
-                print(f"Error sending startup message to {chat}: {e}")
+        try:
+            send_telegram_message(msg, chat_id=env_config.TELE_CHAT_ID, token=env_config.TELE_TOKEN)
+        except Exception as e:
+            print(f"Error sending startup message: {e}")
         
         last_reported_minute = None
         
