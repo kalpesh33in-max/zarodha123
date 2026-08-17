@@ -90,6 +90,11 @@ def validate_and_start_scanner(source):
             pure_iv_thread.daemon = True
             pure_iv_thread.start()
             
+            from spot_volume_scanner import start_spot_volume_scanner
+            spot_vol_thread = threading.Thread(target=start_spot_volume_scanner)
+            spot_vol_thread.daemon = True
+            spot_vol_thread.start()
+            
             return True
         except Exception as e:
             print(f"[{source}] Validation failed: {e}")
