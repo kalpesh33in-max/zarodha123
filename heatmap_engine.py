@@ -2634,7 +2634,6 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=
                 stats.get("max_future_tick_lots", 0),
                 tick_lots,
             )
-        threshold = 10  # TEMP FOR TESTING
         if tick_lots >= threshold and key not in active_watches:
             active_watches[key] = {
                 "start_oi": prev_oi,
@@ -2767,7 +2766,6 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
                     stats.get("max_option_tick_lots", 0),
                     tick_lots,
                 )
-            threshold = 10  # TEMP FOR TESTING
             if tick_lots >= threshold and t_int not in active_watches:
                 expiry_text = (
                     row["expiry"].strftime("%d-%m-%Y")
@@ -2797,8 +2795,6 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
                 else:
                     final_threshold = 500
                     
-                final_threshold = 10  # TEMP FOR TESTING
-
                 if final_lots >= final_threshold:
                     strength = get_strength_label(final_lots, watch["underlying"])
                     p_icon = "▲" if p_chg >= 0 else "▼"

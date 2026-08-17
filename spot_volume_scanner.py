@@ -193,7 +193,7 @@ def start_spot_volume_scanner():
                         # Calculate Lots
                         lots = int(minute_vol / meta["lot_size"])
                         
-                        if lots >= 10:  # TEMP FOR TESTING
+                        if lots >= 500:
                             # User requested calculations
                             c_high = c_state["high"]
                             c_low = c_state["low"]
@@ -201,9 +201,11 @@ def start_spot_volume_scanner():
                             c_mid = (c_high - c_low) / 2.0
                             buy_price = c_low + c_mid
                             
+                            lot_size = meta['lot_size']
                             # Format Telegram message
                             msg = (
-                                f"Symbol: {meta['symbol']}\n"
+                                f"Symbol: {meta['symbol']}({lot_size}lot)\n"
+                                f"volume:({lots}*{lot_size}={minute_vol})\n"
                                 f"LOTS: {lots}\n"
                                 f"spot PRICE : {c_close:.2f}\n"
                                 f"Candle high: {c_high:.2f}\n"
