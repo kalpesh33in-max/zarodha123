@@ -302,4 +302,8 @@ def run_scanner(kite, stop_event=None):
     finally:
         print("Scanner loop stopped.")
         msg = "🛑 *Market Scanner Process Ended.*"
-        send_telegram_message(msg)
+        if flow_engine._auth_failed:
+            msg += "\n⚠️ Notice: WebSocket auth failed. Restart the Railway service to reconnect WebSocket."
+    
+        from telegram_utils import broadcast_startup_message
+        broadcast_startup_message(msg)

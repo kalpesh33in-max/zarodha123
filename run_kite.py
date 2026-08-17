@@ -111,7 +111,8 @@ def update_instruments():
                 f.write(r.content)
             print("Instruments updated.")
             msg = "✅ Instruments Updated Successfully."
-            send_telegram_message(msg)
+            from telegram_utils import broadcast_startup_message
+            broadcast_startup_message(msg)
     except Exception as e:
         print(f"Update Error: {e}")
 

@@ -68,3 +68,16 @@ def send_telegram_message(message, chat_id=None, token=None, is_burst=False):
     except Exception as e:
         print(f"Error sending Telegram message: {e}")
         return None
+
+def broadcast_startup_message(message):
+    import env_config
+    for target_token, target_id in (
+        (env_config.TELE_TOKEN, env_config.TELE_CHAT_ID),
+        (env_config.TELE_TOKEN_BN, env_config.TELE_CHAT_ID_BN),
+        (env_config.TELE_TOKEN_STOCKS, env_config.TELE_CHAT_ID_STOCKS),
+    ):
+        if target_token and _is_valid_chat_id(target_id):
+            try:
+                send_telegram_message(message, chat_id=target_id, token=target_token)
+            except Exception as e:
+                print(f"Error broadcasting message to {target_id}: {e}")
