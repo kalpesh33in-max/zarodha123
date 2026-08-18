@@ -16,7 +16,7 @@ from heatmap_engine import (
     ENABLE_INDEX_BURST_ALERTS,
     ENABLE_MCX_BURST_ALERTS,
     calculate_burst_alerts,
-    calculate_first_30m_alerts,
+    calculate_first_60m_alerts,
     calculate_gap_alerts,
     calculate_other_historical_alerts,
     get_burst_monitor_status,
@@ -54,7 +54,7 @@ SEND_MCX_MONITOR_STATUS = _env_flag("SEND_MCX_MONITOR_STATUS", False)
 
 PRIORITY_GAP = 1
 PRIORITY_BURST = 2
-PRIORITY_FIRST_30M = 3
+PRIORITY_first_60m = 3
 PRIORITY_HISTORICAL = 4
 PRIORITY_STATUS = 5
 
@@ -199,11 +199,11 @@ def _historical_loop(kite, dispatcher, stop_event):
         now = datetime.now(IST)
         if _is_market_open(now):
             try:
-                # first_30m_alerts: Early session volume mismatches
+                # first_60m_alerts: Early session volume mismatches
                 # Destination: Default Telegram/Matrix channel (resolved by _resolve_telegram_target)
-                first_30m_alerts = calculate_first_30m_alerts(kite)
-                for alert in first_30m_alerts:
-                    dispatcher.send(PRIORITY_FIRST_30M, alert)
+                first_60m_alerts = calculate_first_60m_alerts(kite)
+                for alert in first_60m_alerts:
+                    dispatcher.send(PRIORITY_first_60m, alert)
 
                 # historical_alerts: Daily/weekly volume mismatches and S4 alerts
                 # Destination: Default Telegram/Matrix channel (resolved by _resolve_telegram_target)
