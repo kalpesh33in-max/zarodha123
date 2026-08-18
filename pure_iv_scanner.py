@@ -62,7 +62,7 @@ def get_atm_and_itm_strikes(spot_price, strike_step=50, num_itm=10):
     
     # CE and PE strikes are exactly the same now! 
     # We go from -num_itm to +num_itm so ATM is perfectly in the middle.
-    strikes = [atm_strike + (i * strike_step) for i in range(-num_itm, num_itm + 1)]
+    strikes = [round(atm_strike + (i * strike_step), 2) for i in range(-num_itm, num_itm + 1)]
     
     return strikes, strikes
 
@@ -197,11 +197,12 @@ def start_pure_iv_scanner():
                 
                 # Find exactly these options in the dataframe for the closest expiry
                 closest_expiry = opts["expiry"].min()
+                rounded_opts_strike = opts["strike"].astype(float).round(2)
                 target_opts = opts[
                     (opts["expiry"] == closest_expiry) & 
                     (
-                        ((opts["instrument_type"] == "CE") & (opts["strike"].isin(ce_strikes))) |
-                        ((opts["instrument_type"] == "PE") & (opts["strike"].isin(pe_strikes)))
+                        ((opts["instrument_type"] == "CE") & (rounded_opts_strike.isin(ce_strikes))) |
+                        ((opts["instrument_type"] == "PE") & (rounded_opts_strike.isin(pe_strikes)))
                     )
                 ]
                 
@@ -216,7 +217,7 @@ def start_pure_iv_scanner():
                             "type": row["instrument_type"],
                             "name": name,
                             "symbol": row["tradingsymbol"],
-                            "strike": row["strike"],
+                            "strike": round(float(row["strike"]), 2),
                             "expiry": pd.to_datetime(row["expiry"])
                         }
                     add_shared_tokens(list(to_subscribe))
@@ -313,7 +314,7 @@ def start_pure_iv_scanner():
                     pe_vols = [get_1m_vol(s, "PE") for s in target_strikes]
                     
                     # Volatility Filter Logic
-                    threshold = 5.0
+                    threshold = 2.0
                     
                     has_spike = False
                     
