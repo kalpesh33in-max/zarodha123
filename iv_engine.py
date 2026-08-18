@@ -201,9 +201,9 @@ class DirectionEngine:
                     
                     # STRICT FILTER: Dispatch Telegram alert only when score crosses thresholds AND ROC conditions are perfectly met
                     send_alert = False
-                    if score >= 85 and ce_roc_val > 0 and pe_roc_val < 0:
+                    if score >= 85 and ce_roc_val > 0 and pe_roc_val <= 0:
                         send_alert = True
-                    elif score <= 15 and pe_roc_val > 0 and ce_roc_val < 0:
+                    elif score <= 15 and pe_roc_val > 0 and ce_roc_val <= 0:
                         send_alert = True
                         
                     if send_alert:
@@ -331,10 +331,10 @@ class DirectionEngine:
         ce_roc = self.iv_roc.get(ce_symbol, 0)
         pe_roc = self.iv_roc.get(pe_symbol, 0)
         
-        if ce_roc > 5 and pe_roc <= 0:
+        if ce_roc > 2.0 and pe_roc <= 0:
             # Bullish IV expansion
             score += 15
-        elif pe_roc > 5 and ce_roc <= 0:
+        elif pe_roc > 2.0 and ce_roc <= 0:
             # Bearish IV expansion
             score -= 15
 
