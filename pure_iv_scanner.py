@@ -338,11 +338,12 @@ def start_pure_iv_scanner():
                     
                     def fmt_vol(v):
                         if v >= 1_000_000:
-                            return f"{v/1_000_000:.1f}M"
+                            val = v / 1_000_000
+                            return f"{int(val)}M" if val.is_integer() else f"{val:.1f}M"
                         elif v >= 1_000:
-                            return f"{v/1_000:.1f}K"
+                            val = v / 1_000
+                            return f"{int(val)}K" if val.is_integer() else f"{val:.1f}K"
                         return str(int(v))
-                    
                     msg =  f"```\n"
                     msg += f"🏦 {name} ({int(spot)})\n"
                     msg += f" Strike | CE %| PE %| C.Vol| P.Vol\n"

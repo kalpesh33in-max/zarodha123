@@ -203,9 +203,18 @@ def start_spot_volume_scanner():
                             
                             lot_size = meta['lot_size']
                             # Format Telegram message
+                            def format_vol(v):
+                                if v >= 1_000_000:
+                                    val = v / 1_000_000
+                                    return f"{int(val)}M" if val.is_integer() else f"{val:.1f}M"
+                                elif v >= 1_000:
+                                    val = v / 1_000
+                                    return f"{int(val)}K" if val.is_integer() else f"{val:.1f}K"
+                                return str(int(v))
+                                
                             msg = (
                                 f"Symbol: {meta['symbol']} ({lot_size} lots)\n"
-                                f"volume: {minute_vol}\n"
+                                f"volume: {format_vol(minute_vol)}\n"
                                 f"LOTS: {lots}\n"
                                 f"spot PRICE : {c_close:.2f}\n"
                                 f"Candle high: {c_high:.2f}\n"
