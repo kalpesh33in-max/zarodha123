@@ -14,7 +14,7 @@ from iv_engine import calculate_iv
 
 def _get_time_to_expiry_years(expiry_date):
     """Calculate T in years from now until 15:30 IST on expiry date."""
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Kolkata"))
     if hasattr(expiry_date, "date") and not isinstance(expiry_date, datetime):
         expiry = datetime.combine(expiry_date, datetime.min.time())
     else:
@@ -264,7 +264,16 @@ def start_pure_iv_scanner():
             time.sleep(1)
             now = datetime.now(ZoneInfo("Asia/Kolkata"))
             
-            if now.weekday() > 4 or now.date().isoformat() in NSE_HOLIDAYS:
+            if now.weekday() > 4:
+                time.sleep(59)
+                continue
+                
+            t = now.time()
+            is_nse_holiday = now.date().isoformat() in NSE_HOLIDAYS
+            is_nse_open = datetime.strptime("09:00", "%H:%M").time() <= t <= datetime.strptime("15:30", "%H:%M").time() and not is_nse_holiday
+            is_mcx_open = datetime.strptime("15:30", "%H:%M").time() <= t <= datetime.strptime("23:30", "%H:%M").time()
+            
+            if not is_nse_open and not is_mcx_open:
                 time.sleep(59)
                 continue
                 
@@ -278,6 +287,10 @@ def start_pure_iv_scanner():
                     # For now, let's only log targets that are actively ticked and have ROC data
                     spot = spot_prices.get(name, 0)
                     if not spot: continue
+                    
+                    is_mcx = name == "CRUDEOIL"
+                    if is_mcx and not is_mcx_open: continue
+                    if not is_mcx and not is_nse_open: continue
                     
                     ce_s = meta["ce_strikes"]
                     pe_s = meta["pe_strikes"]

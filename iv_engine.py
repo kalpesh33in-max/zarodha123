@@ -105,12 +105,18 @@ class DirectionEngine:
                 if now.weekday() > 4:
                     continue
                     
+                if now.weekday() > 4:
+                    continue
+                    
                 is_nse_holiday = now.date().isoformat() in NSE_HOLIDAYS
+                t = now.time()
                 
-                if 9 <= now.hour < 15 or (now.hour == 15 and now.minute < 30):
-                    if is_nse_holiday:
-                        continue
-                    target_names = [
+                is_nse_open = datetime.strptime("09:00", "%H:%M").time() <= t <= datetime.strptime("15:30", "%H:%M").time() and not is_nse_holiday
+                is_mcx_open = datetime.strptime("15:30", "%H:%M").time() <= t <= datetime.strptime("23:30", "%H:%M").time()
+                
+                target_names = []
+                if is_nse_open:
+                    target_names.extend([
                         "BANKNIFTY", "360ONE", "ADANIENSOL", "ADANIENT", "ADANIGREEN", "ADANIPORTS",
                         "APLAPOLLO", "ASIANPAINT", "ASTRAL", "AUROPHARMA", "AXISBANK",
                         "ABB", "BAJAJ-AUTO", "BAJAJFINSV", "BAJFINANCE", "BDL",
@@ -132,9 +138,12 @@ class DirectionEngine:
                         "SUNPHARMA", "SUPREMEIND", "TATACONSUM", "TATAELXSI", "TCS",
                         "TECHM", "TIINDIA", "TITAN", "TORNTPHARM", "TRENT",
                         "TVSMOTOR", "UNITDSPR", "ULTRACEMCO", "UNOMINDA", "VOLTAS"
-                    ]
-                else:
-                    target_names = ["CRUDEOIL"]
+                    ])
+                if is_mcx_open:
+                    target_names.append("CRUDEOIL")
+                    
+                if not target_names:
+                    continue
 
                 for name in target_names:
                     import re
@@ -218,7 +227,7 @@ class DirectionEngine:
         
     def _get_time_to_expiry_years(self, expiry_date):
         """Calculate T in years from now until 15:30 IST on expiry date."""
-        now = datetime.now()
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
         
         # Ensure expiry is a datetime object
         if isinstance(expiry_date, str):
@@ -246,7 +255,7 @@ class DirectionEngine:
         Takes raw tick data, calculates IV, stores 1-minute intervals, 
         and calculates IV ROC.
         """
-        now = datetime.now()
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
         current_minute = now.strftime("%Y-%m-%d %H:%M")
         
         is_option = instrument_data.get("instrument_type") in ["CE", "PE"]

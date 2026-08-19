@@ -159,8 +159,17 @@ def start_spot_volume_scanner():
             time.sleep(0.5)
             now = datetime.now(IST)
             
-            # Silent mode on weekends and holidays
-            if now.weekday() > 4 or now.date().isoformat() in env_config.NSE_HOLIDAYS:
+            # Silent mode on weekends
+            if now.weekday() > 4:
+                time.sleep(60)
+                continue
+                
+            t = now.time()
+            is_nse_holiday = now.date().isoformat() in env_config.NSE_HOLIDAYS
+            is_nse_open = datetime.strptime("09:00", "%H:%M").time() <= t <= datetime.strptime("15:30", "%H:%M").time() and not is_nse_holiday
+            is_mcx_open = datetime.strptime("15:30", "%H:%M").time() <= t <= datetime.strptime("23:30", "%H:%M").time()
+            
+            if not is_nse_open and not is_mcx_open:
                 time.sleep(60)
                 continue
                 
@@ -175,6 +184,14 @@ def start_spot_volume_scanner():
                 with state_lock:
                     for tkn, meta in token_metadata.items():
                         if tkn not in candle_state:
+                            continue
+                            
+                        is_mcx = meta["name"] in MCX_BURST_NAMES
+                        if is_mcx and not is_mcx_open:
+                            continue
+                        if not is_mcx and not is_nse_open:
+                            c_state = candle_state[tkn]
+                            reset_candle_state(tkn, c_state.get("current_vol", 0))
                             continue
                             
                         c_state = candle_state[tkn]
