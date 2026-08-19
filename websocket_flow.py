@@ -6,8 +6,11 @@ from kiteconnect import KiteTicker
 
 from env_config import API_KEY
 from kite_rate_limiter import kite_quote
+import os
 
 INDEX_SYMBOL = "NSE:NIFTY BANK"
+DEBUG_BURST_STRIKES = os.getenv("DEBUG_BURST_STRIKES", "false").lower() in ("true", "1", "yes", "on")
+MAX_WS_SUBSCRIPTIONS = int(os.getenv("MAX_WS_SUBSCRIPTIONS", "3000"))
 
 
 _cache_lock = threading.Lock()
@@ -20,6 +23,26 @@ _meta = {
 _active_engine = None
 _active_engine_lock = threading.Lock()
 
+_ws_on_connect_callbacks = []
+_ws_on_ticks_callbacks = []
+_shared_extra_tokens = set()
+
+def register_ws_callbacks(on_connect, on_ticks):
+    if on_connect:
+        _ws_on_connect_callbacks.append(on_connect)
+    if on_ticks:
+        _ws_on_ticks_callbacks.append(on_ticks)
+
+def add_shared_tokens(tokens):
+    with _cache_lock:
+        _shared_extra_tokens.update(tokens)
+    if _active_engine and _active_engine.kws:
+        try:
+            # Re-subscribe just in case it missed the initial connection
+            _active_engine.kws.subscribe(list(tokens))
+            _active_engine.kws.set_mode(_active_engine.kws.MODE_QUOTE, list(tokens))
+        except Exception as e:
+            print(f"Error adding shared tokens: {e}")
 
 def mark_connected(is_connected):
     with _cache_lock:
@@ -182,9 +205,9 @@ class FlowEngine:
         from heatmap_engine import (
             _get_active_stock_future_contracts,
             get_burst_futures,
-            get_burst_option_strike_range,
+            get_burst_relevant_options,
             get_burst_subscription_names,
-            get_relevant_options,
+            get_spot_symbol,
             load_futures_data,
             load_options_data,
         )
@@ -205,6 +228,10 @@ class FlowEngine:
         burst_names = get_burst_subscription_names()
         fut_symbols = get_burst_futures(self.kite, burst_names)
         include_index_tokens = any(name in {"BANKNIFTY", "NIFTY"} for name in burst_names)
+        spot_symbols_by_name = {
+            name: get_spot_symbol(name)
+            for name in burst_names
+        }
 
         fut_by_name = {}
         for sym in fut_symbols:
@@ -219,11 +246,14 @@ class FlowEngine:
             if name in burst_names:
                 fut_by_name[name] = sym
 
-        symbol_quotes = get_symbol_quotes(fut_symbols, max_age_seconds=60)
-        missing_fut_symbols = [symbol for symbol in fut_symbols if symbol not in symbol_quotes]
+        bootstrap_symbols = list(dict.fromkeys([*fut_symbols, *spot_symbols_by_name.values()]))
+        symbol_quotes = get_symbol_quotes(bootstrap_symbols, max_age_seconds=60)
+        missing_bootstrap_symbols = [
+            symbol for symbol in bootstrap_symbols if symbol not in symbol_quotes
+        ]
         try:
-            if missing_fut_symbols:
-                symbol_quotes.update(kite_quote(self.kite, missing_fut_symbols))
+            if missing_bootstrap_symbols:
+                symbol_quotes.update(kite_quote(self.kite, missing_bootstrap_symbols))
         except Exception as e:
             print(f"WebSocket bootstrap quote failed: {e}")
 
@@ -273,21 +303,81 @@ class FlowEngine:
                 symbol_by_token[spot_token] = f"NSE:{contract['name']}"
 
         for name in burst_names:
-            base_symbol = fut_by_name.get(name, "")
-            u_ltp = symbol_quotes.get(base_symbol, {}).get("last_price", 0)
-            if u_ltp <= 0:
+            future_symbol = fut_by_name.get(name, "")
+            future_ltp = symbol_quotes.get(future_symbol, {}).get("last_price", 0)
+            if future_ltp <= 0:
                 continue
 
-            df = get_relevant_options(name, u_ltp, strike_range=get_burst_option_strike_range(name))
+            df = get_burst_relevant_options(name, future_ltp)
             if df.empty:
                 continue
+
+            if DEBUG_BURST_STRIKES:
+                strikes = sorted(set(float(value) for value in df["strike"].tolist()))
+                print(
+                    f"[WS BURST DEBUG] {name} future_ltp={future_ltp:.2f} "
+                    f"selected_strikes={strikes[:5]}{'...' if len(strikes) > 5 else ''} "
+                    f"count={len(strikes)}"
+                )
 
             for token in df["instrument_token"].tolist():
                 token = int(token)
                 tokens.add(token)
                 option_tokens.add(token)
 
+        # Add Hourly Doji Breakout Watchlist ITM Options (Optional feature check)
+        try:
+            from heatmap_engine import get_doji_watchlist_options
+            doji_tokens = get_doji_watchlist_options(self.kite)
+            for token in doji_tokens:
+                token = int(token)
+                tokens.add(token)
+                option_tokens.add(token)
+        except ImportError:
+            pass  # get_doji_watchlist_options is not implemented in heatmap_engine
+        except Exception as e:
+            print(f"Error adding Doji Option tokens to subscription map: {e}")
+
+        with _cache_lock:
+            for t in _shared_extra_tokens:
+                tokens.add(t)
+                base_tokens.add(t) # Treat as base token so budget logic keeps it
+
+        tokens = self._apply_subscription_budget(tokens, base_tokens, option_tokens)
         return sorted(tokens), symbol_by_token, base_tokens, option_tokens
+
+    def _apply_subscription_budget(self, tokens, base_tokens, option_tokens):
+        tokens = set(tokens)
+        base_tokens = set(base_tokens)
+        option_tokens = set(option_tokens)
+
+        if len(tokens) <= MAX_WS_SUBSCRIPTIONS:
+            return tokens
+
+        # Keep base instruments first so futures/spot quotes remain available.
+        # Trim option subscriptions next because they are the largest contributor
+        # to exceeding Kite's 4000-instrument WebSocket cap.
+        prioritized = list(base_tokens)
+        if len(prioritized) > MAX_WS_SUBSCRIPTIONS:
+            print(
+                f"WebSocket subscription budget too small for base tokens: "
+                f"{len(prioritized)} > {MAX_WS_SUBSCRIPTIONS}."
+            )
+            return set(prioritized[:MAX_WS_SUBSCRIPTIONS])
+
+        remaining_budget = MAX_WS_SUBSCRIPTIONS - len(prioritized)
+        if remaining_budget <= 0:
+            return set(prioritized)
+
+        prioritized.extend(sorted(option_tokens)[:remaining_budget])
+        trimmed = set(prioritized)
+        dropped = len(tokens) - len(trimmed)
+        if dropped > 0:
+            print(
+                f"WebSocket subscription budget applied: kept {len(trimmed)} of "
+                f"{len(tokens)} tokens, dropped {dropped} option subscriptions."
+            )
+        return trimmed
 
     def _load_index_rows(self):
         if self._index_rows is not None:
@@ -390,14 +480,25 @@ class FlowEngine:
 
         print(f"WebSocket connected. Subscribing {len(self._tokens)} tokens.")
         self._subscribe_tokens(ws, self._tokens)
+        
+        for cb in _ws_on_connect_callbacks:
+            try:
+                cb(ws, response)
+            except Exception as e:
+                print(f"Error in ws_on_connect callback: {e}")
 
     def on_ticks(self, ws, ticks):
         now = time.time()
         for tick in ticks:
-            token = str(tick.get("instrument_token"))
+            raw_token = tick.get("instrument_token")
+            if not raw_token:
+                continue
+            token = str(raw_token)
             quote = {
+                "instrument_token": int(raw_token),
                 "last_price": tick.get("last_price", 0),
                 "oi": tick.get("oi", 0),
+                "volume": tick.get("volume_traded") or tick.get("volume", 0),
                 "ohlc": tick.get("ohlc", {}),
                 "timestamp": tick.get("exchange_timestamp") or tick.get("last_trade_time") or now,
             }
@@ -406,6 +507,12 @@ class FlowEngine:
             symbol = self._symbol_by_token.get(int(token)) if token.isdigit() else None
             if symbol:
                 update_symbol_quote(symbol, quote)
+
+        for cb in _ws_on_ticks_callbacks:
+            try:
+                cb(ws, ticks)
+            except Exception as e:
+                print(f"Error in ws_on_ticks callback: {e}")
 
     def on_close(self, ws, code, reason):
         mark_connected(False)

@@ -7,13 +7,16 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from env_config import (
-    TELE_CHAT_ID_BN, TELE_TOKEN_BN, MATRIX_ROOM_ID_BN
+    TELE_CHAT_ID_BN,
+    TELE_TOKEN_BN,
+    TELE_CHAT_ID_REPORTS,
+    TELE_TOKEN_REPORTS
 )
 from heatmap_engine import (
     ENABLE_INDEX_BURST_ALERTS,
     ENABLE_MCX_BURST_ALERTS,
     calculate_burst_alerts,
-    calculate_first_30m_alerts,
+    calculate_first_60m_alerts,
     calculate_gap_alerts,
     calculate_other_historical_alerts,
     get_burst_monitor_status,
@@ -21,14 +24,13 @@ from heatmap_engine import (
     is_burst_session_open,
 )
 from telegram_utils import send_telegram_message
-from matrix_utils import refresh_matrix_token, send_matrix_message
 from websocket_flow import get_ws_status
 
 
 IST = ZoneInfo("Asia/Kolkata")
 BURST_SCAN_INTERVAL_SECONDS = 1
 GAP_BATCH_INTERVAL_SECONDS = 30
-HISTORICAL_SCAN_INTERVAL_SECONDS = 30
+HISTORICAL_SCAN_INTERVAL_SECONDS = 60
 WS_HEARTBEAT_INTERVAL_SECONDS = 30
 WS_STALE_SECONDS = 60
 WS_ALERT_COOLDOWN_SECONDS = 300
@@ -52,7 +54,7 @@ SEND_MCX_MONITOR_STATUS = _env_flag("SEND_MCX_MONITOR_STATUS", False)
 
 PRIORITY_GAP = 1
 PRIORITY_BURST = 2
-PRIORITY_FIRST_30M = 3
+PRIORITY_first_60m = 3
 PRIORITY_HISTORICAL = 4
 PRIORITY_STATUS = 5
 
@@ -79,15 +81,9 @@ class AlertDispatcher:
     def _worker(self, stop_event):
         while not stop_event.is_set():
             try:
-                priority, _, message, chat_id, token, room_id = self._queue.get(timeout=1)
+                priority, _, message, chat_id, token, _room_id = self._queue.get(timeout=1)
             except queue.Empty:
                 continue
-
-            # Send to Matrix (Priority)
-            try:
-                send_matrix_message(message, room_id=room_id)
-            except Exception as e:
-                print(f"Matrix send failed at priority {priority}: {e}")
 
             # Send to Telegram
             try:
@@ -99,9 +95,12 @@ class AlertDispatcher:
 
 
 def _is_market_open(now):
+    from env_config import NSE_HOLIDAYS
+    if now.weekday() > 4 or now.date().isoformat() in NSE_HOLIDAYS:
+        return False
     start_time = datetime.strptime("09:00", "%H:%M").time()
     end_time = datetime.strptime("15:30", "%H:%M").time()
-    return now.weekday() <= 4 and start_time <= now.time() <= end_time
+    return start_time <= now.time() <= end_time
 
 
 def _is_any_scanner_session(now):
@@ -144,34 +143,10 @@ def _burst_loop(kite, dispatcher, stop_event):
                     else:
                         print(message)
 
-                if (
-                    monitor_status.get("session") == "mcx"
-                    and not bn_alerts
-                    and not stock_alerts
-                    and time.time() - state.get("last_mcx_monitor_alert", 0)
-                    >= MCX_MONITOR_STATUS_COOLDOWN_SECONDS
-                ):
-                    state["last_mcx_monitor_alert"] = time.time()
-                    message = (
-                        "MCX burst monitor active: "
-                        f"{monitor_status.get('names', '')} | "
-                        f"source={monitor_status.get('source', '')} | "
-                        f"futures={monitor_status.get('future_quotes', 0)}/{monitor_status.get('future_symbols', 0)} "
-                        f"oi={monitor_status.get('future_oi_quotes', 0)} | "
-                        f"options={monitor_status.get('option_quotes', 0)}/{monitor_status.get('option_tokens', 0)} "
-                        f"oi={monitor_status.get('option_oi_quotes', 0)} | "
-                        f"max move fut/opt={monitor_status.get('max_future_tick_lots', 0)}/"
-                        f"{monitor_status.get('max_option_tick_lots', 0)} lots | "
-                        f"threshold={monitor_status.get('threshold', 0)} | "
-                        f"reason={monitor_status.get('reason', '')}"
-                    )
-                    if SEND_MCX_MONITOR_STATUS:
-                        dispatcher.send(PRIORITY_STATUS, message)
-                    else:
-                        print(message)
+
 
                 # All burst alerts: Index, Stock Futures, and MCX
-                # Destination: Telegram BN channel (TELE_CHAT_ID_BN) and Matrix BN room (MATRIX_ROOM_ID_BN)
+                # Destination: Telegram BN channel (TELE_CHAT_ID_BN)
                 for alert in dict.fromkeys([*bn_alerts, *stock_alerts]):
                     print(f"Sending burst alert to {TELE_CHAT_ID_BN}")
                     dispatcher.send(
@@ -179,7 +154,6 @@ def _burst_loop(kite, dispatcher, stop_event):
                         alert,
                         chat_id=TELE_CHAT_ID_BN,
                         token=TELE_TOKEN_BN,
-                        room_id=MATRIX_ROOM_ID_BN,
                     )
             except Exception as e:
                 print(f"Error in burst scanner loop: {e}")
@@ -205,7 +179,12 @@ def _gap_loop(kite, dispatcher, stop_event):
                 )
                 batch_index += 1
                 for alert in alerts:
-                    dispatcher.send(PRIORITY_GAP, alert)
+                    dispatcher.send(
+                        PRIORITY_GAP,
+                        alert,
+                        chat_id=TELE_CHAT_ID_REPORTS,
+                        token=TELE_TOKEN_REPORTS
+                    )
             except Exception as e:
                 print(f"Error in gap scanner loop: {e}")
                 _send_error(dispatcher, "Gap Scanner", e, state)
@@ -220,17 +199,18 @@ def _historical_loop(kite, dispatcher, stop_event):
         now = datetime.now(IST)
         if _is_market_open(now):
             try:
-                # first_30m_alerts: Early session volume mismatches
+                # first_60m_alerts: Early session volume mismatches
                 # Destination: Default Telegram/Matrix channel (resolved by _resolve_telegram_target)
-                first_30m_alerts = calculate_first_30m_alerts(kite)
-                for alert in first_30m_alerts:
-                    dispatcher.send(PRIORITY_FIRST_30M, alert)
+                first_60m_alerts = calculate_first_60m_alerts(kite)
+                for alert in first_60m_alerts:
+                    dispatcher.send(PRIORITY_first_60m, alert)
 
                 # historical_alerts: Daily/weekly volume mismatches and S4 alerts
                 # Destination: Default Telegram/Matrix channel (resolved by _resolve_telegram_target)
                 alerts = calculate_other_historical_alerts(kite)
                 for alert in alerts:
                     dispatcher.send(PRIORITY_HISTORICAL, alert)
+
             except Exception as e:
                 print(f"Error in historical scanner loop: {e}")
                 _send_error(dispatcher, "Historical Scanner", e, state)
@@ -288,11 +268,6 @@ def run_scanner(kite, stop_event=None):
         stop_event = threading.Event()
 
     print("Scanner session initialized. Starting priority scanner loops...")
-    try:
-        refresh_matrix_token()
-    except Exception as e:
-        print(f"Matrix token refresh at scanner start failed: {e}")
-
     dispatcher = AlertDispatcher()
     dispatcher.start(stop_event)
     
@@ -327,5 +302,8 @@ def run_scanner(kite, stop_event=None):
     finally:
         print("Scanner loop stopped.")
         msg = "🛑 *Market Scanner Process Ended.*"
-        send_telegram_message(msg)
-        send_matrix_message(msg)
+        if flow_engine._auth_failed:
+            msg += "\n⚠️ Notice: WebSocket auth failed. Restart the Railway service to reconnect WebSocket."
+    
+        from telegram_utils import broadcast_startup_message
+        broadcast_startup_message(msg)

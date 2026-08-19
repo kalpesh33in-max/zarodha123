@@ -11,7 +11,6 @@ from env_config import API_KEY, API_SECRET
 from scanner import run_scanner
 from websocket_flow import FlowEngine
 from telegram_utils import send_telegram_message
-from matrix_utils import send_matrix_message
 
 # --- Configuration ---
 IST = ZoneInfo("Asia/Kolkata")
@@ -41,10 +40,6 @@ def load_saved_token():
 
 def send_service_status(message):
     def _worker():
-        try:
-            send_matrix_message(message)
-        except Exception as e:
-            print(f"Matrix service status alert failed: {e}")
         try:
             send_telegram_message(message)
         except Exception as e:
@@ -89,6 +84,17 @@ def validate_and_start_scanner(source):
             scanner_thread = threading.Thread(target=run_scanner, args=(kite,))
             scanner_thread.daemon = True
             scanner_thread.start()
+            
+            from pure_iv_scanner import start_pure_iv_scanner
+            pure_iv_thread = threading.Thread(target=start_pure_iv_scanner)
+            pure_iv_thread.daemon = True
+            pure_iv_thread.start()
+            
+            from spot_volume_scanner import start_spot_volume_scanner
+            spot_vol_thread = threading.Thread(target=start_spot_volume_scanner)
+            spot_vol_thread.daemon = True
+            spot_vol_thread.start()
+            
             return True
         except Exception as e:
             print(f"[{source}] Validation failed: {e}")
@@ -105,8 +111,8 @@ def update_instruments():
                 f.write(r.content)
             print("Instruments updated.")
             msg = "✅ Instruments Updated Successfully."
-            send_telegram_message(msg)
-            send_matrix_message(msg)
+            from telegram_utils import broadcast_startup_message
+            broadcast_startup_message(msg)
     except Exception as e:
         print(f"Update Error: {e}")
 
@@ -192,6 +198,7 @@ def login():
         return "<h1>Error</h1><p>Login succeeded, but scanner validation/startup failed. Check logs.</p>"
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
+
 
 # This block is only executed when run directly (e.g., `python run_kite.py`)
 if __name__ == "__main__":

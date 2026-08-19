@@ -4,8 +4,6 @@ from env_config import (
     TELE_CHAT_ID,
     TELE_TOKEN_BN,
     TELE_CHAT_ID_BN,
-    TELE_TOKEN_STOCKS,
-    TELE_CHAT_ID_STOCKS,
     TELE_TOKEN_VELOCITY,
     TELE_CHAT_ID_VELOCITY,
 )
@@ -17,13 +15,12 @@ def _is_valid_chat_id(chat_id):
 
 def _resolve_telegram_target(chat_id=None, token=None, is_burst=False):
     if token or chat_id:
-        target_token = token or TELE_TOKEN or TELE_TOKEN_BN or TELE_TOKEN_STOCKS or TELE_TOKEN_VELOCITY
+        target_token = token or TELE_TOKEN or TELE_TOKEN_BN or TELE_TOKEN_VELOCITY
         target_id = chat_id or next(
             (
                 candidate
                 for candidate in (
                     TELE_CHAT_ID_BN if is_burst else TELE_CHAT_ID,
-                    TELE_CHAT_ID_STOCKS,
                     TELE_CHAT_ID_VELOCITY,
                 )
                 if _is_valid_chat_id(candidate)
@@ -37,7 +34,6 @@ def _resolve_telegram_target(chat_id=None, token=None, is_burst=False):
 
     for target_token, target_id in (
         (TELE_TOKEN, TELE_CHAT_ID),
-        (TELE_TOKEN_STOCKS, TELE_CHAT_ID_STOCKS),
         (TELE_TOKEN_VELOCITY, TELE_CHAT_ID_VELOCITY),
     ):
         if target_token and _is_valid_chat_id(target_id):
@@ -45,9 +41,13 @@ def _resolve_telegram_target(chat_id=None, token=None, is_burst=False):
 
     return None, None
 
-def send_telegram_message(message, chat_id=None, token=None):
+def send_telegram_message(message, chat_id=None, token=None, is_burst=False):
 
-    target_token, target_id = _resolve_telegram_target(chat_id=chat_id, token=token)
+    target_token, target_id = _resolve_telegram_target(
+        chat_id=chat_id,
+        token=token,
+        is_burst=is_burst,
+    )
     if not target_token:
         print("Telegram token missing!")
         return
@@ -68,3 +68,16 @@ def send_telegram_message(message, chat_id=None, token=None):
     except Exception as e:
         print(f"Error sending Telegram message: {e}")
         return None
+
+def broadcast_startup_message(message):
+    import env_config
+    for target_token, target_id in (
+        (env_config.TELE_TOKEN, env_config.TELE_CHAT_ID),
+        (env_config.TELE_TOKEN_BN, env_config.TELE_CHAT_ID_BN),
+        (env_config.TELE_TOKEN_STOCKS, env_config.TELE_CHAT_ID_STOCKS),
+    ):
+        if target_token and _is_valid_chat_id(target_id):
+            try:
+                send_telegram_message(message, chat_id=target_id, token=target_token)
+            except Exception as e:
+                print(f"Error broadcasting message to {target_id}: {e}")

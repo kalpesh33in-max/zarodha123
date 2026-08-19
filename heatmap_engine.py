@@ -3,6 +3,7 @@ import time
 import pandas as pd
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from iv_engine import direction_engine
 from kite_rate_limiter import kite_historical_data, kite_quote
 from websocket_flow import get_symbol_quotes, get_token_quotes
 
@@ -14,8 +15,6 @@ BURST_OPTION_EXCLUDED_NAMES = {
     "SENSEX",
     "BANKEX",
     "SENSEX50",
-    "CRUDEOIL",
-    "CRUDEOILM",
 }
 STOCK_BURST_NAMES = {
     "360ONE", "ADANIENSOL", "ADANIENT", "ADANIGREEN", "ADANIPORTS",
@@ -42,8 +41,7 @@ STOCK_BURST_NAMES = {
 }
 NSE_BURST_TRACK_NAMES = []
 MCX_BURST_TRACK_NAMES = [
-    "CRUDEOIL",
-    "CRUDEOILM",
+    "CRUDEOIL"
 ]
 MCX_BURST_NAMES = set(MCX_BURST_TRACK_NAMES)
 BURST_TRACK_NAMES = NSE_BURST_TRACK_NAMES
@@ -53,15 +51,15 @@ ENABLE_INDEX_BURST_ALERTS = os.getenv("ENABLE_INDEX_BURST_ALERTS", "false").lowe
     "yes",
     "on",
 )
-ENABLE_MCX_BURST_ALERTS = False
+ENABLE_MCX_BURST_ALERTS = os.getenv("ENABLE_MCX_BURST_ALERTS", "true").lower() in ("true", "1", "yes", "on")
 BURST_OPTION_STRIKE_RANGE = 25
 BANKNIFTY_BURST_OPTION_STRIKE_RANGE = 25
 STOCK_BURST_OPTION_STRIKE_RANGE = 5
 MCX_BURST_OPTION_STRIKE_RANGE = int(os.getenv("MCX_BURST_OPTION_STRIKE_RANGE", "10"))
-STOCK_BURST_STRIKES_BELOW_ATM = 6
-STOCK_BURST_STRIKES_ABOVE_ATM = 6
-BANKNIFTY_BURST_STRIKES_BELOW_ATM = 25
-BANKNIFTY_BURST_STRIKES_ABOVE_ATM = 25
+STOCK_BURST_STRIKES_BELOW_ATM = 5
+STOCK_BURST_STRIKES_ABOVE_ATM = 5
+BANKNIFTY_BURST_STRIKES_BELOW_ATM = 20
+BANKNIFTY_BURST_STRIKES_ABOVE_ATM = 20
 BURST_THRESHOLD_LOTS = int(os.getenv("BURST_THRESHOLD_LOTS", "100"))
 OPTION_BURST_THRESHOLD_LOTS = int(os.getenv("OPTION_BURST_THRESHOLD_LOTS", "100"))
 FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("FUTURE_BURST_THRESHOLD_LOTS", "1000"))
@@ -89,14 +87,11 @@ day_open_oi_store = {}
 option_history = {}
 active_watches = {}
 gap_alert_store = {}
-r3_alert_store = {}
-r3_last_check_time = None
-r3_watch_last_sent_time = None
 s4_alert_store = {}
 s4_state_store = {}
 s4_last_slot = None
-first_30m_mismatch_scan_dates = set()
-first_30m_mismatch_last_scan_time = None
+first_60m_mismatch_scan_dates = set()
+first_60m_mismatch_last_scan_time = None
 daily_mismatch_break_alert_store = {}
 weekly_mismatch_break_alert_store = {}
 daily_mismatch_setup_date = None
@@ -135,14 +130,7 @@ MONTHLY_FUTURE_GAP_THRESHOLD_PCT = 2.0
 MONTHLY_FUTURE_NEXT_GAP_MAX_PCT = 1.0
 MONTHLY_FUTURE_GAP_START_TIME = datetime.strptime("09:15", "%H:%M").time()
 GAP_ALERT_COOLDOWN_SECONDS = 3600
-R3_PIVOT_ALERT_START_TIME = datetime.strptime("09:15", "%H:%M").time()
-R3_PIVOT_CLOSE_REMINDER_START_TIME = datetime.strptime("15:00", "%H:%M").time()
-R3_PIVOT_RANGE_PCT = 0.5
-R3_PIVOT_CHECK_INTERVAL_SECONDS = 300
-R3_PIVOT_REMINDER_SECONDS = 3600
-R3_PIVOT_CLOSE_REMINDER_SECONDS = 600
-SEND_R3_WATCHLIST = os.getenv("SEND_R3_WATCHLIST", "false").lower() in ("true", "1", "yes")
-S4_PIVOT_RANGE_PCT = R3_PIVOT_RANGE_PCT
+S4_PIVOT_RANGE_PCT = 0.5
 S4_PIVOT_CHECK_TIMES = [
     datetime.strptime(value, "%H:%M").time()
     for value in ("09:30", "10:30", "11:30", "12:30", "13:30", "14:30", "15:25")
@@ -155,12 +143,12 @@ BORN_BREAKOUT_AFTERNOON_END_TIME = datetime.strptime("15:30", "%H:%M").time()
 BORN_BREAKOUT_CHECK_INTERVAL_SECONDS = 1800
 BORN_BREAKOUT_LOOKBACK_DAYS = 180
 # Pause non-burst reports only for this date. They resume automatically the next day.
-FIRST_30M_MISMATCH_CANDLE_START_TIME = datetime.strptime("09:15", "%H:%M").time()
-FIRST_30M_MISMATCH_SCAN_START_TIME = datetime.strptime("10:15", "%H:%M").time()
-FIRST_30M_MISMATCH_GAP_THRESHOLD_PCT = float(os.getenv("FIRST_60M_MISMATCH_GAP_THRESHOLD_PCT", "3.0"))
-FIRST_30M_MISMATCH_MIN_VOLUME = int(os.getenv("FIRST_60M_MISMATCH_MIN_VOLUME", "300000"))
-FIRST_30M_MISMATCH_RETRY_SECONDS = 30
-FIRST_30M_OPTION_ITM_COUNT = int(os.getenv("FIRST_30M_OPTION_ITM_COUNT", "4"))
+first_60m_MISMATCH_CANDLE_START_TIME = datetime.strptime("09:15", "%H:%M").time()
+first_60m_MISMATCH_SCAN_START_TIME = datetime.strptime("10:15", "%H:%M").time()
+first_60m_MISMATCH_GAP_THRESHOLD_PCT = float(os.getenv("FIRST_60M_MISMATCH_GAP_THRESHOLD_PCT", "3.0"))
+first_60m_MISMATCH_MIN_VOLUME = int(os.getenv("FIRST_60M_MISMATCH_MIN_VOLUME", "300000"))
+first_60m_MISMATCH_RETRY_SECONDS = 30
+first_60m_OPTION_ITM_COUNT = int(os.getenv("first_60m_OPTION_ITM_COUNT", "4"))
 DAILY_WEEKLY_MISMATCH_MIN_VOLUME = int(os.getenv("DAILY_WEEKLY_MISMATCH_MIN_VOLUME", "1000000"))
 PREVIOUS_DAY_MISMATCH_LOOKBACK_DAYS = int(os.getenv("PREVIOUS_DAY_MISMATCH_LOOKBACK_DAYS", "20"))
 WEEKLY_MISMATCH_LOOKBACK_DAYS = int(os.getenv("WEEKLY_MISMATCH_LOOKBACK_DAYS", "100"))
@@ -230,15 +218,15 @@ def get_burst_session(now_ist=None):
     if now_ist.weekday() > 4:
         return None
 
+    from env_config import NSE_HOLIDAYS
     t = now_ist.time()
     # NSE session ends at 15:30:00
     if NSE_BURST_START_TIME <= t < NSE_BURST_END_TIME:
+        if now_ist.date().isoformat() in NSE_HOLIDAYS:
+            return None
         return "nse"
-    # MCX session starts at 15:30:00
-    if (
-        ENABLE_MCX_BURST_ALERTS
-        and MCX_BURST_START_TIME <= t <= MCX_BURST_END_TIME
-    ):
+    # MCX evening session (15:30 to 23:30 IST)
+    if MCX_BURST_START_TIME <= t <= MCX_BURST_END_TIME:
         return "mcx"
     return None
 
@@ -252,7 +240,7 @@ def get_active_burst_names(now_ist=None):
     t = now_ist.time()
     session = get_burst_session(now_ist)
     if session == "mcx":
-        return []
+        return ["CRUDEOIL"]
     if session == "nse":
         if datetime.strptime("09:15", "%H:%M").time() <= t < datetime.strptime("09:21", "%H:%M").time():
             return []
@@ -273,7 +261,7 @@ def get_burst_subscription_names(now_ist=None):
         if t < NSE_BURST_START_TIME:
             return sorted(set(INDEX_BURST_NAMES) | set(STOCK_BURST_NAMES))
         if NSE_BURST_END_TIME <= t <= MCX_BURST_END_TIME:
-            return []
+            return ["CRUDEOIL"]
 
     return sorted(set(INDEX_BURST_NAMES) | set(STOCK_BURST_NAMES))
 
@@ -821,7 +809,7 @@ def _get_active_index_future_contracts():
     return contracts
 
 
-def _get_first_30m_future_contracts():
+def _get_first_60m_future_contracts():
     contracts = []
     seen_symbols = set()
 
@@ -877,10 +865,10 @@ def _open_extreme_label(open_price, high, low):
     return ""
 
 
-def _get_first_30m_candle(kite, token, now_ist):
+def _get_first_60m_candle(kite, token, now_ist):
     session_start = datetime.combine(
         now_ist.date(),
-        FIRST_30M_MISMATCH_CANDLE_START_TIME,
+        first_60m_MISMATCH_CANDLE_START_TIME,
         tzinfo=IST,
     )
     session_end = session_start + timedelta(minutes=60)
@@ -897,7 +885,7 @@ def _get_first_30m_candle(kite, token, now_ist):
         if (
             candle_time
             and candle_time.date() == now_ist.date()
-            and candle_time.time() == FIRST_30M_MISMATCH_CANDLE_START_TIME
+            and candle_time.time() == first_60m_MISMATCH_CANDLE_START_TIME
         ):
             return candle
 
@@ -911,10 +899,10 @@ def _get_first_30m_candle(kite, token, now_ist):
     return None
 
 
-def _get_first_30m_candle_context(kite, token, now_ist, label="First 30m"):
+def _get_first_60m_candle_context(kite, token, now_ist, label="First 30m"):
     session_start = datetime.combine(
         now_ist.date(),
-        FIRST_30M_MISMATCH_CANDLE_START_TIME,
+        first_60m_MISMATCH_CANDLE_START_TIME,
         tzinfo=IST,
     )
     session_end = session_start + timedelta(minutes=60)
@@ -945,7 +933,7 @@ def _get_first_30m_candle_context(kite, token, now_ist, label="First 30m"):
     for index, (candle_time, _) in enumerate(normalized):
         if (
             candle_time.date() == now_ist.date()
-            and candle_time.time() == FIRST_30M_MISMATCH_CANDLE_START_TIME
+            and candle_time.time() == first_60m_MISMATCH_CANDLE_START_TIME
         ):
             first_index = index
             break
@@ -966,7 +954,7 @@ def _get_first_30m_candle_context(kite, token, now_ist, label="First 30m"):
     }
 
 
-def _get_first_30m_itm_options(name, ltp, option_type, count=None):
+def _get_first_60m_itm_options(name, ltp, option_type, count=None):
     df = load_options_data()
     if df is None or df.empty or ltp <= 0:
         return pd.DataFrame()
@@ -991,16 +979,16 @@ def _get_first_30m_itm_options(name, ltp, option_type, count=None):
     else:
         options = options[options["strike"] > ltp].sort_values("strike", ascending=True)
 
-    limit = count if count is not None else FIRST_30M_OPTION_ITM_COUNT
+    limit = count if count is not None else first_60m_OPTION_ITM_COUNT
     return options.head(max(0, int(limit))).copy()
 
 
-def _build_first_30m_option_mismatch_rows(kite, name, ltp, gap_pct, now_ist):
+def _build_first_60m_option_mismatch_rows(kite, name, ltp, gap_pct, now_ist):
     option_type = "PE" if gap_pct > 0 else "CE"
     rows = []
 
-    for _, option in _get_first_30m_itm_options(name, ltp, option_type).iterrows():
-        context = _get_first_30m_candle_context(
+    for _, option in _get_first_60m_itm_options(name, ltp, option_type).iterrows():
+        context = _get_first_60m_candle_context(
             kite,
             int(option["instrument_token"]),
             now_ist,
@@ -1017,11 +1005,11 @@ def _build_first_30m_option_mismatch_rows(kite, name, ltp, gap_pct, now_ist):
         volume = float(candle.get("volume", 0) or 0)
         if previous_close <= 0 or open_price <= 0 or close <= 0:
             continue
-        if volume <= FIRST_30M_MISMATCH_MIN_VOLUME or volume <= previous_volume_max:
+        if volume <= first_60m_MISMATCH_MIN_VOLUME :
             continue
 
         option_gap_pct = ((open_price - previous_close) / previous_close) * 100
-        if abs(option_gap_pct) < FIRST_30M_MISMATCH_GAP_THRESHOLD_PCT:
+        if abs(option_gap_pct) < first_60m_MISMATCH_GAP_THRESHOLD_PCT:
             continue
 
         price_color = _candle_color(open_price, close)
@@ -1045,26 +1033,26 @@ def _build_first_30m_option_mismatch_rows(kite, name, ltp, gap_pct, now_ist):
     return rows
 
 
-def build_first_30m_future_volume_mismatch_alerts(kite):
-    global first_30m_mismatch_last_scan_time
+def build_first_60m_future_volume_mismatch_alerts(kite):
+    global first_60m_mismatch_last_scan_time
 
     now_ist = datetime.now(IST)
-    if now_ist.weekday() > 4 or now_ist.time() < FIRST_30M_MISMATCH_SCAN_START_TIME:
+    if now_ist.weekday() > 4 or now_ist.time() < first_60m_MISMATCH_SCAN_START_TIME:
         return []
 
     scan_date = now_ist.date().isoformat()
-    if scan_date in first_30m_mismatch_scan_dates:
+    if scan_date in first_60m_mismatch_scan_dates:
         return []
 
     if (
-        first_30m_mismatch_last_scan_time
-        and (now_ist - first_30m_mismatch_last_scan_time).total_seconds()
-        < FIRST_30M_MISMATCH_RETRY_SECONDS
+        first_60m_mismatch_last_scan_time
+        and (now_ist - first_60m_mismatch_last_scan_time).total_seconds()
+        < first_60m_MISMATCH_RETRY_SECONDS
     ):
         return []
-    first_30m_mismatch_last_scan_time = now_ist
+    first_60m_mismatch_last_scan_time = now_ist
 
-    contracts = _get_first_30m_future_contracts()
+    contracts = _get_first_60m_future_contracts()
     if not contracts:
         return []
 
@@ -1084,7 +1072,7 @@ def build_first_30m_future_volume_mismatch_alerts(kite):
             continue
 
         rough_gap_pct = ((day_open - previous_close) / previous_close) * 100
-        if abs(rough_gap_pct) < FIRST_30M_MISMATCH_GAP_THRESHOLD_PCT:
+        if abs(rough_gap_pct) < first_60m_MISMATCH_GAP_THRESHOLD_PCT:
             continue
 
         item = dict(contract)
@@ -1093,13 +1081,13 @@ def build_first_30m_future_volume_mismatch_alerts(kite):
         candidates.append(item)
 
     if not candidates:
-        first_30m_mismatch_scan_dates.add(scan_date)
+        first_60m_mismatch_scan_dates.add(scan_date)
         return []
 
     rows = []
     processed_candles = 0
     for contract in candidates:
-        context = _get_first_30m_candle_context(
+        context = _get_first_60m_candle_context(
             kite,
             contract["token"],
             now_ist,
@@ -1120,11 +1108,11 @@ def build_first_30m_future_volume_mismatch_alerts(kite):
         volume = float(candle.get("volume", 0) or 0)
         if previous_close <= 0 or historical_previous_close <= 0 or open_price <= 0 or close <= 0:
             continue
-        if volume <= FIRST_30M_MISMATCH_MIN_VOLUME or volume <= previous_volume_max:
+        if volume <= first_60m_MISMATCH_MIN_VOLUME :
             continue
 
         gap_pct = ((open_price - previous_close) / previous_close) * 100
-        if abs(gap_pct) < FIRST_30M_MISMATCH_GAP_THRESHOLD_PCT:
+        if abs(gap_pct) < first_60m_MISMATCH_GAP_THRESHOLD_PCT:
             continue
 
         price_color = _candle_color(open_price, close)
@@ -1132,7 +1120,7 @@ def build_first_30m_future_volume_mismatch_alerts(kite):
         if not price_color or not volume_color or price_color == volume_color:
             continue
 
-        option_rows = _build_first_30m_option_mismatch_rows(
+        option_rows = _build_first_60m_option_mismatch_rows(
             kite,
             contract["name"],
             float(contract.get("ltp", 0) or close),
@@ -1163,7 +1151,7 @@ def build_first_30m_future_volume_mismatch_alerts(kite):
     if processed_candles == 0:
         return []
 
-    first_30m_mismatch_scan_dates.add(scan_date)
+    first_60m_mismatch_scan_dates.add(scan_date)
     if not rows:
         return []
 
@@ -1200,6 +1188,193 @@ def build_first_30m_future_volume_mismatch_alerts(kite):
             f"{body}"
         )
 
+    return alerts
+
+
+FIRST_5M_MISMATCH_CANDLE_START_TIME = datetime.strptime("09:15", "%H:%M").time()
+FIRST_5M_MISMATCH_SCAN_START_TIME = datetime.strptime("09:20", "%H:%M").time()
+FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT = float(os.getenv("FIRST_5M_MISMATCH_GAP_THRESHOLD_PCT", "1.0"))
+FIRST_5M_MISMATCH_MIN_VOLUME = int(os.getenv("FIRST_5M_MISMATCH_MIN_VOLUME", "300000"))
+FIRST_5M_MISMATCH_RETRY_SECONDS = 30
+
+first_5m_mismatch_scan_dates = set()
+first_5m_mismatch_last_scan_time = None
+
+def _get_first_5m_candle_context(kite, token, now_ist, label="First 5m"):
+    session_start = datetime.combine(now_ist.date(), FIRST_5M_MISMATCH_CANDLE_START_TIME, tzinfo=IST)
+    session_end = session_start + timedelta(minutes=5)
+    prev_day = _get_previous_trading_day(now_ist)
+    from_time = datetime.combine(prev_day, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
+    try:
+        candles = get_historical_data_cached(kite, token, from_time, session_end, "5minute")
+    except Exception as e:
+        print(f"{label} historical data error for {token}: {e}")
+        return None
+    normalized = []
+    for candle in candles:
+        candle_time = candle.get("date")
+        if candle_time is None: continue
+        if hasattr(candle_time, "astimezone"): candle_time = candle_time.astimezone(IST)
+        normalized.append((candle_time, candle))
+    normalized.sort(key=lambda item: item[0])
+    first_index = None
+    for index, (candle_time, _) in enumerate(normalized):
+        if candle_time.date() == now_ist.date() and candle_time.time() == FIRST_5M_MISMATCH_CANDLE_START_TIME:
+            first_index = index
+            break
+    if first_index is None: return None
+    previous = [item[1] for item in normalized[:first_index]][-5:]
+    if len(previous) < 5: return None
+    previous_close = float(previous[-1].get("close", 0) or 0)
+    previous_volume_max = max((float(c.get("volume", 0) or 0) for c in previous), default=0)
+    return {"candle": normalized[first_index][1], "previous_close": previous_close, "previous_volume_max": previous_volume_max}
+
+def build_first_5m_future_volume_mismatch_alerts(kite):
+    global first_5m_mismatch_last_scan_time
+    now_ist = datetime.now(IST)
+    if now_ist.weekday() > 4 or now_ist.time() < FIRST_5M_MISMATCH_SCAN_START_TIME: return []
+    scan_date = now_ist.date().isoformat()
+    if scan_date in first_5m_mismatch_scan_dates: return []
+    if first_5m_mismatch_last_scan_time and (now_ist - first_5m_mismatch_last_scan_time).total_seconds() < FIRST_5M_MISMATCH_RETRY_SECONDS: return []
+    first_5m_mismatch_last_scan_time = now_ist
+
+    futures_df = load_futures_data()
+    if futures_df is None or futures_df.empty: return []
+    
+    contracts = []
+    for name in EXHAUSTION_REVERSAL_WATCHLIST:
+        frow = futures_df[futures_df["name"] == name]
+        if not frow.empty:
+            f = frow.iloc[0]
+            contracts.append({
+                "name": name,
+                "symbol": f["tradingsymbol"],
+                "token": int(f["instrument_token"]),
+                "kind": "future",
+                "month_label": _format_month_label(f["expiry"]) if pd.notna(f.get("expiry")) else ""
+            })
+            
+    if not contracts: return []
+    symbols = [c["symbol"] for c in contracts]
+    data = get_symbol_quotes_with_fallback(kite, symbols)
+    if not data: return []
+
+    candidates = []
+    for contract in contracts:
+        quote = data.get(contract["symbol"], {})
+        ohlc = quote.get("ohlc") or {}
+        previous_close = float(ohlc.get("close", 0) or 0)
+        day_open = float(ohlc.get("open", 0) or 0)
+        ltp = float(quote.get("last_price", 0) or day_open)
+        if previous_close <= 0 or day_open <= 0: continue
+        item = dict(contract)
+        item["previous_close"] = previous_close
+        item["ltp"] = ltp
+        candidates.append(item)
+
+    if not candidates:
+        first_5m_mismatch_scan_dates.add(scan_date)
+        return []
+
+    rows = []
+    processed_candles = 0
+    for contract in candidates:
+        context = _get_first_5m_candle_context(kite, contract["token"], now_ist)
+        if not context: continue
+        processed_candles += 1
+        candle = context["candle"]
+        previous_close = float(contract["previous_close"])
+        historical_previous_close = float(context["previous_close"] or 0)
+        previous_volume_max = float(context["previous_volume_max"] or 0)
+        open_price = float(candle.get("open", 0) or 0)
+        high = float(candle.get("high", 0) or 0)
+        low = float(candle.get("low", 0) or 0)
+        close = float(candle.get("close", 0) or 0)
+        volume = float(candle.get("volume", 0) or 0)
+        
+        if previous_close <= 0 or historical_previous_close <= 0 or open_price <= 0 or close <= 0: continue
+        
+        gap_pct = ((open_price - previous_close) / previous_close) * 100
+        
+        price_color = _candle_color(open_price, close)
+        volume_color = _volume_candle_color(historical_previous_close, close)
+        if not price_color or not volume_color or price_color == volume_color: continue
+        
+        option_type = "PE" if price_color == "Bearish" else "CE"
+        option_rows = []
+        options = _get_exhaustion_options(contract["name"], float(contract.get("ltp", 0) or close))
+        for option in options:
+            if option["option_type"] != option_type: continue
+            opt_context = _get_first_5m_candle_context(kite, option["token"], now_ist, label="First 5m option")
+            if not opt_context: continue
+            opt_candle = opt_context["candle"]
+            opt_prev_close = float(opt_context["previous_close"] or 0)
+            opt_prev_vol_max = float(opt_context["previous_volume_max"] or 0)
+            opt_open = float(opt_candle.get("open", 0) or 0)
+            opt_close = float(opt_candle.get("close", 0) or 0)
+            opt_vol = float(opt_candle.get("volume", 0) or 0)
+            
+            if opt_prev_close <= 0 or opt_open <= 0 or opt_close <= 0: continue
+            opt_gap_pct = ((opt_open - opt_prev_close) / opt_prev_close) * 100
+            opt_price_color = _candle_color(opt_open, opt_close)
+            opt_volume_color = _volume_candle_color(opt_prev_close, opt_close)
+            if not opt_price_color or not opt_volume_color or opt_price_color == opt_volume_color: continue
+            
+            option_rows.append({
+                "symbol": option["symbol"].split(":")[1] if ":" in option["symbol"] else option["symbol"],
+                "type": option["option_type"],
+                "gap_pct": opt_gap_pct,
+                "volume": opt_vol,
+                "previous_volume_max": opt_prev_vol_max,
+                "price_color": opt_price_color,
+                "volume_color": opt_volume_color,
+            })
+            
+        rows.append({
+            "name": contract["name"],
+            "symbol": contract["symbol"],
+            "month_label": contract["month_label"],
+            "open": open_price,
+            "high": high,
+            "low": low,
+            "volume": volume,
+            "previous_volume_max": previous_volume_max,
+            "gap_pct": gap_pct,
+            "price_color": price_color,
+            "volume_color": volume_color,
+            "option_rows": option_rows,
+        })
+
+    if processed_candles == 0: return []
+    first_5m_mismatch_scan_dates.add(scan_date)
+    if not rows: return []
+    rows.sort(key=lambda item: abs(item["gap_pct"]), reverse=True)
+    alerts = []
+    chunk_size = 20
+    for i in range(0, len(rows), chunk_size):
+        chunk = rows[i:i + chunk_size]
+        body_lines = []
+        for item in chunk:
+            gap_label = "GAP UP" if item["gap_pct"] > 0 else "GAP DOWN"
+            open_extreme = _open_extreme_label(item["open"], item["high"], item["low"])
+            open_extreme_text = f" | {open_extreme}" if open_extreme else ""
+            body_lines.append(
+                f"{item['name']} {item['month_label']} FUT: "
+                f"{gap_label} {item['gap_pct']:+.2f}% | "
+                f"Vol {format_volume(item['volume'])} > Prev5 Max {format_volume(item['previous_volume_max'])} | "
+                f"Price {item['price_color']} vs Volume {item['volume_color']}"
+                f"{open_extreme_text}"
+            )
+            if item.get("option_rows"):
+                body_lines.append("ITM OPTIONS:")
+                for option in item["option_rows"]:
+                    body_lines.append(
+                        f"Symbol: {option['symbol']} | Gap {option['gap_pct']:+.2f}% | "
+                        f"Vol {format_volume(option['volume'])} > Prev5 Max {format_volume(option['previous_volume_max'])} | "
+                        f"Price {option['price_color']} vs Volume {option['volume_color']}"
+                    )
+        body = "\n".join(body_lines)
+        alerts.append(f"FIRST 5M VOLUME MISMATCH\n\n{body}")
     return alerts
 
 
@@ -2109,214 +2284,6 @@ def _get_previous_day_r3_for_interval(kite, token, interval, interval_minutes, n
     }
 
 
-def build_monthly_future_r3_pivot_alerts(kite):
-    return []
-    global r3_last_check_time, r3_watch_last_sent_time
-
-    now_ist = datetime.now(IST)
-    if now_ist.weekday() > 4 or now_ist.time() < R3_PIVOT_ALERT_START_TIME:
-        return []
-
-    if (
-        r3_last_check_time
-        and (now_ist - r3_last_check_time).total_seconds() < R3_PIVOT_CHECK_INTERVAL_SECONDS
-    ):
-        return []
-    r3_last_check_time = now_ist
-
-    contracts = _get_active_stock_future_contracts()
-    if not contracts:
-        return []
-
-    symbols = [contract["symbol"] for contract in contracts]
-    data = get_symbol_quotes_with_fallback(kite, symbols)
-    if not data:
-        return []
-
-    watch_rows = []
-    near_rows = []
-    breakout_rows = []
-    # Zerodha chart Pivot Points (standard) on intraday charts are anchored to the
-    # previous trading session, but the H/L/C can differ slightly per timeframe
-    # because they are derived from that timeframe's candles.
-    intervals = [
-        ("1HR", "60minute", 60),
-    ]
-
-    def _prev_week_window(now_ist):
-        # Previous calendar week (Mon-Fri) in IST.
-        # For 30m/1h charts, Kite pivots are anchored to previous week.
-        current_week_start = now_ist.date() - timedelta(days=now_ist.weekday())
-        prev_week_start = current_week_start - timedelta(days=7)
-        prev_week_end = prev_week_start + timedelta(days=4)
-        start = datetime.combine(prev_week_start, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
-        end = datetime.combine(prev_week_end, datetime.strptime("15:30", "%H:%M").time(), tzinfo=IST)
-        return start, end
-
-    for contract in contracts:
-        symbol = contract["symbol"]
-        ltp = data.get(symbol, {}).get("last_price", 0)
-        if ltp <= 0:
-            continue
-
-        matched = []
-        for label, kite_interval, interval_minutes in intervals:
-            # Kite pivot anchor:
-            # - <=15m charts: previous trading day
-            # - >=30m charts (including 1H): previous week
-            if interval_minutes >= 30:
-                from_time, to_time = _prev_week_window(now_ist)
-            else:
-                prev_day = _get_previous_trading_day(now_ist)
-                from_time = datetime.combine(prev_day, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
-                to_time = datetime.combine(prev_day, datetime.strptime("15:30", "%H:%M").time(), tzinfo=IST)
-            try:
-                candles = get_historical_data_cached(
-                    kite,
-                    contract["token"],
-                    from_time,
-                    to_time,
-                    kite_interval,
-                )
-            except Exception as e:
-                print(f"Previous session candle fetch error for {contract['token']} {kite_interval}: {e}")
-                continue
-            if not candles:
-                continue
-
-            # H/L/C derived from the anchor window candles for this interval.
-            high = max(float(c.get("high", 0) or 0) for c in candles)
-            low = min(float(c.get("low", 0) or 0) for c in candles)
-            prev_close = float(candles[-1].get("close", 0) or 0)
-            if high <= 0 or low <= 0 or prev_close <= 0:
-                continue
-
-            # Calculate Classic Floor Pivot R3: R3 = High + 2 * (Pivot - Low)
-            # This matches most standard charting platforms and is more reachable than PP + 2*(H-L).
-            pivot = (high + low + prev_close) / 3
-            r3 = high + (2 * (pivot - low))
-            
-            close_diff_pct = ((prev_close - r3) / r3) * 100 if r3 else 0
-            diff_pct = ((ltp - r3) / r3) * 100
-            matched.append(
-                {
-                    "label": label,
-                    "r3": r3,
-                    "diff_pct": diff_pct,
-                    "prev_close": prev_close,
-                    "close_diff_pct": close_diff_pct,
-                }
-            )
-
-            if abs(diff_pct) <= R3_PIVOT_RANGE_PCT and ltp <= r3:
-                alert_key = f"R3_NEAR:{symbol}:{label}:{now_ist.date().isoformat()}"
-                if alert_key not in r3_alert_store:
-                    r3_alert_store[alert_key] = now_ist
-                    near_rows.append(
-                        {
-                            "name": contract["name"],
-                            "month_label": contract["month_label"],
-                            "symbol": symbol,
-                            "ltp": ltp,
-                            "label": label,
-                            "r3": r3,
-                            "diff_pct": diff_pct,
-                            "prev_close": prev_close,
-                            "close_diff_pct": close_diff_pct,
-                        }
-                    )
-
-            if ltp > r3:
-                alert_key = f"R3_ABOVE:{symbol}:{label}:{now_ist.date().isoformat()}"
-                if alert_key not in r3_alert_store:
-                    r3_alert_store[alert_key] = now_ist
-                    breakout_rows.append(
-                        {
-                            "name": contract["name"],
-                            "month_label": contract["month_label"],
-                            "symbol": symbol,
-                            "ltp": ltp,
-                            "label": label,
-                            "r3": r3,
-                            "diff_pct": diff_pct,
-                            "prev_close": prev_close,
-                            "close_diff_pct": close_diff_pct,
-                        }
-                    )
-
-        if matched:
-            watch_rows.append(
-                {
-                    "name": contract["name"],
-                    "month_label": contract["month_label"],
-                    "symbol": symbol,
-                    "ltp": ltp,
-                    "matches": matched,
-                }
-            )
-
-    if not watch_rows and not near_rows and not breakout_rows:
-        return []
-
-    alerts = []
-
-    if near_rows:
-        body_lines = [
-            f"{item['name']} {item['month_label']} FUT: Fut {item['ltp']:.2f} | {item['label']} R3 {item['r3']:.2f} "
-            f"| Near {item['diff_pct']:+.2f}% | Prev Close {item['prev_close']:.2f} "
-            f"({item['close_diff_pct']:+.2f}%)"
-            for item in near_rows
-        ]
-        for i in range(0, len(body_lines), 20):
-            chunk = "\n".join(body_lines[i:i + 20])
-            report_month = near_rows[i]["month_label"]
-            alerts.append(f"{report_month} FUTURE R3 NEAR ALERT\n\n{chunk}\n\nTIME: {now_ist.strftime('%H:%M:%S')} IST")
-
-    if breakout_rows:
-        body_lines = [
-            f"{item['name']} {item['month_label']} FUT: Fut {item['ltp']:.2f} | {item['label']} R3 {item['r3']:.2f} "
-            f"| Above {item['diff_pct']:+.2f}% | Prev Close {item['prev_close']:.2f} "
-            f"({item['close_diff_pct']:+.2f}%)"
-            for item in breakout_rows
-        ]
-        for i in range(0, len(body_lines), 20):
-            chunk = "\n".join(body_lines[i:i + 20])
-            report_month = breakout_rows[i]["month_label"]
-            alerts.append(f"{report_month} FUTURE R3 BREAKOUT ALERT\n\n{chunk}\n\nTIME: {now_ist.strftime('%H:%M:%S')} IST")
-
-    reminder_seconds = (
-        R3_PIVOT_CLOSE_REMINDER_SECONDS
-        if now_ist.time() >= R3_PIVOT_CLOSE_REMINDER_START_TIME
-        else R3_PIVOT_REMINDER_SECONDS
-    )
-    reminder_due = (
-        SEND_R3_WATCHLIST
-        and watch_rows
-        and (
-            r3_watch_last_sent_time is None
-            or (now_ist - r3_watch_last_sent_time).total_seconds() >= reminder_seconds
-        )
-    )
-
-    if reminder_due:
-        r3_watch_last_sent_time = now_ist
-        body_lines = []
-        for item in watch_rows:
-            pivot_text = ", ".join(
-                f"{match['label']} R3 {match['r3']:.2f} | Fut {match['diff_pct']:+.2f}% vs R3 "
-                f"| Prev Close {match['prev_close']:.2f} ({match['close_diff_pct']:+.2f}%)"
-                for match in item["matches"]
-            )
-            body_lines.append(f"{item['name']} {item['month_label']} FUT: Fut {item['ltp']:.2f} | {pivot_text}")
-
-        for i in range(0, len(body_lines), 20):
-            chunk = "\n".join(body_lines[i:i + 20])
-            report_month = watch_rows[i]["month_label"]
-            alerts.append(f"{report_month} FUTURE R3 WATCHLIST\n\n{chunk}\n\nTIME: {now_ist.strftime('%H:%M:%S')} IST")
-
-    return alerts
-
-
 def build_stock_future_1hr_s4_alerts(kite):
     global s4_last_slot
 
@@ -2623,358 +2590,97 @@ def build_weekly_born_breakout_alerts(kite):
     return alerts
 
 
-def process_volume_burst_logic(key, name, symbol, ltp, volume, lot_size, is_option, option_type, expiry_text, u_ltp, alerts_list, stats=None):
-    if not lot_size:
-        return
-
-    now = datetime.now(IST)
-    current_minute = now.minute
-
-    # Update stats for telemetry/monitoring
-    if stats is not None:
-        if is_option:
-            stats["option_quotes"] = stats.get("option_quotes", 0) + 1
-            if volume > 0:
-                stats["option_oi_quotes"] = stats.get("option_oi_quotes", 0) + 1
-        else:
-            stats["future_quotes"] = stats.get("future_quotes", 0) + 1
-            if volume > 0:
-                stats["future_oi_quotes"] = stats.get("future_oi_quotes", 0) + 1
-
-    # Determine parameter values based on underlying
-    is_banknifty = (name == "BANKNIFTY")
-    is_stock = (name in STOCK_BURST_NAMES)
-    use_new_logic = is_banknifty or is_stock
-
-    if use_new_logic:
-        interval_minutes = 5
-        threshold = 5000 if is_banknifty else 2000
-        current_interval = (now.hour * 60 + now.minute) // interval_minutes
-        interval_type = f"{interval_minutes}min"
-
-        # Initialize store for this contract key if not exists or type mismatch
-        if key not in volume_burst_store or volume_burst_store[key].get("interval_type") != interval_type:
-            volume_burst_store[key] = {
-                "interval_type": interval_type,
-                "start_interval": current_interval,
-                "start_price": ltp,
-                "start_volume": volume,
-                "last_seen_price": ltp,
-                "last_seen_volume": volume,
-                "candle_high": ltp,
-                "candle_low": ltp,
-                "active_watch": None
-            }
-
-        state = volume_burst_store[key]
-
-        # Update high/low and last seen values for the current candle
-        if ltp > 0:
-            if state.get("candle_high", 0) <= 0:
-                state["candle_high"] = ltp
-            else:
-                state["candle_high"] = max(state["candle_high"], ltp)
-
-            if state.get("candle_low", 0) <= 0:
-                state["candle_low"] = ltp
-            else:
-                state["candle_low"] = min(state["candle_low"], ltp)
-
-            state["last_seen_price"] = ltp
-        if volume > 0:
-            state["last_seen_volume"] = volume
-
-        # Check if the interval has rolled over
-        if current_interval != state["start_interval"]:
-            # Completed candle calculations
-            completed_start_price = state["start_price"]
-            completed_close_price = state["last_seen_price"]
-            completed_high = state["candle_high"]
-            completed_low = state["candle_low"]
-            completed_start_volume = state["start_volume"]
-            completed_close_volume = state["last_seen_volume"]
-            completed_interval = state["start_interval"]
-
-            delta_volume = completed_close_volume - completed_start_volume
-            completed_lots = int(delta_volume / lot_size) if delta_volume > 0 else 0
-
-            # Telemetry stats update
-            if stats is not None:
-                if is_option:
-                    stats["max_option_tick_lots"] = max(stats.get("max_option_tick_lots", 0), completed_lots)
-                else:
-                    stats["max_future_tick_lots"] = max(stats.get("max_future_tick_lots", 0), completed_lots)
-
-            # --- Check active watch (Candle 2 completion check) ---
-            if state["active_watch"] is not None and not state["active_watch"]["candle_2_checked"]:
-                watch = state["active_watch"]
-                candle_1_high = watch["candle_1_high"]
-                candle_1_low = watch["candle_1_low"]
-
-                trigger = False
-                if completed_close_price > candle_1_high:
-                    p_icon = "▲"
-                    if is_option:
-                        is_call = option_type == "CE"
-                        action = "CALL BUY 🔵" if is_call else "PUT WRITER ✍️"
-                    else:
-                        action = "FUTURE BUY (LONG) 📈"
-                    trigger = True
-                elif completed_close_price < candle_1_low:
-                    p_icon = "▼"
-                    if is_option:
-                        is_call = option_type == "CE"
-                        action = "CALL WRITER ✍️" if is_call else "PUT BUY 🔴"
-                    else:
-                        action = "FUTURE SELL (SHORT) 📉"
-                    trigger = True
-
-                if trigger:
-                    strength = get_strength_label(watch["burst_lots"], name)
-                    expiry_line = f"EXPIRY: {expiry_text}\n" if expiry_text else ""
-                    future_price_line = f"FUTURE PRICE: {u_ltp:.2f}\n" if is_option else f"FUTURE PRICE: {completed_close_price:.2f}\n"
-
-                    alert_text = (
-                        f"{strength}\n🚨 {action}\nSymbol: {symbol}\n"
-                        f"{expiry_line}"
-                        f"━━━━━━━━━━━━━━━\n"
-                        f"LOTS: {watch['burst_lots']}\nPRICE: {completed_close_price:.2f} ({p_icon})\n{future_price_line}"
-                        f"━━━━━━━━━━━━━━━\n"
-                        f"START VOLUME: {watch['candle_1_start_volume']:,}\nVOLUME DELTA: +{watch['candle_1_volume_delta']:,}\nEND VOLUME  : {watch['candle_1_end_volume']:,}\n"
-                        f"TIME: {watch['time_str']}"
-                    )
-
-                    alert_key = f"VOL_BURST:{name}:{symbol}:{watch['candle_1_start_volume']}:{watch['candle_1_high']}"
-                    if not _burst_alert_recent(alert_key):
-                        alerts_list.append(alert_text)
-
-                    state["active_watch"] = None # Clear watch
-                else:
-                    # Candle 2 closed inside the range. Check volume condition.
-                    if completed_lots >= threshold:
-                        # Candle 2 is ALSO a burst candle. Skip previous.
-                        state["active_watch"] = None
-                    else:
-                        # Valid setup: Candle 1 was burst, Candle 2 cooled off and closed inside.
-                        watch["candle_2_checked"] = True
-
-            # --- Check if Candle 1 itself is a new burst setup (Lots >= threshold) ---
-            if completed_lots >= threshold:
-                burst_start_time = now - timedelta(minutes=interval_minutes)
-                start_hm = burst_start_time.strftime("%H:%M")
-                end_hm = now.strftime("%H:%M")
-                time_str = f"{now.strftime('%H:%M:%S')} IST ({start_hm}-{end_hm})"
-
-                state["active_watch"] = {
-                    "burst_lots": completed_lots,
-                    "candle_1_high": completed_high,
-                    "candle_1_low": completed_low,
-                    "candle_1_start_volume": completed_start_volume,
-                    "candle_1_volume_delta": delta_volume,
-                    "candle_1_end_volume": completed_close_volume,
-                    "watch_start_interval": completed_interval,
-                    "time_str": time_str,
-                    "candle_2_checked": False
-                }
-
-            # Reset starting state for the new interval
-            state["start_interval"] = current_interval
-            state["start_price"] = ltp
-            state["start_volume"] = volume
-            state["candle_high"] = ltp
-            state["candle_low"] = ltp
-
-        # --- Live Tick Cross Check for Candles 3 to 5 ---
-        if state["active_watch"] is not None and state["active_watch"]["candle_2_checked"]:
-            watch = state["active_watch"]
-            intervals_elapsed = current_interval - watch["watch_start_interval"]
-
-            # Candles 3 to 5 check
-            if 2 <= intervals_elapsed <= 4:
-                candle_1_high = watch["candle_1_high"]
-                candle_1_low = watch["candle_1_low"]
-
-                trigger = False
-                if ltp > candle_1_high:
-                    p_icon = "▲"
-                    if is_option:
-                        is_call = option_type == "CE"
-                        action = "CALL BUY 🔵" if is_call else "PUT WRITER ✍️"
-                    else:
-                        action = "FUTURE BUY (LONG) 📈"
-                    trigger = True
-                elif ltp < candle_1_low:
-                    p_icon = "▼"
-                    if is_option:
-                        is_call = option_type == "CE"
-                        action = "CALL WRITER ✍️" if is_call else "PUT BUY 🔴"
-                    else:
-                        action = "FUTURE SELL (SHORT) 📉"
-                    trigger = True
-
-                if trigger:
-                    strength = get_strength_label(watch["burst_lots"], name)
-                    expiry_line = f"EXPIRY: {expiry_text}\n" if expiry_text else ""
-                    future_price_line = f"FUTURE PRICE: {u_ltp:.2f}\n" if is_option else f"FUTURE PRICE: {ltp:.2f}\n"
-
-                    alert_text = (
-                        f"{strength}\n🚨 {action}\nSymbol: {symbol}\n"
-                        f"{expiry_line}"
-                        f"━━━━━━━━━━━━━━━\n"
-                        f"LOTS: {watch['burst_lots']}\nPRICE: {ltp:.2f} ({p_icon})\n{future_price_line}"
-                        f"━━━━━━━━━━━━━━━\n"
-                        f"START VOLUME: {watch['candle_1_start_volume']:,}\nVOLUME DELTA: +{watch['candle_1_volume_delta']:,}\nEND VOLUME  : {watch['candle_1_end_volume']:,}\n"
-                        f"TIME: {watch['time_str']}"
-                    )
-
-                    alert_key = f"VOL_BURST:{name}:{symbol}:{watch['candle_1_start_volume']}:{watch['candle_1_high']}"
-                    if not _burst_alert_recent(alert_key):
-                        alerts_list.append(alert_text)
-
-                    state["active_watch"] = None # Clear watch
-            elif intervals_elapsed > 4:
-                # We have completed Candle 5 without a trigger, invalidate the setup
-                state["active_watch"] = None
-
-    else:
-        # Existing 1-minute logic for MCX / other indices
-        if key not in volume_burst_store or volume_burst_store[key].get("interval_type") == "5min":
-            volume_burst_store[key] = {
-                "interval_type": "1min",
-                "start_minute": current_minute,
-                "start_price": ltp,
-                "start_volume": volume,
-                "last_seen_price": ltp,
-                "last_seen_volume": volume,
-                "active_watch": None
-            }
-
-        state = volume_burst_store[key]
-
-        # Check if a minute has rolled over
-        if current_minute != state["start_minute"]:
-            # The previous minute has completed!
-            minute_1_close_price = state["last_seen_price"]
-            minute_1_close_volume = state["last_seen_volume"]
-            minute_1_start_price = state["start_price"]
-            minute_1_start_volume = state["start_volume"]
-
-            # Calculate Minute 1 details
-            delta_volume_1 = minute_1_close_volume - minute_1_start_volume
-            lots_1 = int(delta_volume_1 / lot_size) if delta_volume_1 > 0 else 0
-            threshold = 1000 if name == "BANKNIFTY" else 150
-
-            # Update monitoring stats
-            if stats is not None:
-                if is_option:
-                    stats["max_option_tick_lots"] = max(stats.get("max_option_tick_lots", 0), lots_1)
-                else:
-                    stats["max_future_tick_lots"] = max(stats.get("max_future_tick_lots", 0), lots_1)
-
-            # Handle active watch first if we had a burst in the previous minute (Minute 2 completion check)
-            if state["active_watch"] is not None:
-                watch = state["active_watch"]
-                # Minute 2 has completed!
-                minute_2_close_price = minute_1_close_price
-                minute_2_open_price = watch["watch_open_price"] if watch["watch_open_price"] is not None else watch["burst_end_price"]
-
-                p_chg_2 = minute_2_close_price - minute_2_open_price
-                p_icon = "▲" if p_chg_2 >= 0 else "▼"
-
-                if is_option:
-                    is_call = option_type == "CE"
-                    if p_chg_2 >= 0:
-                        action = "CALL BUY 🔵" if is_call else "PUT WRITER ✍️"
-                    else:
-                        action = "CALL WRITER ✍️" if is_call else "PUT BUY 🔴"
-                else:
-                    action = "FUTURE BUY (LONG) 📈" if p_chg_2 >= 0 else "FUTURE SELL (SHORT) 📉"
-
-                strength = get_strength_label(watch["burst_lots"], name)
-
-                # Format Alert
-                expiry_line = f"EXPIRY: {expiry_text}\n" if expiry_text else ""
-                future_price_line = f"FUTURE PRICE: {u_ltp:.2f}\n" if is_option else f"FUTURE PRICE: {minute_2_close_price:.2f}\n"
-
-                alert_text = (
-                    f"{strength}\n🚨 {action}\nSymbol: {symbol}\n"
-                    f"{expiry_line}"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"LOTS: {watch['burst_lots']}\nPRICE: {minute_2_close_price:.2f} ({p_icon})\n{future_price_line}"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"START VOLUME: {watch['burst_start_volume']:,}\nVOLUME DELTA: +{watch['burst_volume_delta']:,}\nEND VOLUME  : {watch['burst_end_volume']:,}\n"
-                    f"TIME: {watch['burst_time']}" if 'burst_time' in watch else f"TIME: {watch['time_str']}"
-                )
-
-                alert_key = f"VOL_BURST:{name}:{symbol}:{watch['burst_start_volume']}:{watch['burst_start_price']}"
-                if not _burst_alert_recent(alert_key):
-                    alerts_list.append(alert_text)
-
-                # Clear watch
-                state["active_watch"] = None
-
-            # Check if Minute 1 itself is a new burst
-            if lots_1 >= threshold:
-                burst_time = now - timedelta(minutes=1)
-                time_str = burst_time.strftime("%H:%M:00")
-
-                state["active_watch"] = {
-                    "burst_lots": lots_1,
-                    "burst_start_price": minute_1_start_price,
-                    "burst_end_price": minute_1_close_price,
-                    "burst_start_volume": minute_1_start_volume,
-                    "burst_volume_delta": delta_volume_1,
-                    "burst_end_volume": minute_1_close_volume,
-                    "watch_minute": current_minute,
-                    "watch_open_price": None,
-                    "time_str": time_str
-                }
-
-            # Reset starting state for the new minute
-            state["start_minute"] = current_minute
-            state["start_price"] = ltp
-            state["start_volume"] = volume
-
-        # Update rolling values for the current minute
-        state["last_seen_price"] = ltp
-        state["last_seen_volume"] = volume
-
-        # If we are in the middle of Minute 2 (the watch minute), capture its open price on first tick
-        if state["active_watch"] is not None and state["active_watch"]["watch_open_price"] is None:
-            state["active_watch"]["watch_open_price"] = ltp
-
-
-def process_future_burst(symbol, name, ltp, oi, alerts_list, stats=None):
+def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=None):
     if not is_burst_underlying(name):
         return
 
     ltp = _normalize_burst_price(name, ltp)
+
+    threshold = get_future_burst_threshold(name)
     lot_size = get_future_lot_size(symbol)
     if not lot_size:
         _log_missing_lot_size_once(f"future:{symbol}", symbol)
         return
 
-    # Treat the 4th parameter (oi) as volume in the new logic
-    volume = oi
+    clean_symbol = symbol.split(":", 1)[1] if ":" in symbol else symbol
+    if direction_engine:
+        try:
+            direction_engine.process_tick(
+                symbol=clean_symbol,
+                ltp=ltp,
+                volume=oi,
+                instrument_data={"instrument_type": "FUT"}
+            )
+        except Exception as e:
+            print(f"Error in IV Engine (Future): {e}")
+
+    now = datetime.now(IST)
     key = f"FUT_{symbol}"
+    if key not in option_history:
+        option_history[key] = []
+    history = option_history[key]
+    prev_oi = history[-1]["oi"] if history else 0
+    prev_price = history[-1]["price"] if history else 0
 
-    process_volume_burst_logic(
-        key=key,
-        name=name,
-        symbol=symbol,
-        ltp=ltp,
-        volume=volume,
-        lot_size=lot_size,
-        is_option=False,
-        option_type=None,
-        expiry_text=get_future_expiry_text(symbol) if is_mcx_underlying(name) else "",
-        u_ltp=ltp,
-        alerts_list=alerts_list,
-        stats=stats
-    )
+    if stats is not None:
+        stats["future_quotes"] = stats.get("future_quotes", 0) + 1
+        if oi > 0:
+            stats["future_oi_quotes"] = stats.get("future_oi_quotes", 0) + 1
+
+    if prev_oi > 0:
+        tick_lots = int(abs(oi - prev_oi) / lot_size)
+        if stats is not None:
+            stats["max_future_tick_lots"] = max(
+                stats.get("max_future_tick_lots", 0),
+                tick_lots,
+            )
+        if tick_lots >= threshold and key not in active_watches:
+            active_watches[key] = {
+                "start_oi": prev_oi,
+                "start_price": prev_price,
+                "end_time": now + timedelta(seconds=60),
+                "symbol": symbol,
+                "name": name,
+                "lot_size": lot_size,
+                "expiry_text": get_future_expiry_text(symbol) if is_mcx_underlying(name) else "",
+            }
+
+    if key in active_watches:
+        watch = active_watches[key]
+        if now >= watch["end_time"]:
+            oi_chg = oi - watch["start_oi"]
+            p_chg = ltp - watch["start_price"]
+            final_lot_size = _normalize_lot_size(watch.get("lot_size")) or lot_size
+            final_lots = int(abs(oi_chg) / final_lot_size)
+            if final_lots >= threshold:
+                strength = get_strength_label(final_lots, watch["name"])
+                action = classify_action(watch["symbol"], oi_chg, p_chg)
+                p_icon = "▲" if p_chg >= 0 else "▼"
+                expiry_line = (
+                    f"EXPIRY: {watch['expiry_text']}\n"
+                    if watch.get("expiry_text")
+                    else ""
+                )
+                alert_text = (
+                    f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n"
+                    f"{expiry_line}"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"LOTS: {final_lots}\nPRICE: {ltp:.2f} ({p_icon})\nFUTURE PRICE: {ltp:.2f}\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"EXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {oi:,}\n"
+                    f"TIME: {now.strftime('%H:%M:%S')}"
+                )
+                alert_key = f"FUT:{name}:{watch['symbol']}:{watch['start_oi']}:{watch['start_price']}"
+                if not _burst_alert_recent(alert_key):
+                    alerts_list.append(alert_text)
+            del active_watches[key]
+
+    history.append({"time": now, "oi": oi, "price": ltp})
+    if len(history) > 20:
+        history.pop(0)
 
 
-def process_option_logic(name, underlying_data, option_quotes, alerts_list, stats=None):
+def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list, stats=None):
     if not is_burst_underlying(name):
         return
 
@@ -2982,6 +2688,7 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
     if opt_df.empty:
         return
 
+    now = datetime.now(IST)
     u_ltp = _normalize_burst_price(name, u_ltp)
     if DEBUG_BURST_STRIKES:
         try:
@@ -3008,9 +2715,11 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
             continue
         
         q = option_quotes[t_str]
+        curr_oi = q.get("oi", 0)
         volume = q.get("volume", 0)
         ltp = q.get("last_price", 0)
         ltp = float(ltp or 0)
+        threshold = get_option_burst_threshold_for_price(name, ltp)
         t_int = int(row["instrument_token"])
         option_type = str(row.get("instrument_type", "") or "").upper()
         if option_type not in {"CE", "PE"}:
@@ -3019,29 +2728,93 @@ def process_option_logic(name, underlying_data, option_quotes, alerts_list, stat
                 option_type = "CE"
             elif tradingsymbol.endswith("PE"):
                 option_type = "PE"
-        
-        expiry_text = (
-            row["expiry"].strftime("%d-%m-%Y")
-            if pd.notna(row.get("expiry"))
-            else "NA"
-        )
-        
-        process_volume_burst_logic(
-            key=t_int,
-            name=name,
-            symbol=row["tradingsymbol"],
-            ltp=ltp,
-            volume=volume,
-            lot_size=lot_size,
-            is_option=True,
-            option_type=option_type,
-            expiry_text=expiry_text,
-            u_ltp=u_ltp,
-            alerts_list=alerts_list,
-            stats=stats
-        )
 
+        if direction_engine:
+            try:
+                direction_engine.process_tick(
+                    symbol=row["tradingsymbol"],
+                    ltp=ltp,
+                    volume=volume,
+                    instrument_data={
+                        "instrument_type": option_type,
+                        "strike": float(row["strike"]),
+                        "expiry": row["expiry"],
+                        "u_ltp": u_ltp
+                    }
+                )
+            except Exception as e:
+                print(f"Error in IV Engine (Option): {e}")
 
+        if stats is not None:
+            stats["option_quotes"] = stats.get("option_quotes", 0) + 1
+            if curr_oi > 0:
+                stats["option_oi_quotes"] = stats.get("option_oi_quotes", 0) + 1
+
+        if t_int not in day_open_oi_store:
+            day_open_oi_store[t_int] = curr_oi
+
+        if t_int not in option_history:
+            option_history[t_int] = []
+        history = option_history[t_int]
+        prev_oi = history[-1]["oi"] if history else 0
+        prev_price = history[-1]["price"] if history else 0
+
+        if prev_oi > 0:
+            tick_lots = int(abs(curr_oi - prev_oi) / lot_size)
+            if stats is not None:
+                stats["max_option_tick_lots"] = max(
+                    stats.get("max_option_tick_lots", 0),
+                    tick_lots,
+                )
+            if tick_lots >= threshold and t_int not in active_watches:
+                expiry_text = (
+                    row["expiry"].strftime("%d-%m-%Y")
+                    if pd.notna(row.get("expiry"))
+                    else "NA"
+                )
+                active_watches[t_int] = {
+                    "start_oi": prev_oi,
+                    "start_price": prev_price,
+                    "end_time": now + timedelta(seconds=60),
+                    "symbol": row["tradingsymbol"],
+                    "underlying": name,
+                    "lot_size": lot_size,
+                    "expiry_text": expiry_text,
+                }
+
+        if t_int in active_watches:
+            watch = active_watches[t_int]
+            if now >= watch["end_time"]:
+                oi_chg = curr_oi - watch["start_oi"]
+                p_chg = ltp - watch["start_price"]
+                final_lot_size = _normalize_lot_size(watch.get("lot_size")) or lot_size
+                final_lots = int(abs(oi_chg) / final_lot_size)
+                action = classify_action(watch["symbol"], oi_chg, p_chg)
+                if "WRITER" in action:
+                    final_threshold = 100
+                else:
+                    final_threshold = 500
+                    
+                if final_lots >= final_threshold:
+                    strength = get_strength_label(final_lots, watch["underlying"])
+                    p_icon = "▲" if p_chg >= 0 else "▼"
+                    alert_text = (
+                        f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n"
+                        f"EXPIRY: {watch.get('expiry_text', 'NA')}\n"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"LOTS: {final_lots}\nPRICE: {ltp:.2f} ({p_icon})\nFUTURE PRICE: {u_ltp:.2f}\n"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"EXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {curr_oi:,}\n"
+                        f"TIME: {now.strftime('%H:%M:%S')}"
+                    )
+                    alert_key = f"OPT:{name}:{t_int}:{watch['start_oi']}:{watch['start_price']}"
+                    if not _burst_alert_recent(alert_key):
+                        alerts_list.append(alert_text)
+                del active_watches[t_int]
+
+        history.append({"time": now, "oi": curr_oi, "price": ltp})
+        if len(history) > 20:
+            history.pop(0)
 
 
 def _map_tracked_futures_by_name(fut_symbols, names=None):
@@ -3195,8 +2968,9 @@ def calculate_burst_alerts(kite):
         volume = d.get("volume", 0)
         target_alerts = bn_alerts if is_index_underlying(name) else stock_alerts
 
-        process_future_burst(sym, name, ltp, volume, target_alerts, stats=stats)
+        process_future_burst(kite, d['instrument_token'], sym, name, ltp, volume, target_alerts, stats=stats)
         process_option_logic(
+            kite,
             name,
             underlying_map.get(name, (pd.DataFrame(), 0)),
             opt_quotes,
@@ -3232,16 +3006,19 @@ def calculate_gap_alerts(kite, batch_index=0, max_quote_symbols=500):
 
 def calculate_historical_alerts(kite):
     alerts = []
-    alerts.extend(calculate_first_30m_alerts(kite))
+    alerts.extend(calculate_first_60m_alerts(kite))
     alerts.extend(calculate_other_historical_alerts(kite))
     return alerts
 
 
-def calculate_first_30m_alerts(kite):
+def calculate_first_60m_alerts(kite):
     if non_burst_alerts_paused_today():
         return []
 
-    return build_first_30m_future_volume_mismatch_alerts(kite)
+    alerts = []
+    alerts.extend(build_first_5m_future_volume_mismatch_alerts(kite))
+    alerts.extend(build_first_60m_future_volume_mismatch_alerts(kite))
+    return alerts
 
 
 def calculate_other_historical_alerts(kite):
@@ -3302,8 +3079,8 @@ def calculate_heatmap(kite):
         volume = d.get("volume", 0)
         target_alerts = bn_alerts if is_index_underlying(name) else stock_alerts
 
-        process_future_burst(sym, name, ltp, volume, target_alerts)
-        process_option_logic(name, underlying_map.get(name, (pd.DataFrame(), 0)), opt_quotes, target_alerts)
+        process_future_burst(kite, d['instrument_token'], sym, name, ltp, volume, target_alerts)
+        process_option_logic(kite, name, underlying_map.get(name, (pd.DataFrame(), 0)), opt_quotes, target_alerts)
 
     if non_burst_alerts_paused_today():
         return 0, "", bn_alerts, stock_alerts, []
@@ -3312,418 +3089,6 @@ def calculate_heatmap(kite):
     gap_alerts.extend(build_stock_future_1hr_s4_alerts(kite))
     gap_alerts.extend(build_weekly_born_breakout_alerts(kite))
     return 0, "", bn_alerts, stock_alerts, gap_alerts
-
-
-# ==============================================================================
-# HOURLY DOJI VOLUME BREAKOUT SCANNER (OPTION-SPECIFIC)
-# ==============================================================================
-
-DOJI_WATCHLIST = [
-    "NIFTY", "BANKNIFTY",
-    "HDFCBANK", "ICICIBANK", "RELIANCE", "BHARTIARTL", "LT",
-    "SBIN", "INFY", "AXISBANK", "TCS", "ITC", "M&M",
-    "HINDUNILVR", "TATAMOTORS", "KOTAKBANK", "BAJFINANCE"
-]
-
-_active_doji_breakouts = {}     # token -> dict with doji details
-_doji_triggered_alerts = set()  # (token, doji_timestamp_str)
-_last_doji_scan_hour = -1       # Keeps track of the last scanned hour to run once per hour
-
-
-def get_doji_watchlist_options(kite):
-    """Resolves and returns a list of NFO option instrument tokens to subscribe to.
-    For Nifty, Bank Nifty, and the top 15 stocks, this fetches the 3 closest ITM CE
-    and 3 closest ITM PE option contracts.
-    """
-    from websocket_flow import get_symbol_quotes
-    tokens = set()
-    symbol_to_name = {}
-    symbols_to_query = []
-
-    for name in DOJI_WATCHLIST:
-        if name in {"NIFTY", "BANKNIFTY"}:
-            sym = "NSE:NIFTY 50" if name == "NIFTY" else "NSE:NIFTY BANK"
-        else:
-            sym = get_active_future(name)
-        if sym:
-            symbol_to_name[sym] = name
-            symbols_to_query.append(sym)
-
-    ltps = {}
-    cached = get_symbol_quotes(symbols_to_query)
-    for sym in symbols_to_query:
-        if sym in cached:
-            ltps[symbol_to_name[sym]] = cached[sym].get("last_price", 0.0)
-
-    missing = [sym for sym in symbols_to_query if symbol_to_name[sym] not in ltps]
-    if missing:
-        try:
-            quotes = kite_quote(kite, missing)
-            for sym, q in quotes.items():
-                ltps[symbol_to_name[sym]] = q.get("last_price", 0.0)
-        except Exception as e:
-            print(f"Error fetching quotes for Doji options bootstrap: {e}")
-
-    options_df = load_options_data()
-    if options_df is None or options_df.empty:
-        return []
-
-    for name in DOJI_WATCHLIST:
-        ltp = ltps.get(name, 0.0)
-        if ltp <= 0:
-            continue
-
-        underlying_options = options_df[options_df["name"] == name]
-        if underlying_options.empty:
-            continue
-
-        expiry = get_monthly_expiry(underlying_options["expiry"].unique())
-        if expiry is None:
-            continue
-
-        expiry_opts = underlying_options[underlying_options["expiry"] == expiry].copy()
-        if expiry_opts.empty:
-            continue
-
-        strikes = sorted(expiry_opts["strike"].unique())
-        if not strikes:
-            continue
-
-        atm = min(strikes, key=lambda x: abs(x - ltp))
-        idx = strikes.index(atm)
-
-        # 5 ITM CE (strikes below ATM)
-        itm_ce_strikes = strikes[max(0, idx - 5):idx]
-        # 5 ITM PE (strikes above ATM)
-        itm_pe_strikes = strikes[idx + 1:min(len(strikes), idx + 6)]
-
-        selected_opts = expiry_opts[
-            (expiry_opts["strike"].isin(itm_ce_strikes) & expiry_opts["instrument_type"].isin(["CE", "CALL"])) |
-            (expiry_opts["strike"].isin(itm_pe_strikes) & expiry_opts["instrument_type"].isin(["PE", "PUT"]))
-        ]
-
-        for _, row in selected_opts.iterrows():
-            tokens.add(int(row["instrument_token"]))
-
-    return list(tokens)
-
-
-def get_option_prev_day_max_hourly_volume(kite, token, start_date):
-    """Walks backward to find the first previous trading day containing hourly candles,
-    and returns the maximum hourly volume recorded on that day.
-    """
-    if hasattr(start_date, "date"):
-        start_date = start_date.date()
-
-    # Convert start_date into a datetime object for _get_previous_trading_day
-    ref_dt = datetime.combine(start_date, datetime.min.time(), tzinfo=IST)
-    ref_day = _get_previous_trading_day(ref_dt)
-
-    for _ in range(5):  # check up to 5 trading days back
-        from_time = datetime.combine(ref_day, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
-        to_time = datetime.combine(ref_day, datetime.strptime("15:30", "%H:%M").time(), tzinfo=IST)
-        try:
-            candles = get_historical_data_cached(kite, token, from_time, to_time, "60minute")
-            if candles:
-                return max(int(candle.get("volume", 0) or 0) for candle in candles)
-        except Exception as e:
-            print(f"Error getting prev day max hourly volume for token {token} on {ref_day}: {e}")
-        
-        # Go back another day if empty
-        ref_dt = datetime.combine(ref_day, datetime.min.time(), tzinfo=IST)
-        ref_day = _get_previous_trading_day(ref_dt)
-    return 0
-
-
-def get_recent_candles(kite, token, now_ist, num_trading_days=4):
-    """Fetches hourly candles going back by num_trading_days to construct a continuous timeline."""
-    day = now_ist.date()
-    trading_days_found = 0
-    while trading_days_found < num_trading_days:
-        day -= timedelta(days=1)
-        if day.weekday() <= 4:
-            trading_days_found += 1
-
-    from_time = datetime.combine(day, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
-    to_time = now_ist
-    try:
-        return get_historical_data_cached(kite, token, from_time, to_time, "60minute")
-    except Exception as e:
-        print(f"Error fetching recent candles for token {token}: {e}")
-    return []
-
-
-def check_hourly_doji_patterns(kite):
-    """Background Hourly candle pattern checks. Scans selected ITM options,
-    detects (Red x N >= 2 -> Hammer/Doji/Rejection) reversal setups, validates
-    volumes against previous day, and populates the live watch list.
-    """
-    global _active_doji_breakouts
-    
-    tokens_to_scan = []
-    token_metadata = {}
-
-    try:
-        options_df = load_options_data()
-        if options_df is None or options_df.empty:
-            return
-
-        from websocket_flow import get_symbol_quotes
-        symbol_to_name = {}
-        symbols_to_query = []
-        for name in DOJI_WATCHLIST:
-            if name in {"NIFTY", "BANKNIFTY"}:
-                sym = "NSE:NIFTY 50" if name == "NIFTY" else "NSE:NIFTY BANK"
-            else:
-                sym = get_active_future(name)
-            if sym:
-                symbol_to_name[sym] = name
-                symbols_to_query.append(sym)
-
-        ltps = {}
-        cached = get_symbol_quotes(symbols_to_query)
-        for sym in symbols_to_query:
-            if sym in cached:
-                ltps[symbol_to_name[sym]] = cached[sym].get("last_price", 0.0)
-
-        missing = [sym for sym in symbols_to_query if symbol_to_name[sym] not in ltps]
-        if missing:
-            quotes = kite_quote(kite, missing)
-            for sym, q in quotes.items():
-                ltps[symbol_to_name[sym]] = q.get("last_price", 0.0)
-
-        for name in DOJI_WATCHLIST:
-            ltp = ltps.get(name, 0.0)
-            if ltp <= 0:
-                continue
-
-            underlying_options = options_df[options_df["name"] == name]
-            if underlying_options.empty:
-                continue
-
-            expiry = get_monthly_expiry(underlying_options["expiry"].unique())
-            if expiry is None:
-                continue
-
-            expiry_opts = underlying_options[underlying_options["expiry"] == expiry]
-            if expiry_opts.empty:
-                continue
-
-            strikes = sorted(expiry_opts["strike"].unique())
-            if not strikes:
-                continue
-
-            atm = min(strikes, key=lambda x: abs(x - ltp))
-            idx = strikes.index(atm)
-
-            itm_ce_strikes = strikes[max(0, idx - 5):idx]
-            itm_pe_strikes = strikes[idx + 1:min(len(strikes), idx + 6)]
-
-            selected_opts = expiry_opts[
-                (expiry_opts["strike"].isin(itm_ce_strikes) & expiry_opts["instrument_type"].isin(["CE", "CALL"])) |
-                (expiry_opts["strike"].isin(itm_pe_strikes) & expiry_opts["instrument_type"].isin(["PE", "PUT"]))
-            ]
-
-            for _, row in selected_opts.iterrows():
-                token = int(row["instrument_token"])
-                tokens_to_scan.append(token)
-                token_metadata[token] = {
-                    "symbol": f"NFO:{row['tradingsymbol']}",
-                    "name": name,
-                    "type": "ITM CE" if row["strike"] < atm else "ITM PE"
-                }
-    except Exception as e:
-        print(f"Error in hourly doji scan bootstrap: {e}")
-        return
-
-    print(f"Running hourly Doji scan on {len(tokens_to_scan)} option contracts...")
-    
-    now_ist = datetime.now(IST)
-    new_breakouts = {}
-
-    for token in tokens_to_scan:
-        meta = token_metadata[token]
-        candles = get_recent_candles(kite, token, now_ist)
-        if len(candles) < 4:
-            continue
-
-        # The last fully closed candle is candles[-2] (candles[-1] is active/live)
-        doji_candle = candles[-2]
-        
-        doji_open = float(doji_candle.get("open", 0) or 0)
-        doji_close = float(doji_candle.get("close", 0) or 0)
-        doji_high = float(doji_candle.get("high", 0) or 0)
-        doji_low = float(doji_candle.get("low", 0) or 0)
-        doji_vol = int(doji_candle.get("volume", 0) or 0)
-        doji_time = doji_candle.get("date")
-
-        body = abs(doji_close - doji_open)
-        c_range = doji_high - doji_low
-        if c_range <= 0:
-            continue
-
-        lower_wick = min(doji_open, doji_close) - doji_low
-        upper_wick = doji_high - max(doji_open, doji_close)
-
-        # Doji: tiny body (≤ 10% of range)
-        is_doji = body <= c_range * 0.1
-        # Hammer: small body (≤ 40% range), lower wick ≥ 2x body AND ≥ 50% of range
-        is_hammer = (body <= c_range * 0.4) and (lower_wick >= body * 2) and (lower_wick >= c_range * 0.5)
-        # Rejection: long lower wick (≥ 60% of range) showing rejection of lows
-        is_rejection = (lower_wick >= c_range * 0.6) and (upper_wick <= c_range * 0.2)
-
-        if is_doji:
-            candle_type = "DOJI"
-        elif is_hammer:
-            candle_type = "HAMMER"
-        elif is_rejection:
-            candle_type = "REJECTION"
-        else:
-            continue
-
-        # Count consecutive LOWER-CLOSE red candles before the reversal candle
-        # Each older candle must close HIGHER than the newer one (downtrend structure)
-        red_count  = 0
-        red_closes = []   # stores closes newest-first (reverse chronological)
-        idx = len(candles) - 3
-        while idx >= 0:
-            c       = candles[idx]
-            c_open  = float(c.get("open",  0) or 0)
-            c_close = float(c.get("close", 0) or 0)
-            if c_close >= c_open:                          # not a red candle
-                break
-            # Lower-close check: older candle must close HIGHER than newer red
-            if red_closes and c_close <= red_closes[-1]:
-                break                                      # not a consecutive lower close
-            red_closes.append(c_close)
-            red_count += 1
-            idx -= 1
-
-        if red_count < 2:
-            continue
-
-        # All pattern candles (including reversal candle and Red candles) must have volume > Prev Max
-        volumes = [int(candles[len(candles) - 2 - i].get("volume", 0) or 0) for i in range(red_count + 1)]
-        first_red_idx = len(candles) - 2 - red_count
-        first_red_date = candles[first_red_idx].get("date")
-        if not first_red_date:
-            continue
-
-        max_hourly_vol = get_option_prev_day_max_hourly_volume(kite, token, first_red_date)
-        if max_hourly_vol <= 0:
-            continue
-
-        # Verify that all pattern candles are strictly higher than max_hourly_vol
-        all_vols_higher = True
-        for v in volumes:
-            if v <= max_hourly_vol:
-                all_vols_higher = False
-                break
-        if not all_vols_higher:
-            continue
-
-        # Avoid duplicates
-        trigger_key = (token, str(doji_time))
-        if trigger_key in _doji_triggered_alerts:
-            continue
-
-        new_breakouts[token] = {
-            "symbol": meta["symbol"],
-            "name": meta["name"],
-            "itm_type": meta["type"],
-            "doji_high": doji_high,
-            "doji_time": doji_time,
-            "candle_type": candle_type,  # DOJI / HAMMER / REJECTION
-            "volumes": volumes[::-1],    # [vol(Red 1), vol(Red 2), vol(Reversal)]
-            "prev_max_vol": max_hourly_vol,
-            "n_reds": red_count
-        }
-
-    _active_doji_breakouts = new_breakouts
-    print(f"Hourly Doji scan finished. Found {len(_active_doji_breakouts)} breakout candidates.")
-
-
-def check_doji_breakout_live_alerts(kite):
-    """1-Minute live check. Scans active breakout candidates and checks if
-    LTP exceeds Doji high. Triggers Telegram alerts on breach.
-    """
-    global _active_doji_breakouts, _doji_triggered_alerts
-    
-    if not _active_doji_breakouts:
-        return []
-
-    alerts = []
-    tokens = list(_active_doji_breakouts.keys())
-
-    from websocket_flow import get_token_quotes
-    token_str_list = [str(t) for t in tokens]
-    cached = get_token_quotes(token_str_list)
-
-    ltps = {}
-    for t in tokens:
-        t_str = str(t)
-        if t_str in cached:
-            ltps[t] = cached[t_str].get("last_price", 0.0)
-
-    missing_tokens = [t for t in tokens if t not in ltps]
-    if missing_tokens:
-        try:
-            symbols_to_query = [_active_doji_breakouts[t]["symbol"] for t in missing_tokens]
-            quotes = kite_quote(kite, symbols_to_query)
-            for t in missing_tokens:
-                sym = _active_doji_breakouts[t]["symbol"]
-                if sym in quotes:
-                    ltps[t] = quotes[sym].get("last_price", 0.0)
-        except Exception as e:
-            print(f"Error fetching live quotes for Doji check: {e}")
-
-    triggered_tokens = []
-    for token, info in _active_doji_breakouts.items():
-        ltp = ltps.get(token, 0.0)
-        if ltp <= 0:
-            continue
-
-        if ltp > info["doji_high"]:
-            vol_strs = []
-            for idx, vol in enumerate(info["volumes"]):
-                label = f"V{idx+1}" if idx < info["n_reds"] else "Doji"
-                vol_strs.append(f"{label}: {vol//1000}k")
-            vol_trend_str = ", ".join(vol_strs)
-
-            clean_opt_symbol = info["symbol"].split(":", 1)[1] if ":" in info["symbol"] else info["symbol"]
-            now_ist = datetime.now(IST)
-            
-            # Format:
-            # 🚨 OPTION HAMMER BREAKOUT:
-            # HDFCBANK26AUG1600CE (ITM CE)
-            # LTP: 48.60 🚀 (Crossed Hammer High: 46.20)
-            # Vol Trend: V1: 420k, V2: 510k, Hammer: 630k
-            # Prev Max: 180k
-            # Time: 11:18 IST
-            c_type = info.get("candle_type", "DOJI")
-            c_emoji = {"HAMMER": "🔨", "DOJI": "⚡", "REJECTION": "🔻"}.get(c_type, "⚡")
-            label = c_type.capitalize()
-            # Replace last vol label with candle type name
-            if vol_strs:
-                vol_strs[-1] = f"{label}: {info['volumes'][-1]//1000}k"
-            vol_trend_str = ", ".join(vol_strs)
-            alert_msg = (
-                f"🚨 OPTION {c_type} BREAKOUT: {c_emoji}\n"
-                f"  {clean_opt_symbol} ({info['itm_type']})\n"
-                f"  LTP: {ltp:.2f} 🚀 (Crossed {label} High: {info['doji_high']:.2f})\n"
-                f"  Vol Trend: {vol_trend_str}\n"
-                f"  Prev Max: {info['prev_max_vol']//1000}k\n"
-                f"  Time: {now_ist.strftime('%H:%M')} IST"
-            )
-            alerts.append(alert_msg)
-
-            _doji_triggered_alerts.add((token, str(info["doji_time"])))
-            triggered_tokens.append(token)
-
-    for token in triggered_tokens:
-        _active_doji_breakouts.pop(token, None)
-
-    return alerts
 
 
 
@@ -3971,7 +3336,7 @@ def check_exhaustion_reversal_30m(kite):
 def check_exhaustion_live_alerts(kite):
     """Live minute-by-minute check. Fires alert as soon as underlying LTP
     crosses the Reversal candle High - no need to wait for candle close.
-    Call this every minute alongside check_doji_breakout_live_alerts.
+    Call this every minute from the historical scanner loop.
     """
     global _exhaustion_active_watch
 
