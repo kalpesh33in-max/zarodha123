@@ -19,9 +19,13 @@ def _get_time_to_expiry_years(expiry_date):
         expiry = datetime.combine(expiry_date, datetime.min.time())
     else:
         expiry = expiry_date
-    if isinstance(expiry, datetime):
-        expiry = expiry.replace(hour=15, minute=30, second=0, microsecond=0)
-    diff = (expiry - now).total_seconds()
+    
+    # Target expiry time is 15:30 IST on the expiry day
+    expiry_target = expiry.replace(hour=15, minute=30, second=0, microsecond=0)
+    if expiry_target.tzinfo is None:
+        expiry_target = expiry_target.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        
+    diff = (expiry_target - now).total_seconds()
     return max(diff / (365 * 24 * 3600), 0.00001)
 
 # TARGETS
