@@ -125,6 +125,11 @@ def morning_task():
 
 def run_scheduler_loop():
     print("Background Scheduler Active.")
+    
+    if not os.path.exists("instruments.csv"):
+        print("instruments.csv missing on boot. Downloading now...")
+        update_instruments()
+        
     last_instrument_update_date = None
     update_time = datetime.strptime("08:30", "%H:%M").time()
 
