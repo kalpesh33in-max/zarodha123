@@ -36,7 +36,7 @@ def start_spot_volume_scanner():
         return
         
     try:
-        kite = KiteConnect(api_key=env_config.KITE_API_KEY)
+        kite = KiteConnect(api_key=env_config.API_KEY)
         kite.set_access_token(token)
     except Exception as e:
         print("Failed to initialize Kite for Spot Scanner:", e)
