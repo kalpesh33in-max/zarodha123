@@ -8,7 +8,7 @@ from kiteconnect import KiteTicker
 import threading
 
 # Import your existing credentials and functions
-from env_config import API_KEY, TELE_TOKEN_REPORTS, TELE_CHAT_ID_REPORTS
+from env_config import API_KEY, TELE_TOKEN, TELE_CHAT_ID
 from telegram_utils import send_telegram_message
 from iv_engine import calculate_iv
 
@@ -390,7 +390,7 @@ def start_pure_iv_scanner():
                     msg += f"```"
                     
                     print(f"Reporting per-minute IV for {name}")
-                    send_telegram_message(msg, chat_id=TELE_CHAT_ID_REPORTS, token=TELE_TOKEN_REPORTS)
+                    send_telegram_message(msg, chat_id=TELE_CHAT_ID, token=TELE_TOKEN)
 
     # Start reporter thread
     threading.Thread(target=reporting_loop, daemon=True).start()
