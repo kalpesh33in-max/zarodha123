@@ -5,6 +5,7 @@ from datetime import datetime
 import pandas as pd
 from zoneinfo import ZoneInfo
 from kiteconnect import KiteTicker
+from kite_rate_limiter import kite_quote
 
 # Set up local timezone
 IST = ZoneInfo("Asia/Kolkata")
@@ -343,7 +344,6 @@ def start_spot_volume_scanner():
                                     }
                                 
                                 try:
-                                    from kite_rate_limiter import kite_quote
                                     quotes = kite_quote(kite, symbols_to_quote)
                                     
                                     # Structure data by strike
