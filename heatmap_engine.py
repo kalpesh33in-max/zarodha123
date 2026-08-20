@@ -2793,7 +2793,7 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
                 if "WRITER" in action:
                     final_threshold = 100
                 else:
-                    final_threshold = 500
+                    final_threshold = 2000
                     
                 if final_lots >= final_threshold:
                     strength = get_strength_label(final_lots, watch["underlying"])

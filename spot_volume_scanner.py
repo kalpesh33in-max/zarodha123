@@ -28,11 +28,19 @@ def start_spot_volume_scanner():
     # Need API keys from env_config
     import env_config
     from heatmap_engine import STOCK_BURST_NAMES, INDEX_BURST_NAMES, MCX_BURST_NAMES
+    from kiteconnect import KiteConnect
     
     token = load_access_token()
     if not token:
         print("No access token found! Spot Volume Scanner cannot start.")
         return
+        
+    try:
+        kite = KiteConnect(api_key=env_config.KITE_API_KEY)
+        kite.set_access_token(token)
+    except Exception as e:
+        print("Failed to initialize Kite for Spot Scanner:", e)
+        kite = None
         
     df = load_instruments()
     if df.empty:
@@ -40,29 +48,46 @@ def start_spot_volume_scanner():
 
     # Prepare targets
     target_tokens = []
-    token_metadata = {}
+    symbol_metadata = {}
     
-    # 1. Stocks: We want the SPOT instrument, but the FUTURE lot size
+    # 1. Stocks: We want BOTH SPOT and FUTURE
     for name in STOCK_BURST_NAMES:
-        # Get Future to find lot size
         futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
         if futs.empty: continue
-        lot_size = int(futs.iloc[0].get("lot_size", 1))
+        futs = futs.sort_values(by="expiry")
+        fut = futs.iloc[0]
+        lot_size = int(fut.get("lot_size", 1))
+        fut_tkn = int(fut["instrument_token"])
+        target_tokens.append(fut_tkn)
         
-        # Get Spot instrument for price/volume
+        spot_tkn = None
         spots = df[(df["tradingsymbol"] == name) & (df["segment"] == "NSE")]
         if not spots.empty:
             spot = spots.iloc[0]
-            tkn = int(spot["instrument_token"])
-            target_tokens.append(tkn)
-            token_metadata[tkn] = {
-                "name": name,
-                "symbol": spot["tradingsymbol"],
-                "lot_size": lot_size,
-                "type": "SPOT"
-            }
+            spot_tkn = int(spot["instrument_token"])
+            target_tokens.append(spot_tkn)
             
-    # 2. Indices (BankNifty): We want the FUTURE instrument and FUTURE lot size
+        opts = df[(df["name"] == name) & (df["instrument_type"].isin(["CE", "PE"]))]
+        strike_step = 50
+        opts_df = pd.DataFrame()
+        if not opts.empty:
+            sample_strikes = sorted(opts["strike"].unique())
+            strike_step = sample_strikes[1] - sample_strikes[0] if len(sample_strikes) > 1 else 50
+            closest_expiry = opts["expiry"].min()
+            opts_df = opts[opts["expiry"] == closest_expiry]
+            
+        symbol_metadata[name] = {
+            "spot_tkn": spot_tkn,
+            "fut_tkn": fut_tkn,
+            "lot_size": lot_size,
+            "is_mcx": False,
+            "is_stock": True,
+            "symbol": fut["tradingsymbol"],
+            "strike_step": strike_step,
+            "opts_df": opts_df
+        }
+            
+    # 2. Indices (BankNifty): We want FUTURE only
     for name in INDEX_BURST_NAMES:
         futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
         if not futs.empty:
@@ -71,14 +96,27 @@ def start_spot_volume_scanner():
             lot_size = int(fut.get("lot_size", 1))
             tkn = int(fut["instrument_token"])
             target_tokens.append(tkn)
-            token_metadata[tkn] = {
-                "name": name,
-                "symbol": fut["tradingsymbol"],
+            opts = df[(df["name"] == name) & (df["instrument_type"].isin(["CE", "PE"]))]
+            strike_step = 50
+            opts_df = pd.DataFrame()
+            if not opts.empty:
+                sample_strikes = sorted(opts["strike"].unique())
+                strike_step = sample_strikes[1] - sample_strikes[0] if len(sample_strikes) > 1 else 50
+                closest_expiry = opts["expiry"].min()
+                opts_df = opts[opts["expiry"] == closest_expiry]
+                
+            symbol_metadata[name] = {
+                "spot_tkn": None,
+                "fut_tkn": tkn,
                 "lot_size": lot_size,
-                "type": "FUTURE"
+                "is_mcx": False,
+                "is_stock": False,
+                "symbol": fut["tradingsymbol"],
+                "strike_step": strike_step,
+                "opts_df": opts_df
             }
             
-    # 3. Commodities (CRUDEOIL): We want the FUTURE instrument and FUTURE lot size
+    # 3. Commodities (CRUDEOIL): We want FUTURE only
     for name in MCX_BURST_NAMES:
         futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
         if not futs.empty:
@@ -87,11 +125,13 @@ def start_spot_volume_scanner():
             lot_size = int(fut.get("lot_size", 1))
             tkn = int(fut["instrument_token"])
             target_tokens.append(tkn)
-            token_metadata[tkn] = {
-                "name": name,
-                "symbol": fut["tradingsymbol"],
+            symbol_metadata[name] = {
+                "spot_tkn": None,
+                "fut_tkn": tkn,
                 "lot_size": lot_size,
-                "type": "FUTURE"
+                "is_mcx": True,
+                "is_stock": False,
+                "symbol": fut["tradingsymbol"]
             }
 
     if not target_tokens:
@@ -121,6 +161,7 @@ def start_spot_volume_scanner():
                 ltp = tick["last_price"]
                 
                 vol = tick.get("volume_traded") or tick.get("volume", 0)
+                oi = tick.get("oi", 0)
                 
                 if tkn not in candle_state:
                     reset_candle_state(tkn, vol)
@@ -132,6 +173,7 @@ def start_spot_volume_scanner():
                 if c_state["low"] == float('inf') or ltp < c_state["low"]:
                     c_state["low"] = ltp
                 c_state["current_vol"] = vol
+                c_state["oi"] = oi
 
     def on_connect(ws, response):
         print("Spot Volume Scanner subscribing...")
@@ -146,7 +188,7 @@ def start_spot_volume_scanner():
     def reporting_loop():
         from telegram_utils import send_telegram_message
         
-        msg = f"🟢 Spot Volume Scanner (3rd WebSocket) Started Successfully!\nTracking {len(target_tokens)} Spot/Future instruments."
+        msg = f"ðŸŸ¢ Spot Volume Scanner (3rd WebSocket) Started Successfully!\nTracking {len(target_tokens)} Spot/Future instruments."
         
         try:
             send_telegram_message(msg, chat_id=env_config.TELE_CHAT_ID, token=env_config.TELE_TOKEN)
@@ -181,69 +223,149 @@ def start_spot_volume_scanner():
                 
                 alerts = []
                 
+                def format_vol(v):
+                    if v >= 1_000_000:
+                        val = v / 1_000_000
+                        return f"{int(val)}M" if val.is_integer() else f"{val:.1f}M"
+                    elif v >= 1_000:
+                        val = v / 1_000
+                        return f"{int(val)}K" if val.is_integer() else f"{val:.1f}K"
+                    return str(int(v))
+                    
                 with state_lock:
-                    for tkn, meta in token_metadata.items():
-                        if tkn not in candle_state:
-                            continue
-                            
-                        is_mcx = meta["name"] in MCX_BURST_NAMES
+                    for name, meta in symbol_metadata.items():
+                        is_mcx = meta["is_mcx"]
                         if is_mcx and not is_mcx_open:
                             continue
                         if not is_mcx and not is_nse_open:
-                            c_state = candle_state[tkn]
-                            reset_candle_state(tkn, c_state.get("current_vol", 0))
+                            # Reset states
+                            for tkn in [meta["spot_tkn"], meta["fut_tkn"]]:
+                                if tkn and tkn in candle_state:
+                                    reset_candle_state(tkn, candle_state[tkn].get("current_vol", 0))
                             continue
                             
-                        c_state = candle_state[tkn]
+                        spot_tkn = meta["spot_tkn"]
+                        fut_tkn = meta["fut_tkn"]
+                        lot_size = meta["lot_size"]
                         
-                        # Only process if we actually received prices
-                        if c_state["high"] == -1.0 or c_state["low"] == float('inf'):
-                            # Reset for next minute anyway using current total volume
-                            reset_candle_state(tkn, c_state.get("current_vol", 0))
-                            continue
+                        spot_state = candle_state.get(spot_tkn) if spot_tkn else None
+                        fut_state = candle_state.get(fut_tkn) if fut_tkn else None
+                        
+                        spot_vol = 0
+                        spot_lots = 0
+                        fut_vol = 0
+                        fut_lots = 0
+                        
+                        spot_valid = spot_state and spot_state["high"] != -1.0
+                        fut_valid = fut_state and fut_state["high"] != -1.0
+                        
+                        if spot_valid:
+                            spot_vol = max(0, spot_state.get("current_vol", 0) - spot_state.get("start_vol", 0))
+                            spot_lots = int(spot_vol / lot_size)
                             
-                        # Calculate 1-minute delta volume
-                        current_vol = c_state.get("current_vol", 0)
-                        start_vol = c_state.get("start_vol", 0)
-                        minute_vol = max(0, current_vol - start_vol)
-                        
-                        # Calculate Lots
-                        lots = int(minute_vol / meta["lot_size"])
-                        
-                        if lots >= 200:
-                            # User requested calculations
-                            c_high = c_state["high"]
-                            c_low = c_state["low"]
-                            c_close = c_state["close"]
-                            c_mid = (c_high - c_low) / 2.0
-                            buy_price = c_low + c_mid
+                        if fut_valid:
+                            fut_vol = max(0, fut_state.get("current_vol", 0) - fut_state.get("start_vol", 0))
+                            fut_lots = int(fut_vol / lot_size)
                             
-                            lot_size = meta['lot_size']
-                            # Format Telegram message
-                            def format_vol(v):
-                                if v >= 1_000_000:
-                                    val = v / 1_000_000
-                                    return f"{int(val)}M" if val.is_integer() else f"{val:.1f}M"
-                                elif v >= 1_000:
-                                    val = v / 1_000
-                                    return f"{int(val)}K" if val.is_integer() else f"{val:.1f}K"
-                                return str(int(v))
+                        if spot_lots >= 200 or fut_lots >= 200:
+                            oi_table = ""
+                            ref_price = 0
+                            
+                            if meta["is_stock"] and spot_tkn:
+                                s_high = spot_state["high"] if spot_valid else 0
+                                s_low = spot_state["low"] if spot_valid else 0
+                                s_close = spot_state["close"] if spot_valid else 0
+                                s_mid = (s_high - s_low) / 2.0 if spot_valid else 0
+                                buy_price = s_low + s_mid if spot_valid else 0
+                                ref_price = buy_price
                                 
-                            msg = (
-                                f"Symbol: {meta['symbol']} ({lot_size} lots)\n"
-                                f"volume: {format_vol(minute_vol)}\n"
-                                f"LOTS: {lots}\n"
-                                f"spot PRICE : {c_close:.2f}\n"
-                                f"Candle high: {c_high:.2f}\n"
-                                f"Candle low: {c_low:.2f}\n"
-                                f"Candle mid: {c_mid:.2f}\n"
-                                f"Buying price: {buy_price:.2f}\n"
-                                f"TIME: {now.strftime('%H:%M:%S')}"
-                            )
+                                f_high = fut_state["high"] if fut_valid else 0
+                                f_low = fut_state["low"] if fut_valid else 0
+                                f_close = fut_state["close"] if fut_valid else 0
+                                f_mid = (f_high - f_low) / 2.0 if fut_valid else 0
+                                fut_oi = fut_state.get("oi", 0) if fut_state else 0
+                                
+                                msg = (
+                                    f"Symbol: {meta['symbol']} ({lot_size} lots)\n"
+                                    f"S-V(L): {format_vol(spot_vol)}({spot_lots} L) & F-V(L): {format_vol(fut_vol)}({fut_lots} L)\n"
+                                    f"S-Price: {s_close:.2f} F-Price: {f_close:.2f}\n"
+                                    f"S-Candle C: {s_mid:.2f} FC: {f_mid:.2f}\n"
+                                    f"Buying Price: {buy_price:.2f}\n"
+                                )
+                            else:
+                                price_source = spot_state if spot_valid else fut_state
+                                c_high = price_source["high"]
+                                c_low = price_source["low"]
+                                c_close = price_source["close"]
+                                c_mid = (c_high - c_low) / 2.0
+                                buy_price = c_low + c_mid
+                                ref_price = buy_price
+                                
+                                fut_oi = price_source.get("oi", 0)
+                                msg = (
+                                    f"Symbol: {meta['symbol']} ({lot_size} lots)\n"
+                                    f"Volume(Lots): {format_vol(fut_vol)}({fut_lots} L)\n"
+                                    f"Price : {c_close:.2f}\n"
+                                    f"Candle C: {c_mid:.2f}\n"
+                                    f"Buying price: {buy_price:.2f}\n"
+                                )
+                                
+                            # Generate OI Table using REST API
+                            if kite and ref_price > 0 and meta.get("opts_df") is not None and not meta["opts_df"].empty:
+                                strike_step = meta["strike_step"]
+                                atm_strike = round(ref_price / strike_step) * strike_step
+                                target_strikes = [atm_strike + i * strike_step for i in range(-2, 3)]
+                                
+                                opts_df = meta["opts_df"]
+                                relevant_opts = opts_df[opts_df["strike"].astype(float).round(2).isin(target_strikes)]
+                                
+                                symbols_to_quote = []
+                                symbol_to_strike = {}
+                                for _, row in relevant_opts.iterrows():
+                                    qs = f"{row['exchange']}:{row['tradingsymbol']}"
+                                    symbols_to_quote.append(qs)
+                                    symbol_to_strike[qs] = {
+                                        "strike": float(row["strike"]),
+                                        "type": row["instrument_type"]
+                                    }
+                                
+                                try:
+                                    quotes = kite.quote(symbols_to_quote)
+                                    
+                                    # Structure data by strike
+                                    strike_data = {s: {"CE": 0, "PE": 0} for s in target_strikes}
+                                    for qs, data in quotes.items():
+                                        if qs in symbol_to_strike:
+                                            s = symbol_to_strike[qs]["strike"]
+                                            t = symbol_to_strike[qs]["type"]
+                                            strike_data[s][t] = data.get("oi", 0)
+                                            
+                                    def fmt_lakhs(v):
+                                        if v == 0: return "0.0L"
+                                        return f"{v/100000:.1f}L"
+                                        
+                                    oi_table += "\n```\n"
+                                    oi_table += f" Strike |  CE OI |  PE OI \n"
+                                    oi_table += f"--------+--------+--------\n"
+                                    
+                                    for s in target_strikes:
+                                        ce_oi = fmt_lakhs(strike_data[s]["CE"])
+                                        pe_oi = fmt_lakhs(strike_data[s]["PE"])
+                                        is_atm = "🎯 ATM" if s == atm_strike else ""
+                                        oi_table += f" {int(s):<6} | {ce_oi:>6} | {pe_oi:>6} {is_atm}\n"
+                                    oi_table += "```\n"
+                                except Exception as e:
+                                    print("Error fetching OI quote:", e)
+                                    
+                            msg += oi_table
+                            msg += f"TIME: {now.strftime('%H:%M:%S')}\n"
                             alerts.append(msg)
                             
-                        # Reset for next minute
-                        reset_candle_state(tkn, current_vol)
+                        # Reset states for next minute
+                        if spot_tkn and spot_tkn in candle_state:
+                            reset_candle_state(spot_tkn, candle_state[spot_tkn].get("current_vol", 0))
+                        if fut_tkn and fut_tkn in candle_state:
+                            reset_candle_state(fut_tkn, candle_state[fut_tkn].get("current_vol", 0))
                         
                 # Dispatch alerts
                 token_stocks = os.getenv("TELE_TOKEN_STOCKS", env_config.TELE_TOKEN)

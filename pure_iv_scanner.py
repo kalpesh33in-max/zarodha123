@@ -148,6 +148,7 @@ def start_pure_iv_scanner():
     # We will subscribe to futures to keep the spot price updated
     future_tokens = []
     global spot_prices
+    symbol_lot_sizes = {}
     for name in TARGET_SYMBOLS:
         futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
         if not futs.empty:
@@ -158,6 +159,7 @@ def start_pure_iv_scanner():
             token_to_instrument[int(fut["instrument_token"])] = {
                 "type": "FUT", "name": name, "symbol": fut["tradingsymbol"]
             }
+            symbol_lot_sizes[name] = int(float(fut.get("lot_size", 1)))
             
     # We will update subscriptions dynamically when Future ticks come in
     subscribed_options = set()
@@ -327,11 +329,12 @@ def start_pure_iv_scanner():
                     ce_rocs = [get_roc(s, "CE") for s in target_strikes]
                     pe_rocs = [get_roc(s, "PE") for s in target_strikes]
                     
-                    ce_vols = [get_1m_vol(s, "CE") for s in target_strikes]
-                    pe_vols = [get_1m_vol(s, "PE") for s in target_strikes]
+                    lot_size = symbol_lot_sizes.get(name, 1)
+                    ce_vols = [int(get_1m_vol(s, "CE") / lot_size) for s in target_strikes]
+                    pe_vols = [int(get_1m_vol(s, "PE") / lot_size) for s in target_strikes]
                     
                     # Volatility Filter Logic
-                    threshold = 2.0
+                    threshold = 10.0
                     
                     has_spike = False
                     
@@ -363,7 +366,7 @@ def start_pure_iv_scanner():
                         return str(int(v))
                     msg =  f"```\n"
                     msg += f"🏦 {name} ({int(spot)})\n"
-                    msg += f" Strike | CE %| PE %| C.Vol| P.Vol\n"
+                    msg += f" Strike | CE %| PE %| C.Lot| P.Lot\n"
                     msg += f"--------+-----+-----+------+------\n"
                     
                     for i in range(4):
