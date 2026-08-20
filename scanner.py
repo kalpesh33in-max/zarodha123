@@ -277,7 +277,8 @@ def run_scanner(kite, stop_event=None):
         f"Burst alerts enabled for: {', '.join(burst_scope)}. "
         "Burst REST fallback is enabled."
     )
-    dispatcher.send(PRIORITY_STATUS, start_msg)
+    from telegram_utils import broadcast_startup_message
+    broadcast_startup_message(start_msg)
 
     threads = [
         threading.Thread(target=_burst_loop, args=(kite, dispatcher, stop_event), daemon=True),
