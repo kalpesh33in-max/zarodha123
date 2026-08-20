@@ -116,22 +116,35 @@ def start_spot_volume_scanner():
                 "opts_df": opts_df
             }
             
-    # 3. Commodities (CRUDEOILM): We want FUTURE only
+    # 3. Commodities (CRUDEOILM)
     for name in MCX_BURST_NAMES:
         futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
         if not futs.empty:
             futs = futs.sort_values(by="expiry")
             fut = futs.iloc[0]
-            lot_size = int(fut.get("lot_size", 1))
+            # In Zerodha instruments.csv, MCX lot_size is listed as 1 multiplier, but 1 contract of CRUDEOILM = 10 barrels
+            lot_size = 10 if name == "CRUDEOILM" else int(fut.get("lot_size", 1))
             tkn = int(fut["instrument_token"])
             target_tokens.append(tkn)
+            
+            opts = df[(df["name"] == name) & (df["instrument_type"].isin(["CE", "PE"]))]
+            strike_step = 50
+            opts_df = pd.DataFrame()
+            if not opts.empty:
+                sample_strikes = sorted(opts["strike"].unique())
+                strike_step = sample_strikes[1] - sample_strikes[0] if len(sample_strikes) > 1 else 50
+                closest_expiry = opts["expiry"].min()
+                opts_df = opts[opts["expiry"] == closest_expiry]
+                
             symbol_metadata[name] = {
                 "spot_tkn": None,
                 "fut_tkn": tkn,
                 "lot_size": lot_size,
                 "is_mcx": True,
                 "is_stock": False,
-                "symbol": fut["tradingsymbol"]
+                "symbol": fut["tradingsymbol"],
+                "strike_step": strike_step,
+                "opts_df": opts_df
             }
 
     if not target_tokens:
