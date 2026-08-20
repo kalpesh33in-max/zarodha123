@@ -116,7 +116,7 @@ def start_spot_volume_scanner():
                 "opts_df": opts_df
             }
             
-    # 3. Commodities (CRUDEOIL): We want FUTURE only
+    # 3. Commodities (CRUDEOILM): We want FUTURE only
     for name in MCX_BURST_NAMES:
         futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
         if not futs.empty:
@@ -267,7 +267,7 @@ def start_spot_volume_scanner():
                             fut_vol = max(0, fut_state.get("current_vol", 0) - fut_state.get("start_vol", 0))
                             fut_lots = int(fut_vol / lot_size)
                             
-                        if spot_lots >= 200 or fut_lots >= 200:
+                        if spot_lots >= 500 or fut_lots >= 500:
                             oi_table = ""
                             ref_price = 0
                             
@@ -344,15 +344,49 @@ def start_spot_volume_scanner():
                                         if v == 0: return "0.0L"
                                         return f"{v/100000:.1f}L"
                                         
+                                    max_oi = max(max(d["CE"], d["PE"]) for d in strike_data.values()) or 1
+                                    max_ce = max(d["CE"] for d in strike_data.values())
+                                    max_pe = max(d["PE"] for d in strike_data.values())
+                                    
                                     oi_table += "\n```\n"
-                                    oi_table += f" Strike |  CE OI |  PE OI \n"
-                                    oi_table += f"--------+--------+--------\n"
+                                    oi_table += f"🔴 CALL OI         | STRIKE  |   PUT OI 🟢\n"
+                                    oi_table += f"-------------------+---------+---------------\n"
                                     
                                     for s in target_strikes:
-                                        ce_oi = fmt_lakhs(strike_data[s]["CE"])
-                                        pe_oi = fmt_lakhs(strike_data[s]["PE"])
-                                        is_atm = "🎯 ATM" if s == atm_strike else ""
-                                        oi_table += f" {int(s):<6} | {ce_oi:>6} | {pe_oi:>6} {is_atm}\n"
+                                        ce_val = strike_data[s]["CE"]
+                                        pe_val = strike_data[s]["PE"]
+                                        ce_str = fmt_lakhs(ce_val)
+                                        pe_str = fmt_lakhs(pe_val)
+                                        
+                                        is_max_ce = (ce_val == max_ce and ce_val > 0)
+                                        is_max_pe = (pe_val == max_pe and pe_val > 0)
+                                        
+                                        b_ce = int(round((ce_val / max_oi) * 4)) if ce_val > 0 else 0
+                                        b_ce = max(1, b_ce) if ce_val > 0 else 0
+                                        
+                                        b_pe = int(round((pe_val / max_oi) * 4)) if pe_val > 0 else 0
+                                        b_pe = max(1, b_pe) if pe_val > 0 else 0
+                                        
+                                        ce_prefix = "🔥" if is_max_ce else ""
+                                        ce_boxes = "🟥" * b_ce
+                                        
+                                        ce_used = (2 if is_max_ce else 0) + len(ce_str) + 1 + (b_ce * 2)
+                                        left_spaces = max(0, 18 - ce_used)
+                                        left_part = f"{ce_prefix}{ce_str} {ce_boxes}" + (" " * left_spaces)
+                                        
+                                        if s == atm_strike:
+                                            strike_part = f"{int(s)} 🎯"
+                                        else:
+                                            strike_part = f"{int(s)}   "
+                                            
+                                        pe_boxes = "🟩" * b_pe
+                                        pe_used_boxes = b_pe * 2
+                                        pe_spaces = max(1, 9 - pe_used_boxes)
+                                        pe_suffix = "🔥" if is_max_pe else ""
+                                        
+                                        right_part = f"{pe_boxes}" + (" " * pe_spaces) + f"{pe_str:>5}{pe_suffix}"
+                                        
+                                        oi_table += f"{left_part}| {strike_part} | {right_part}\n"
                                     oi_table += "```\n"
                                 except Exception as e:
                                     print("Error fetching OI quote:", e)

@@ -30,28 +30,12 @@ def _get_time_to_expiry_years(expiry_date):
 
 # TARGETS
 TARGET_SYMBOLS = [
-    "BANKNIFTY", "CRUDEOIL",
-    "360ONE", "ADANIENSOL", "ADANIENT", "ADANIGREEN", "ADANIPORTS",
-    "APLAPOLLO", "ASIANPAINT", "ASTRAL", "AUROPHARMA", "AXISBANK",
-    "ABB", "BAJAJ-AUTO", "BAJAJFINSV", "BAJFINANCE", "BDL",
-    "BHARATFORG", "BHARTIARTL", "BLUESTARCO", "BSE", "BRITANNIA", "CDSL",
-    "CGPOWER", "CHOLAFIN", "CIPLA", "COCHINSHIP", "COFORGE",
-    "COLPAL", "CUMMINSIND", "DALBHARAT", "DMART", "DIVISLAB",
-    "DRREDDY", "EICHERMOT", "GLENMARK", "GODFRYPHLP", "GODREJCP",
-    "GODREJPROP", "GRASIM", "GVT&D", "HAL", "HAVELLS",
-    "HCLTECH", "HDFCAMC", "HDFCBANK", "HEROMOTOCO", "HINDALCO",
-    "HINDUNILVR", "HYUNDAI", "ICICIBANK", "ICICIGI", "INDUSINDBK",
-    "JINDALSTEL", "JSWSTEEL", "KAYNES", "KPITTECH", "LAURUSLABS",
-    "LODHA", "LT", "LTM", "LUPIN", "M&M",
-    "MANKIND", "MARUTI", "MAXHEALTH", "MAZDOCK", "MCX",
-    "MFSL", "MOTILALOFS", "MPHASIS", "MUTHOOTFIN", "NAM-INDIA",
-    "NAUKRI", "NESTLEIND", "OBEROIRLTY", "OFSS", "PAYTM",
-    "PERSISTENT", "PHOENIXLTD", "PIIND", "PNBHOUSING", "POLICYBZR",
-    "PRESTIGE", "RADICO", "RELIANCE", "SBICARD", "SBILIFE",
-    "SBIN", "SHRIRAMFIN", "SHREECEM", "SIEMENS", "SRF",
-    "SUNPHARMA", "SUPREMEIND", "TATACONSUM", "TATAELXSI", "TCS",
-    "TECHM", "TIINDIA", "TITAN", "TORNTPHARM", "TRENT",
-    "TVSMOTOR", "UNITDSPR", "ULTRACEMCO", "UNOMINDA", "VOLTAS"
+    # Indices & Commodities
+    "NIFTY", "BANKNIFTY", "CRUDEOILM",
+    # Top 5 Banking Stocks
+    "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
+    # Key Heavyweights
+    "RELIANCE", "TCS", "INFY", "BHARTIARTL", "LT", "M&M", "BAJFINANCE"
 ]
 
 # State Management
@@ -190,8 +174,8 @@ def start_pure_iv_scanner():
                 else:
                     strike_step = 50
                     
-                # Use 10 ITM for BANKNIFTY and CRUDEOIL, 5 ITM for stocks
-                num_itm = 10 if name in ["BANKNIFTY", "CRUDEOIL"] else 5
+                # Use 10 ITM for NIFTY, BANKNIFTY and CRUDEOILM, 5 ITM for stocks
+                num_itm = 10 if name in ["NIFTY", "BANKNIFTY", "CRUDEOILM"] else 5
                 ce_strikes, pe_strikes = get_atm_and_itm_strikes(ltp, strike_step, num_itm=num_itm)
                 
                 closest_expiry = opts["expiry"].min()
@@ -294,7 +278,7 @@ def start_pure_iv_scanner():
                     spot = spot_prices.get(name, 0)
                     if not spot: continue
                     
-                    is_mcx = name == "CRUDEOIL"
+                    is_mcx = name == "CRUDEOILM"
                     if is_mcx and not is_mcx_open: continue
                     if not is_mcx and not is_nse_open: continue
                     
@@ -333,8 +317,8 @@ def start_pure_iv_scanner():
                     ce_vols = [int(get_1m_vol(s, "CE") / lot_size) for s in target_strikes]
                     pe_vols = [int(get_1m_vol(s, "PE") / lot_size) for s in target_strikes]
                     
-                    # Volatility Filter Logic
-                    threshold = 10.0
+                    # Volatility Filter Logic (>=20% IV Spike)
+                    threshold = 20.0
                     
                     has_spike = False
                     

@@ -140,15 +140,14 @@ class DirectionEngine:
                         "TVSMOTOR", "UNITDSPR", "ULTRACEMCO", "UNOMINDA", "VOLTAS"
                     ])
                 if is_mcx_open:
-                    target_names.append("CRUDEOIL")
+                    target_names.append("CRUDEOILM")
                     
                 if not target_names:
                     continue
 
                 for name in target_names:
                     import re
-                    # Match exact name (CRUDEOIL, BANKNIFTY) followed by digits (e.g. 26AUG...)
-                    # This prevents CRUDEOIL from accidentally matching CRUDEOILM
+                    # Match exact name (CRUDEOILM, BANKNIFTY) followed by digits (e.g. 26AUG...)
                     name_pattern = re.compile(rf"^(?:MCX:|NSE:)?{name}\d+")
                     
                     fut_symbol = next(
@@ -159,7 +158,7 @@ class DirectionEngine:
                     if not fut_symbol:
                         # Skip diagnostic log for day-session stocks when in MCX evening session
                         is_evening = now.hour >= 15 and (now.hour > 15 or now.minute >= 30)
-                        if not (is_evening and name not in {"CRUDEOIL"}):
+                        if not (is_evening and name not in {"CRUDEOILM"}):
                             print(f"[IV ENGINE DIAGNOSTIC] {name}: No future symbol found in snapshots (snapshots count={len(self.snapshots)})")
                         continue
                         
