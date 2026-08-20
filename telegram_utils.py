@@ -63,7 +63,7 @@ def send_telegram_message(message, chat_id=None, token=None, is_burst=False):
     }
 
     try:
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, timeout=10)
         return response.json()
     except Exception as e:
         print(f"Error sending Telegram message: {e}")

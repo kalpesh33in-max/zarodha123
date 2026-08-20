@@ -330,7 +330,8 @@ def start_spot_volume_scanner():
                                     }
                                 
                                 try:
-                                    quotes = kite.quote(symbols_to_quote)
+                                    from kite_rate_limiter import kite_quote
+                                    quotes = kite_quote(kite, symbols_to_quote)
                                     
                                     # Structure data by strike
                                     strike_data = {s: {"CE": 0, "PE": 0} for s in target_strikes}
