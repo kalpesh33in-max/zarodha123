@@ -3,7 +3,7 @@ import time
 import pandas as pd
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from iv_engine import direction_engine
+direction_engine = None
 from kite_rate_limiter import kite_historical_data, kite_quote
 from websocket_flow import get_symbol_quotes, get_token_quotes
 
@@ -17,27 +17,8 @@ BURST_OPTION_EXCLUDED_NAMES = {
     "SENSEX50",
 }
 STOCK_BURST_NAMES = {
-    "360ONE", "ADANIENSOL", "ADANIENT", "ADANIGREEN", "ADANIPORTS",
-    "APLAPOLLO", "ASIANPAINT", "ASTRAL", "AUROPHARMA", "AXISBANK",
-    "ABB", "BAJAJ-AUTO", "BAJAJFINSV", "BAJFINANCE", "BDL",
-    "BHARATFORG", "BHARTIARTL", "BLUESTARCO", "BSE", "BRITANNIA", "CDSL",
-    "CGPOWER", "CHOLAFIN", "CIPLA", "COCHINSHIP", "COFORGE",
-    "COLPAL", "CUMMINSIND", "DALBHARAT", "DMART", "DIVISLAB",
-    "DRREDDY", "EICHERMOT", "GLENMARK", "GODFRYPHLP", "GODREJCP",
-    "GODREJPROP", "GRASIM", "GVT&D", "HAL", "HAVELLS",
-    "HCLTECH", "HDFCAMC", "HDFCBANK", "HEROMOTOCO", "HINDALCO",
-    "HINDUNILVR", "HYUNDAI", "ICICIBANK", "ICICIGI", "INDUSINDBK",
-    "JINDALSTEL", "JSWSTEEL", "KAYNES", "KPITTECH", "LAURUSLABS",
-    "LODHA", "LT", "LTM", "LUPIN", "M&M",
-    "MANKIND", "MARUTI", "MAXHEALTH", "MAZDOCK", "MCX",
-    "MFSL", "MOTILALOFS", "MPHASIS", "MUTHOOTFIN", "NAM-INDIA",
-    "NAUKRI", "NESTLEIND", "OBEROIRLTY", "OFSS", "PAYTM",
-    "PERSISTENT", "PHOENIXLTD", "PIIND", "PNBHOUSING", "POLICYBZR",
-    "PRESTIGE", "RADICO", "RELIANCE", "SBICARD", "SBILIFE",
-    "SBIN", "SHRIRAMFIN", "SHREECEM", "SIEMENS", "SRF",
-    "SUNPHARMA", "SUPREMEIND", "TATACONSUM", "TATAELXSI", "TCS",
-    "TECHM", "TIINDIA", "TITAN", "TORNTPHARM", "TRENT",
-    "TVSMOTOR", "UNITDSPR", "ULTRACEMCO", "UNOMINDA", "VOLTAS"
+    "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
+    "RELIANCE", "TCS", "INFY", "BHARTIARTL", "LT", "M&M", "BAJFINANCE"
 }
 NSE_BURST_TRACK_NAMES = []
 MCX_BURST_TRACK_NAMES = [
@@ -56,8 +37,8 @@ BURST_OPTION_STRIKE_RANGE = 25
 BANKNIFTY_BURST_OPTION_STRIKE_RANGE = 25
 STOCK_BURST_OPTION_STRIKE_RANGE = 5
 MCX_BURST_OPTION_STRIKE_RANGE = int(os.getenv("MCX_BURST_OPTION_STRIKE_RANGE", "10"))
-STOCK_BURST_STRIKES_BELOW_ATM = 5
-STOCK_BURST_STRIKES_ABOVE_ATM = 5
+STOCK_BURST_STRIKES_BELOW_ATM = 10
+STOCK_BURST_STRIKES_ABOVE_ATM = 10
 BANKNIFTY_BURST_STRIKES_BELOW_ATM = 20
 BANKNIFTY_BURST_STRIKES_ABOVE_ATM = 20
 BURST_THRESHOLD_LOTS = int(os.getenv("BURST_THRESHOLD_LOTS", "100"))
@@ -81,7 +62,7 @@ INDEX_FUTURE_NAMES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", 
 # the scanner moves to the next monthly contract from the next session.  The
 # default of one day also makes the scanner ignore the just-expired contract
 # when it is started on the following day.
-EXPIRY_ROLLOVER_DAYS = int(os.getenv("EXPIRY_ROLLOVER_DAYS", "1"))
+EXPIRY_ROLLOVER_DAYS = int(os.getenv("EXPIRY_ROLLOVER_DAYS", "7"))
 
 day_open_oi_store = {}
 option_history = {}
@@ -208,9 +189,7 @@ def get_burst_option_strike_window(name):
         return 0, 0
     if name == "BANKNIFTY":
         return BANKNIFTY_BURST_STRIKES_BELOW_ATM, 0
-    if name in STOCK_BURST_NAMES:
-        return STOCK_BURST_STRIKES_BELOW_ATM, 0
-    return 1, 0
+    return STOCK_BURST_STRIKES_BELOW_ATM, 0
 
 
 def get_burst_session(now_ist=None):
@@ -419,6 +398,10 @@ def _normalize_burst_price(name, price):
 def _get_row_lot_size(row):
     if row is None or "lot_size" not in row:
         return None
+    name = str(row.get("name", "") or "")
+    tradingsymbol = str(row.get("tradingsymbol", "") or "")
+    if name == "CRUDEOILM" or tradingsymbol.startswith("CRUDEOILM"):
+        return 10
     return _normalize_lot_size(row.get("lot_size"))
 
 
@@ -2634,7 +2617,8 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=
                 stats.get("max_future_tick_lots", 0),
                 tick_lots,
             )
-        if tick_lots >= threshold and key not in active_watches:
+        trigger_threshold = 100
+        if tick_lots >= trigger_threshold and key not in active_watches:
             active_watches[key] = {
                 "start_oi": prev_oi,
                 "start_price": prev_price,
@@ -2652,29 +2636,32 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=
             p_chg = ltp - watch["start_price"]
             final_lot_size = _normalize_lot_size(watch.get("lot_size")) or lot_size
             final_lots = int(abs(oi_chg) / final_lot_size)
-            if final_lots >= threshold and oi_chg > 0:
+            
+            action = classify_action(watch["symbol"], oi_chg, p_chg)
+            is_covering_unwinding = any(x in action for x in ["COVERING", "UNWINDING"])
+            
+            req_threshold = 500 if is_covering_unwinding else 100
+                
+            if final_lots >= req_threshold:
                 strength = get_strength_label(final_lots, watch["name"])
-                action = classify_action(watch["symbol"], oi_chg, p_chg)
-                # Only alert on fresh Buyer / Seller (skip Short Covering & Long Unwinding)
-                if not any(x in action for x in ["COVERING", "UNWINDING"]):
-                    p_icon = "▲" if p_chg >= 0 else "▼"
-                    expiry_line = (
-                        f"EXPIRY: {watch['expiry_text']}\n"
-                        if watch.get("expiry_text")
-                        else ""
-                    )
-                    alert_text = (
-                        f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n"
-                        f"{expiry_line}"
-                        f"━━━━━━━━━━━━━━━\n"
-                        f"LOTS: {final_lots}\nPRICE: {ltp:.2f} ({p_icon})\nFUTURE PRICE: {ltp:.2f}\n"
-                        f"━━━━━━━━━━━━━━━\n"
-                        f"EXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {oi:,}\n"
-                        f"TIME: {now.strftime('%H:%M:%S')}"
-                    )
-                    alert_key = f"FUT:{name}:{watch['symbol']}:{watch['start_oi']}:{watch['start_price']}"
-                    if not _burst_alert_recent(alert_key):
-                        alerts_list.append(alert_text)
+                p_icon = "▲" if p_chg >= 0 else "▼"
+                expiry_line = (
+                    f"EXPIRY: {watch['expiry_text']}\n"
+                    if watch.get("expiry_text")
+                    else ""
+                )
+                alert_text = (
+                    f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n"
+                    f"{expiry_line}"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"LOTS: {final_lots}\nPRICE: {ltp:.2f} ({p_icon})\nFUTURE PRICE: {ltp:.2f}\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"EXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {oi:,}\n"
+                    f"TIME: {now.strftime('%H:%M:%S')}"
+                )
+                alert_key = f"FUT:{name}:{watch['symbol']}:{watch['start_oi']}:{watch['start_price']}"
+                if not _burst_alert_recent(alert_key):
+                    alerts_list.append(alert_text)
             del active_watches[key]
 
     history.append({"time": now, "oi": oi, "price": ltp})
@@ -2768,7 +2755,8 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
                     stats.get("max_option_tick_lots", 0),
                     tick_lots,
                 )
-            if tick_lots >= threshold and t_int not in active_watches:
+            trigger_threshold = 100
+            if tick_lots >= trigger_threshold and t_int not in active_watches:
                 expiry_text = (
                     row["expiry"].strftime("%d-%m-%Y")
                     if pd.notna(row.get("expiry"))
@@ -2791,29 +2779,27 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
                 p_chg = ltp - watch["start_price"]
                 final_lot_size = _normalize_lot_size(watch.get("lot_size")) or lot_size
                 final_lots = int(abs(oi_chg) / final_lot_size)
+                
                 action = classify_action(watch["symbol"], oi_chg, p_chg)
-                if is_mcx_underlying(watch["underlying"]):
-                    final_threshold = 500
-                else:
-                    final_threshold = 2000
+                is_covering_unwinding = any(x in action for x in ["COVERING", "UNWINDING"])
+                
+                final_threshold = 500 if is_covering_unwinding else 100
                     
-                if final_lots >= final_threshold and oi_chg > 0:
-                    # Only alert on fresh Buyer / Writer (skip Short Covering & Long Unwinding)
-                    if not any(x in action for x in ["COVERING", "UNWINDING"]):
-                        strength = get_strength_label(final_lots, watch["underlying"])
-                        p_icon = "▲" if p_chg >= 0 else "▼"
-                        alert_text = (
-                            f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n"
-                            f"EXPIRY: {watch.get('expiry_text', 'NA')}\n"
-                            f"━━━━━━━━━━━━━━━\n"
-                            f"LOTS: {final_lots}\nPRICE: {ltp:.2f} ({p_icon})\nFUTURE PRICE: {u_ltp:.2f}\n"
-                            f"━━━━━━━━━━━━━━━\n"
-                            f"EXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {curr_oi:,}\n"
-                            f"TIME: {now.strftime('%H:%M:%S')}"
-                        )
-                        alert_key = f"OPT:{name}:{t_int}:{watch['start_oi']}:{watch['start_price']}"
-                        if not _burst_alert_recent(alert_key):
-                            alerts_list.append(alert_text)
+                if final_lots >= final_threshold:
+                    strength = get_strength_label(final_lots, watch["underlying"])
+                    p_icon = "▲" if p_chg >= 0 else "▼"
+                    alert_text = (
+                        f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n"
+                        f"EXPIRY: {watch.get('expiry_text', 'NA')}\n"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"LOTS: {final_lots}\nPRICE: {ltp:.2f} ({p_icon})\nFUTURE PRICE: {u_ltp:.2f}\n"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"EXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {curr_oi:,}\n"
+                        f"TIME: {now.strftime('%H:%M:%S')}"
+                    )
+                    alert_key = f"OPT:{name}:{t_int}:{watch['start_oi']}:{watch['start_price']}"
+                    if not _burst_alert_recent(alert_key):
+                        alerts_list.append(alert_text)
                 del active_watches[t_int]
 
         history.append({"time": now, "oi": curr_oi, "price": ltp})

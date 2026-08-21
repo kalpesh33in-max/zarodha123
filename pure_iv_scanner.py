@@ -10,7 +10,75 @@ import threading
 # Import your existing credentials and functions
 from env_config import API_KEY, TELE_TOKEN, TELE_CHAT_ID
 from telegram_utils import send_telegram_message
-from iv_engine import calculate_iv
+
+# Newton-Raphson Implied Volatility Calculations
+RISK_FREE_RATE = 0.07
+
+def norm_cdf(x):
+    """Cumulative distribution function for standard normal distribution."""
+    return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
+
+def norm_pdf(x):
+    """Probability density function for standard normal distribution."""
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+def black_scholes_price(S, K, T, r, sigma, option_type="CE"):
+    """
+    Calculate the Black-Scholes option price.
+    S: Underlying price (Future LTP)
+    K: Strike price
+    T: Time to expiry in years
+    r: Risk-free rate
+    sigma: Implied volatility
+    """
+    if T <= 0 or sigma <= 0:
+        return max(0.0, S - K) if option_type == "CE" else max(0.0, K - S)
+
+    d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+
+    if option_type == "CE":
+        price = S * norm_cdf(d1) - K * math.exp(-r * T) * norm_cdf(d2)
+    else:
+        price = K * math.exp(-r * T) * norm_cdf(-d2) - S * norm_cdf(-d1)
+    
+    return price
+
+def calculate_iv(target_price, S, K, T, r=RISK_FREE_RATE, option_type="CE", max_iterations=100, tolerance=1e-5):
+    """
+    Calculate Implied Volatility using the Newton-Raphson method.
+    """
+    intrinsic = max(0.0, S - K) if option_type == "CE" else max(0.0, K - S)
+    if target_price <= intrinsic:
+        return 0.001  # Minimum IV
+    
+    if T <= 0:
+        return 0.001
+
+    sigma = 0.3  # Initial guess (30% IV)
+    
+    for _ in range(max_iterations):
+        price = black_scholes_price(S, K, T, r, sigma, option_type)
+        diff = price - target_price
+        
+        if abs(diff) < tolerance:
+            return sigma
+            
+        d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
+        vega = S * norm_pdf(d1) * math.sqrt(T)
+        
+        if vega == 0:
+            return sigma
+            
+        sigma -= diff / vega
+        
+        if sigma <= 0:
+            sigma = 0.001  # Prevent negative IV
+        elif sigma > 5.0:
+            sigma = 5.0  # Cap maximum IV at 500% to prevent math explosion
+            
+    return sigma
+
 
 def _get_time_to_expiry_years(expiry_date):
     """Calculate T in years from now until 15:30 IST on expiry date."""
