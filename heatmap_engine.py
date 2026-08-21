@@ -2617,7 +2617,7 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=
                 stats.get("max_future_tick_lots", 0),
                 tick_lots,
             )
-        trigger_threshold = 1 if name == "CRUDEOILM" else 100
+        trigger_threshold = 100
         if tick_lots >= trigger_threshold and key not in active_watches:
             active_watches[key] = {
                 "start_oi": prev_oi,
@@ -2640,7 +2640,7 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=
             action = classify_action(watch["symbol"], oi_chg, p_chg)
             is_covering_unwinding = any(x in action for x in ["COVERING", "UNWINDING"])
             
-            req_threshold = 1 if watch["name"] == "CRUDEOILM" else (500 if is_covering_unwinding else 100)
+            req_threshold = 500 if is_covering_unwinding else 100
                 
             if final_lots >= req_threshold:
                 strength = get_strength_label(final_lots, watch["name"])
@@ -2748,9 +2748,6 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
         prev_oi = history[-1]["oi"] if history else 0
         prev_price = history[-1]["price"] if history else 0
 
-        if name == "CRUDEOILM" and prev_oi == 0:
-            prev_oi = curr_oi if curr_oi > 0 else 1000
-
         if prev_oi > 0:
             tick_lots = int(abs(curr_oi - prev_oi) / lot_size)
             if stats is not None:
@@ -2758,9 +2755,7 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
                     stats.get("max_option_tick_lots", 0),
                     tick_lots,
                 )
-            trigger_threshold = 1 if name == "CRUDEOILM" else 100
-            if name == "CRUDEOILM":
-                tick_lots = 1
+            trigger_threshold = 100
             if tick_lots >= trigger_threshold and t_int not in active_watches:
                 expiry_text = (
                     row["expiry"].strftime("%d-%m-%Y")
@@ -2785,14 +2780,10 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
                 final_lot_size = _normalize_lot_size(watch.get("lot_size")) or lot_size
                 final_lots = int(abs(oi_chg) / final_lot_size)
                 
-                if watch["underlying"] == "CRUDEOILM":
-                    final_lots = 100
-                    oi_chg = 1000
-                
                 action = classify_action(watch["symbol"], oi_chg, p_chg)
                 is_covering_unwinding = any(x in action for x in ["COVERING", "UNWINDING"])
                 
-                final_threshold = 1 if watch["underlying"] == "CRUDEOILM" else (500 if is_covering_unwinding else 100)
+                final_threshold = 500 if is_covering_unwinding else 100
                     
                 if final_lots >= final_threshold:
                     strength = get_strength_label(final_lots, watch["underlying"])
