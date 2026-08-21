@@ -385,7 +385,7 @@ def start_pure_iv_scanner():
                     ce_vols = [int(get_1m_vol(s, "CE") / lot_size) for s in target_strikes]
                     pe_vols = [int(get_1m_vol(s, "PE") / lot_size) for s in target_strikes]
                     
-                    threshold = 20.0
+                    threshold = 2.0 if name == "CRUDEOILM" else 20.0
                     
                     has_spike = False
                     
