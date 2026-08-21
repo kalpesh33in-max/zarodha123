@@ -2617,7 +2617,7 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=
                 stats.get("max_future_tick_lots", 0),
                 tick_lots,
             )
-        trigger_threshold = 100
+        trigger_threshold = 1 if name == "CRUDEOILM" else 100
         if tick_lots >= trigger_threshold and key not in active_watches:
             active_watches[key] = {
                 "start_oi": prev_oi,
@@ -2640,7 +2640,7 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=
             action = classify_action(watch["symbol"], oi_chg, p_chg)
             is_covering_unwinding = any(x in action for x in ["COVERING", "UNWINDING"])
             
-            req_threshold = 500 if is_covering_unwinding else 100
+            req_threshold = 1 if watch["name"] == "CRUDEOILM" else (500 if is_covering_unwinding else 100)
                 
             if final_lots >= req_threshold:
                 strength = get_strength_label(final_lots, watch["name"])
@@ -2755,7 +2755,7 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
                     stats.get("max_option_tick_lots", 0),
                     tick_lots,
                 )
-            trigger_threshold = 100
+            trigger_threshold = 1 if name == "CRUDEOILM" else 100
             if tick_lots >= trigger_threshold and t_int not in active_watches:
                 expiry_text = (
                     row["expiry"].strftime("%d-%m-%Y")
@@ -2783,7 +2783,7 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
                 action = classify_action(watch["symbol"], oi_chg, p_chg)
                 is_covering_unwinding = any(x in action for x in ["COVERING", "UNWINDING"])
                 
-                final_threshold = 500 if is_covering_unwinding else 100
+                final_threshold = 1 if watch["underlying"] == "CRUDEOILM" else (500 if is_covering_unwinding else 100)
                     
                 if final_lots >= final_threshold:
                     strength = get_strength_label(final_lots, watch["underlying"])

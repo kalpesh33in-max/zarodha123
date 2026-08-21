@@ -385,8 +385,7 @@ def start_pure_iv_scanner():
                     ce_vols = [int(get_1m_vol(s, "CE") / lot_size) for s in target_strikes]
                     pe_vols = [int(get_1m_vol(s, "PE") / lot_size) for s in target_strikes]
                     
-                    # Volatility Filter Logic (>=20% IV Spike)
-                    threshold = 20.0
+                    threshold = 0.1 if name == "CRUDEOILM" else 20.0
                     
                     has_spike = False
                     
