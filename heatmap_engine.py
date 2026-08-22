@@ -17,8 +17,7 @@ BURST_OPTION_EXCLUDED_NAMES = {
     "SENSEX50",
 }
 STOCK_BURST_NAMES = {
-    "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
-    "RELIANCE", "TCS", "INFY", "BHARTIARTL", "LT", "M&M", "BAJFINANCE"
+    "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"
 }
 NSE_BURST_TRACK_NAMES = []
 MCX_BURST_TRACK_NAMES = [
@@ -3100,10 +3099,8 @@ def calculate_heatmap(kite):
 # ==============================================================================
 
 EXHAUSTION_REVERSAL_WATCHLIST = [
-    "NIFTY", "BANKNIFTY",
-    "HDFCBANK", "ICICIBANK", "RELIANCE", "BHARTIARTL", "LT",
-    "SBIN", "INFY", "AXISBANK", "TCS", "ITC", "M&M",
-    "HINDUNILVR", "TATAMOTORS", "KOTAKBANK",
+    "BANKNIFTY",
+    "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
 ]
 
 EXH_SETUP_VOL        = 100_000   # Candle 1 min volume

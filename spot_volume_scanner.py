@@ -21,7 +21,13 @@ def load_instruments():
     if not os.path.exists("instruments.csv"):
         print("instruments.csv not found!")
         return pd.DataFrame()
-    return pd.read_csv("instruments.csv")
+    df = pd.read_csv("instruments.csv")
+    if "expiry" in df.columns:
+        df["expiry_dt"] = pd.to_datetime(df["expiry"], errors="coerce")
+        import datetime
+        cutoff = datetime.datetime.now().date() + datetime.timedelta(days=7)
+        df = df[df["expiry_dt"].isna() | (df["expiry_dt"].dt.date > cutoff)].copy()
+    return df
 
 def start_spot_volume_scanner():
     print("Starting Spot Volume Scanner (3rd WebSocket)...")
@@ -281,7 +287,7 @@ def start_spot_volume_scanner():
                             fut_vol = max(0, fut_state.get("current_vol", 0) - fut_state.get("start_vol", 0))
                             fut_lots = int(fut_vol / lot_size)
                             
-                        required_lots = 50 if name == "CRUDEOILM" else 200
+                        required_lots = 50 if name == "CRUDEOILM" else 500
                         if spot_lots >= required_lots or fut_lots >= required_lots:
                             oi_table = ""
                             ref_price = 0
@@ -347,25 +353,37 @@ def start_spot_volume_scanner():
                                 try:
                                     quotes = kite_quote(kite, symbols_to_quote)
                                     
-                                    # Structure data by strike
-                                    strike_data = {s: {"CE": 0, "PE": 0} for s in target_strikes}
+                                    from pure_iv_scanner import iv_state
+                                    closest_expiry = relevant_opts.iloc[0]["expiry"]
+                                    exp_date_str = pd.to_datetime(closest_expiry).strftime("%Y-%m-%d")
+
+                                    strike_data = {s: {"CE": 0, "PE": 0, "CE_IV": 0.0, "PE_IV": 0.0, "CE_DIR": " ", "PE_DIR": " "} for s in target_strikes}
                                     for qs, data in quotes.items():
                                         if qs in symbol_to_strike:
                                             s = symbol_to_strike[qs]["strike"]
                                             t = symbol_to_strike[qs]["type"]
                                             strike_data[s][t] = data.get("oi", 0)
                                             
+                                    for s in target_strikes:
+                                        key = f"{name}_{s}_{exp_date_str}"
+                                        state_val = iv_state.get(key, {})
+                                        strike_data[s]["CE_IV"] = state_val.get("close_iv_ce", 0.0) * 100
+                                        strike_data[s]["PE_IV"] = state_val.get("close_iv_pe", 0.0) * 100
+                                        strike_data[s]["CE_DIR"] = state_val.get("dir_ce", " ")
+                                        strike_data[s]["PE_DIR"] = state_val.get("dir_pe", " ")
+                                            
                                     def fmt_lakhs(v):
-                                        if v == 0: return "0.0L"
+                                        if v == 0: return "0"
+                                        if v <= 99000:
+                                            return f"{int(round(v/1000))}K"
                                         return f"{v/100000:.1f}L"
                                         
-                                    max_oi = max(max(d["CE"], d["PE"]) for d in strike_data.values()) or 1
                                     max_ce = max(d["CE"] for d in strike_data.values())
                                     max_pe = max(d["PE"] for d in strike_data.values())
                                     
                                     oi_table += "\n```\n"
-                                    oi_table += f"🔴 CALL OI         | STRIKE  |   PUT OI 🟢\n"
-                                    oi_table += f"-------------------+---------+---------------\n"
+                                    oi_table += f"    C.IV    | Call OI  |  Strike  |  Put OI  |   P.IV    \n"
+                                    oi_table += f"------------+----------+----------+----------+-----------\n"
                                     
                                     for s in target_strikes:
                                         ce_val = strike_data[s]["CE"]
@@ -376,32 +394,26 @@ def start_spot_volume_scanner():
                                         is_max_ce = (ce_val == max_ce and ce_val > 0)
                                         is_max_pe = (pe_val == max_pe and pe_val > 0)
                                         
-                                        b_ce = int(round((ce_val / max_oi) * 4)) if ce_val > 0 else 0
-                                        b_ce = max(1, b_ce) if ce_val > 0 else 0
+                                        ce_prefix = "🔥" if is_max_ce else "  "
+                                        pe_suffix = "🔥" if is_max_pe else "  "
                                         
-                                        b_pe = int(round((pe_val / max_oi) * 4)) if pe_val > 0 else 0
-                                        b_pe = max(1, b_pe) if pe_val > 0 else 0
+                                        ce_oi_str = f"{ce_prefix}{ce_str:<5}"
+                                        pe_oi_str = f"{pe_str:>5}{pe_suffix}"
                                         
-                                        ce_prefix = "🔥" if is_max_ce else ""
-                                        ce_boxes = "🟥" * b_ce
+                                        c_iv = strike_data[s]["CE_IV"]
+                                        p_iv = strike_data[s]["PE_IV"]
+                                        c_dir = strike_data[s]["CE_DIR"].strip()
+                                        p_dir = strike_data[s]["PE_DIR"].strip()
                                         
-                                        ce_used = (2 if is_max_ce else 0) + len(ce_str) + 1 + (b_ce * 2)
-                                        left_spaces = max(0, 18 - ce_used)
-                                        left_part = f"{ce_prefix}{ce_str} {ce_boxes}" + (" " * left_spaces)
+                                        c_iv_str = f"{c_dir}{c_iv:.1f}%" if c_iv > 0 else "-"
+                                        p_iv_str = f"{p_iv:.1f}% {p_dir}" if p_iv > 0 else "-"
                                         
                                         if s == atm_strike:
-                                            strike_part = f"{int(s)} 🎯"
+                                            strike_str = f"{int(s)} 🎯"
                                         else:
-                                            strike_part = f"{int(s)}   "
+                                            strike_str = f"{int(s)}   "
                                             
-                                        pe_boxes = "🟩" * b_pe
-                                        pe_used_boxes = b_pe * 2
-                                        pe_spaces = max(1, 9 - pe_used_boxes)
-                                        pe_suffix = "🔥" if is_max_pe else ""
-                                        
-                                        right_part = f"{pe_boxes}" + (" " * pe_spaces) + f"{pe_str:>5}{pe_suffix}"
-                                        
-                                        oi_table += f"{left_part}| {strike_part} | {right_part}\n"
+                                        oi_table += f" {c_iv_str:>11} | {ce_oi_str}  |  {strike_str} | {pe_oi_str}  | {p_iv_str:<10}\n"
                                     oi_table += "```\n"
                                 except Exception as e:
                                     print("Error fetching OI quote:", e)

@@ -98,12 +98,9 @@ def _get_time_to_expiry_years(expiry_date):
 
 # TARGETS
 TARGET_SYMBOLS = [
-    # Indices & Commodities
-    "NIFTY", "BANKNIFTY", "CRUDEOILM",
+    "BANKNIFTY",
     # Top 5 Banking Stocks
-    "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
-    # Key Heavyweights
-    "RELIANCE", "TCS", "INFY", "BHARTIARTL", "LT", "M&M", "BAJFINANCE"
+    "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"
 ]
 
 # State Management
@@ -152,16 +149,29 @@ def process_pure_iv_pairs(symbol_base, strike, expiry, spot_price, ce_ltp, pe_lt
             
             state["roc_ce"] = roc_ce
             state["roc_pe"] = roc_pe
-            
-            # Individual spike alerts (> 10%) have been removed as per request.
-            # Now relying entirely on the 1-minute summary tables.
+
+            # 1-Minute Price direction check
+            prev_price_ce = state.get("open_price_ce", ce_ltp)
+            prev_price_pe = state.get("open_price_pe", pe_ltp)
+            close_price_ce = state.get("close_price_ce", ce_ltp)
+            close_price_pe = state.get("close_price_pe", pe_ltp)
+
+            ce_diff = close_price_ce - prev_price_ce
+            pe_diff = close_price_pe - prev_price_pe
+
+            state["dir_ce"] = "▲" if ce_diff > 0 else "▼" if ce_diff < 0 else " "
+            state["dir_pe"] = "▲" if pe_diff > 0 else "▼" if pe_diff < 0 else " "
 
         state["minute"] = current_minute
         state["open_iv_ce"] = iv_ce
         state["open_iv_pe"] = iv_pe
+        state["open_price_ce"] = ce_ltp
+        state["open_price_pe"] = pe_ltp
         
     state["close_iv_ce"] = iv_ce
     state["close_iv_pe"] = iv_pe
+    state["close_price_ce"] = ce_ltp
+    state["close_price_pe"] = pe_ltp
 
 import os
 
@@ -176,7 +186,13 @@ def load_instruments():
     if not os.path.exists("instruments.csv"):
         print("instruments.csv not found! Please ensure main app has downloaded it.")
         return pd.DataFrame()
-    return pd.read_csv("instruments.csv")
+    df = pd.read_csv("instruments.csv")
+    if "expiry" in df.columns:
+        df["expiry_dt"] = pd.to_datetime(df["expiry"], errors="coerce")
+        import datetime
+        cutoff = datetime.datetime.now().date() + datetime.timedelta(days=7)
+        df = df[df["expiry_dt"].isna() | (df["expiry_dt"].dt.date > cutoff)].copy()
+    return df
 
 def start_pure_iv_scanner():
     print("Starting Pure IV Scanner (>10 Logic)...")
@@ -385,7 +401,7 @@ def start_pure_iv_scanner():
                     ce_vols = [int(get_1m_vol(s, "CE") / lot_size) for s in target_strikes]
                     pe_vols = [int(get_1m_vol(s, "PE") / lot_size) for s in target_strikes]
                     
-                    threshold = 2.0 if name == "CRUDEOILM" else 20.0
+                    threshold = 2.0 if name == "CRUDEOILM" else 5.0
                     
                     has_spike = False
                     
@@ -405,7 +421,14 @@ def start_pure_iv_scanner():
                     if not has_spike:
                         continue
                         
-                    def f(v): return f"{v:4.1f}"
+                    def get_dir(strike, opt_type):
+                        key = f"{name}_{strike}_{expiry.strftime('%Y-%m-%d')}"
+                        return iv_state[key].get(f"dir_{opt_type.lower()}", " ")
+
+                    ce_dirs = [get_dir(s, "CE") for s in target_strikes]
+                    pe_dirs = [get_dir(s, "PE") for s in target_strikes]
+
+                    def f(v): return f"{v:5.1f}"
                     
                     def fmt_vol(v):
                         if v >= 1_000_000:
@@ -415,29 +438,30 @@ def start_pure_iv_scanner():
                             val = v / 1_000
                             return f"{int(val)}K" if val.is_integer() else f"{val:.1f}K"
                         return str(int(v))
+
                     msg =  f"```\n"
                     msg += f"🏦 {name} ({int(spot)})\n"
-                    msg += f" Strike | CE %| PE %| C.Lot| P.Lot\n"
-                    msg += f"--------+-----+-----+------+------\n"
+                    msg += f" C.Lot | CE %  | Strike | PE %  | P.Lot\n"
+                    msg += f"-------+-------+--------+-------+-------\n"
                     
                     for i in range(4):
-                        msg += f" {int(target_strikes[i]):<6} | {f(ce_rocs[i]):>4} | {f(pe_rocs[i]):>4} | {fmt_vol(ce_vols[i]):>4} | {fmt_vol(pe_vols[i]):>4}\n"
+                        msg += f" {fmt_vol(ce_vols[i]):>4}{ce_dirs[i]} | {f(ce_rocs[i]):>5} |  {int(target_strikes[i]):<5} | {f(pe_rocs[i]):>5} | {fmt_vol(pe_vols[i]):>4}{pe_dirs[i]}\n"
                         
-                    msg += f"--------+-----+-----+------+------\n"
+                    msg += f"-------+-------+--------+-------+-------\n"
                     # ATM Row
-                    msg += f" {int(target_strikes[4]):<6} | {f(ce_rocs[4]):>4} | {f(pe_rocs[4]):>4} | {fmt_vol(ce_vols[4]):>4} | {fmt_vol(pe_vols[4]):>4}🎯\n"
-                    msg += f"--------+-----+-----+------+------\n"
+                    msg += f" {fmt_vol(ce_vols[4]):>4}{ce_dirs[4]} | {f(ce_rocs[4]):>5} |  {int(target_strikes[4]):<5} | {f(pe_rocs[4]):>5} | {fmt_vol(pe_vols[4]):>4}{pe_dirs[4]} 🎯\n"
+                    msg += f"-------+-------+--------+-------+-------\n"
                     
                     for i in range(5, 9):
-                        msg += f" {int(target_strikes[i]):<6} | {f(ce_rocs[i]):>4} | {f(pe_rocs[i]):>4} | {fmt_vol(ce_vols[i]):>4} | {fmt_vol(pe_vols[i]):>4}\n"
+                        msg += f" {fmt_vol(ce_vols[i]):>4}{ce_dirs[i]} | {f(ce_rocs[i]):>5} |  {int(target_strikes[i]):<5} | {f(pe_rocs[i]):>5} | {fmt_vol(pe_vols[i]):>4}{pe_dirs[i]}\n"
                         
                     ce_total = sum(ce_rocs)
                     pe_total = sum(pe_rocs)
                     ce_vtotal = sum(ce_vols)
                     pe_vtotal = sum(pe_vols)
                     
-                    msg += f"--------+-----+-----+------+------\n"
-                    msg += f"  TOTAL | {f(ce_total):>4} | {f(pe_total):>4} | {fmt_vol(ce_vtotal):>4} | {fmt_vol(pe_vtotal):>4}\n"
+                    msg += f"-------+-------+--------+-------+-------\n"
+                    msg += f" {fmt_vol(ce_vtotal):>5} | {f(ce_total):>5} | TOTAL  | {f(pe_total):>5} | {fmt_vol(pe_vtotal):>5}\n"
                     msg += f"```"
                     
                     print(f"Reporting per-minute IV for {name}")
