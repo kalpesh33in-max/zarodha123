@@ -332,10 +332,14 @@ def _drop_expired_contracts(df):
     """Remove expired/rolling-off contracts from the in-memory instrument data."""
     if df is None or df.empty or "expiry" not in df.columns:
         return df
-    cutoff = pd.Timestamp(
-        datetime.now(IST).date() + timedelta(days=max(0, EXPIRY_ROLLOVER_DAYS))
-    )
-    return df[df["expiry"].notna() & (df["expiry"] > cutoff)].copy()
+    now_ist = datetime.now(IST)
+    if now_ist.month == 12:
+        next_month_start = datetime(now_ist.year + 1, 1, 1).date()
+    else:
+        next_month_start = datetime(now_ist.year, now_ist.month + 1, 1).date()
+    cutoff = pd.Timestamp(next_month_start)
+    return df[df["expiry"].notna() & (df["expiry"] >= cutoff)].copy()
+
 
 
 def load_options_data():

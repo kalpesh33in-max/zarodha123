@@ -9,8 +9,8 @@ from zoneinfo import ZoneInfo
 from env_config import (
     TELE_CHAT_ID_BN,
     TELE_TOKEN_BN,
-    TELE_CHAT_ID_REPORTS,
-    TELE_TOKEN_REPORTS
+    TELE_CHAT_ID,
+    TELE_TOKEN
 )
 from heatmap_engine import (
     ENABLE_INDEX_BURST_ALERTS,
@@ -182,8 +182,8 @@ def _gap_loop(kite, dispatcher, stop_event):
                     dispatcher.send(
                         PRIORITY_GAP,
                         alert,
-                        chat_id=TELE_CHAT_ID_REPORTS,
-                        token=TELE_TOKEN_REPORTS
+                        chat_id=TELE_CHAT_ID,
+                        token=TELE_TOKEN
                     )
             except Exception as e:
                 print(f"Error in gap scanner loop: {e}")

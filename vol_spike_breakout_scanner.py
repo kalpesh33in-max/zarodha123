@@ -45,8 +45,12 @@ def load_instruments_data():
     if "expiry" in df.columns:
         df["expiry_dt"] = pd.to_datetime(df["expiry"], errors="coerce")
         import datetime
-        cutoff = datetime.datetime.now().date() + datetime.timedelta(days=7)
-        df = df[df["expiry_dt"].isna() | (df["expiry_dt"].dt.date > cutoff)].copy()
+        now = datetime.datetime.now()
+        if now.month == 12:
+            next_month_start = datetime.date(now.year + 1, 1, 1)
+        else:
+            next_month_start = datetime.date(now.year, now.month + 1, 1)
+        df = df[df["expiry_dt"].isna() | (df["expiry_dt"].dt.date >= next_month_start)].copy()
     return df
 
 def get_option_contracts(df, name, spot_price):
@@ -455,10 +459,18 @@ def monitor_breakout_ticks(kite, symbol, ltp):
     # Check for breakouts
     if ltp > spike_info["high"]:
         # Bullish Breakout
-        validate_and_alert_breakout(kite, symbol, "BULLISH", ltp)
+        threading.Thread(
+            target=validate_and_alert_breakout,
+            args=(kite, symbol, "BULLISH", ltp),
+            daemon=True
+        ).start()
     elif ltp < spike_info["low"]:
         # Bearish Breakout
-        validate_and_alert_breakout(kite, symbol, "BEARISH", ltp)
+        threading.Thread(
+            target=validate_and_alert_breakout,
+            args=(kite, symbol, "BEARISH", ltp),
+            daemon=True
+        ).start()
 
 def start_vol_spike_breakout_scanner():
     print("Initializing Volume Spike Breakout Scanner...")
