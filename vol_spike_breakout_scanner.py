@@ -17,7 +17,7 @@ IST = ZoneInfo("Asia/Kolkata")
 
 # CONFIGURATION
 WATCHLIST = ["BANKNIFTY", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"]
-VOLUME_LOT_THRESHOLD = 300
+VOLUME_LOT_THRESHOLD = 200
 OI_ROC_THRESHOLD = 0.75
 TRACKING_WINDOW_MINUTES = 60
 CONSOLIDATION_MIN_MINUTES = 10
@@ -405,7 +405,7 @@ def process_closed_1m_candle(kite, symbol, candle):
         
     oi_roc = ((current_oi - prev_oi) / prev_oi) * 100
     
-    if vol_lots > VOLUME_LOT_THRESHOLD and abs(oi_roc) >= OI_ROC_THRESHOLD:
+    if vol_lots >= VOLUME_LOT_THRESHOLD and abs(oi_roc) >= OI_ROC_THRESHOLD:
         High = float(candle.get("high", 0.0))
         Low = float(candle.get("low", 0.0))
         
