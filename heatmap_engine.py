@@ -1812,13 +1812,8 @@ def calculate_burst_alerts(kite):
 
 
 def calculate_gap_alerts(kite, batch_index=0, max_quote_symbols=500):
-    if non_burst_alerts_paused_today():
-        return []
-    return build_monthly_future_gap_alerts(
-        kite,
-        batch_index=batch_index,
-        max_quote_symbols=max_quote_symbols,
-    )
+    # Gap Scanner paused / held until further instruction
+    return []
 
 
 def calculate_historical_alerts(kite):

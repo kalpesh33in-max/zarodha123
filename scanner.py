@@ -163,32 +163,9 @@ def _burst_loop(kite, dispatcher, stop_event):
 
 
 def _gap_loop(kite, dispatcher, stop_event):
-    state = {}
-    batch_index = 0
+    # Gap Scanner is on hold until further instruction
     while not stop_event.is_set():
-        now = datetime.now(IST)
-        if _is_any_scanner_session(now):
-            try:
-                # gap_alerts: Monthly future gap reports
-                # Destination: Default Telegram/Matrix channel (resolved by _resolve_telegram_target)
-                alerts = calculate_gap_alerts(
-                    kite,
-                    batch_index=batch_index,
-                    max_quote_symbols=500,
-                )
-                batch_index += 1
-                for alert in alerts:
-                    dispatcher.send(
-                        PRIORITY_GAP,
-                        alert,
-                        chat_id=TELE_CHAT_ID,
-                        token=TELE_TOKEN
-                    )
-            except Exception as e:
-                print(f"Error in gap scanner loop: {e}")
-                _send_error(dispatcher, "Gap Scanner", e, state)
-
-        if _wait(stop_event, GAP_BATCH_INTERVAL_SECONDS):
+        if _wait(stop_event, 60):
             break
 
 
