@@ -100,7 +100,9 @@ def _get_time_to_expiry_years(expiry_date):
 TARGET_SYMBOLS = [
     "BANKNIFTY",
     # Top 5 Banking Stocks
-    "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"
+    "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
+    # MCX Commodity
+    "CRUDEOILM"
 ]
 
 # State Management
@@ -405,7 +407,7 @@ def start_pure_iv_scanner():
                     ce_vols = [int(get_1m_vol(s, "CE") / lot_size) for s in target_strikes]
                     pe_vols = [int(get_1m_vol(s, "PE") / lot_size) for s in target_strikes]
                     
-                    threshold = 2.0 if name == "CRUDEOILM" else 5.0
+                    threshold = 1.0 if name == "CRUDEOILM" else 5.0
                     
                     has_spike = False
                     

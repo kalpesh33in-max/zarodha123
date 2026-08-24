@@ -18,7 +18,6 @@ from heatmap_engine import (
     calculate_burst_alerts,
     calculate_first_60m_alerts,
     calculate_gap_alerts,
-    calculate_other_historical_alerts,
     get_burst_monitor_status,
     get_burst_quote_status,
     is_burst_session_open,
@@ -204,12 +203,6 @@ def _historical_loop(kite, dispatcher, stop_event):
                 first_60m_alerts = calculate_first_60m_alerts(kite)
                 for alert in first_60m_alerts:
                     dispatcher.send(PRIORITY_first_60m, alert)
-
-                # historical_alerts: Daily/weekly volume mismatches and S4 alerts
-                # Destination: Default Telegram/Matrix channel (resolved by _resolve_telegram_target)
-                alerts = calculate_other_historical_alerts(kite)
-                for alert in alerts:
-                    dispatcher.send(PRIORITY_HISTORICAL, alert)
 
             except Exception as e:
                 print(f"Error in historical scanner loop: {e}")
