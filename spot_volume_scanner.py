@@ -371,8 +371,8 @@ def start_spot_volume_scanner():
                                     for s in target_strikes:
                                         key = f"{name}_{s}_{exp_date_str}"
                                         state_val = iv_state.get(key, {})
-                                        strike_data[s]["CE_IV"] = state_val.get("close_iv_ce", 0.0) * 100
-                                        strike_data[s]["PE_IV"] = state_val.get("close_iv_pe", 0.0) * 100
+                                        strike_data[s]["CE_IV"] = state_val.get("roc_ce", 0.0)
+                                        strike_data[s]["PE_IV"] = state_val.get("roc_pe", 0.0)
                                         strike_data[s]["CE_DIR"] = state_val.get("dir_ce", " ")
                                         strike_data[s]["PE_DIR"] = state_val.get("dir_pe", " ")
                                             
@@ -386,7 +386,7 @@ def start_spot_volume_scanner():
                                     max_pe = max(d["PE"] for d in strike_data.values())
                                     
                                     oi_table += "\n```\n"
-                                    oi_table += f"    C.IV    | Call OI  |  Strike  |  Put OI  |   P.IV    \n"
+                                    oi_table += f"    C.ROC   | Call OI  |  Strike  |  Put OI  |   P.ROC   \n"
                                     oi_table += f"------------+----------+----------+----------+-----------\n"
                                     
                                     for s in target_strikes:
@@ -409,8 +409,8 @@ def start_spot_volume_scanner():
                                         c_dir = strike_data[s]["CE_DIR"].strip()
                                         p_dir = strike_data[s]["PE_DIR"].strip()
                                         
-                                        c_iv_str = f"{c_dir}{c_iv:.1f}%" if c_iv > 0 else "-"
-                                        p_iv_str = f"{p_iv:.1f}% {p_dir}" if p_iv > 0 else "-"
+                                        c_iv_str = f"{c_dir}{c_iv:+.1f}%" if c_iv != 0.0 else f"{c_dir}0.0%"
+                                        p_iv_str = f"{p_iv:+.1f}% {p_dir}" if p_iv != 0.0 else f"0.0% {p_dir}"
                                         
                                         if s == atm_strike:
                                             strike_str = f"{int(s)} 🎯"
