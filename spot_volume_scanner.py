@@ -98,8 +98,12 @@ def start_spot_volume_scanner():
             "opts_df": opts_df
         }
             
-    # 2. Indices (BankNifty): We want FUTURE only
-    for name in INDEX_BURST_NAMES:
+    # 2. Indices (BANKNIFTY, NIFTY, SENSEX)
+    INDEX_TARGETS = ["BANKNIFTY", "NIFTY", "SENSEX"]
+    DEFAULT_STRIKE_STEPS = {"NIFTY": 50, "BANKNIFTY": 100, "SENSEX": 100, "CRUDEOILM": 50}
+    spot_index_map = {"NIFTY": "NIFTY 50", "BANKNIFTY": "NIFTY BANK", "SENSEX": "SENSEX"}
+
+    for name in INDEX_TARGETS:
         futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
         if not futs.empty:
             futs = futs.sort_values(by="expiry")
@@ -107,17 +111,22 @@ def start_spot_volume_scanner():
             lot_size = int(fut.get("lot_size", 1))
             tkn = int(fut["instrument_token"])
             target_tokens.append(tkn)
+
+            spot_name = spot_index_map.get(name)
+            spots = df[(df["tradingsymbol"] == spot_name) & (df["segment"] == "INDICES")]
+            spot_tkn = int(spots.iloc[0]["instrument_token"]) if not spots.empty else None
+            if spot_tkn:
+                target_tokens.append(spot_tkn)
+
             opts = df[(df["name"] == name) & (df["instrument_type"].isin(["CE", "PE"]))]
-            strike_step = 50
+            strike_step = DEFAULT_STRIKE_STEPS.get(name, 50)
             opts_df = pd.DataFrame()
             if not opts.empty:
-                sample_strikes = sorted(opts["strike"].unique())
-                strike_step = sample_strikes[1] - sample_strikes[0] if len(sample_strikes) > 1 else 50
                 closest_expiry = opts["expiry"].min()
                 opts_df = opts[opts["expiry"] == closest_expiry]
-                
+
             symbol_metadata[name] = {
-                "spot_tkn": None,
+                "spot_tkn": spot_tkn,
                 "fut_tkn": tkn,
                 "lot_size": lot_size,
                 "is_mcx": False,
@@ -291,7 +300,7 @@ def start_spot_volume_scanner():
                             fut_vol = max(0, fut_state.get("current_vol", 0) - fut_state.get("start_vol", 0))
                             fut_lots = int(fut_vol / lot_size)
                             
-                        required_lots = 20 if name == "CRUDEOILM" else 500
+                        required_lots = 50 if name == "CRUDEOILM" else 500
                         if spot_lots >= required_lots or fut_lots >= required_lots:
                             oi_table = ""
                             ref_price = 0
