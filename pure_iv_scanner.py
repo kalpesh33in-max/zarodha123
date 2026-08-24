@@ -98,6 +98,8 @@ def _get_time_to_expiry_years(expiry_date):
 
 # TARGETS
 TARGET_SYMBOLS = [
+    "NIFTY",
+    "SENSEX",
     "BANKNIFTY",
     # Top 5 Banking Stocks
     "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
@@ -258,14 +260,15 @@ def start_pure_iv_scanner():
                 if opts.empty: continue
                 
                 # Approximate strike step
-                sample_strikes = sorted(opts["strike"].unique())
-                if len(sample_strikes) > 1:
-                    strike_step = sample_strikes[1] - sample_strikes[0]
+                default_steps = {"NIFTY": 50, "BANKNIFTY": 100, "SENSEX": 100, "CRUDEOILM": 50}
+                if name in default_steps:
+                    strike_step = default_steps[name]
                 else:
-                    strike_step = 50
+                    sample_strikes = sorted(opts["strike"].unique())
+                    strike_step = sample_strikes[1] - sample_strikes[0] if len(sample_strikes) > 1 else 50
                     
-                # Use 10 ITM for NIFTY, BANKNIFTY and CRUDEOILM, 5 ITM for stocks
-                num_itm = 10 if name in ["NIFTY", "BANKNIFTY", "CRUDEOILM"] else 5
+                # Use 10 ITM for NIFTY, BANKNIFTY, SENSEX and CRUDEOILM, 5 ITM for stocks
+                num_itm = 10 if name in ["NIFTY", "BANKNIFTY", "SENSEX", "CRUDEOILM"] else 5
                 ce_strikes, pe_strikes = get_atm_and_itm_strikes(ltp, strike_step, num_itm=num_itm)
                 
                 closest_expiry = opts["expiry"].min()
