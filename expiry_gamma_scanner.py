@@ -116,7 +116,8 @@ def start_expiry_gamma_scanner():
         
     # Get Spot token
     spot_symbol = "NSE:NIFTY 50" if name == "NIFTY" else "BSE:SENSEX"
-    spots = df[df["tradingsymbol"] == (name if name == "NIFTY" else "SENSEX")]
+    spot_tsym = "NIFTY 50" if name == "NIFTY" else "SENSEX"
+    spots = df[df["tradingsymbol"] == spot_tsym]
     if spots.empty:
         print(f"Spot index token not found for {name}.")
         return
