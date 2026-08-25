@@ -45,12 +45,8 @@ def load_instruments_data():
     if "expiry" in df.columns:
         df["expiry_dt"] = pd.to_datetime(df["expiry"], errors="coerce")
         import datetime
-        now = datetime.datetime.now()
-        if now.month == 12:
-            next_month_start = datetime.date(now.year + 1, 1, 1)
-        else:
-            next_month_start = datetime.date(now.year, now.month + 1, 1)
-        df = df[df["expiry_dt"].isna() | (df["expiry_dt"].dt.date >= next_month_start)].copy()
+        today_date = datetime.datetime.now().date()
+        df = df[df["expiry_dt"].isna() | (df["expiry_dt"].dt.date >= today_date)].copy()
     return df
 
 def get_option_contracts(df, name, spot_price):

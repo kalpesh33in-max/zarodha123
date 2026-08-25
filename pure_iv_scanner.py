@@ -98,8 +98,6 @@ def _get_time_to_expiry_years(expiry_date):
 
 # TARGETS
 TARGET_SYMBOLS = [
-    "NIFTY",
-    "SENSEX",
     "BANKNIFTY",
     # Top 5 Banking Stocks
     "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
@@ -141,13 +139,9 @@ def process_pure_iv_pairs(symbol_base, strike, expiry, spot_price, ce_ltp, pe_lt
         if "minute" in state:
             prev_iv_ce = state.get("open_iv_ce", iv_ce)
             prev_iv_pe = state.get("open_iv_pe", iv_pe)
-            
-            # Fetch the previous minute's close from state
             close_iv_ce = state.get("close_iv_ce", iv_ce)
             close_iv_pe = state.get("close_iv_pe", iv_pe)
             
-            # Calculate ROC in percentage terms (multiply by 100)
-            # We measure the change from the previous minute's open to the previous minute's close
             roc_ce = (close_iv_ce - prev_iv_ce) * 100
             roc_pe = (close_iv_pe - prev_iv_pe) * 100
             
@@ -194,12 +188,8 @@ def load_instruments():
     if "expiry" in df.columns:
         df["expiry_dt"] = pd.to_datetime(df["expiry"], errors="coerce")
         import datetime
-        now = datetime.datetime.now()
-        if now.month == 12:
-            next_month_start = datetime.date(now.year + 1, 1, 1)
-        else:
-            next_month_start = datetime.date(now.year, now.month + 1, 1)
-        df = df[df["expiry_dt"].isna() | (df["expiry_dt"].dt.date >= next_month_start)].copy()
+        today_date = datetime.datetime.now().date()
+        df = df[df["expiry_dt"].isna() | (df["expiry_dt"].dt.date >= today_date)].copy()
     return df
 
 def start_pure_iv_scanner():

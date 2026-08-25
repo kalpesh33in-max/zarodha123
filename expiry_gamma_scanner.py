@@ -91,7 +91,7 @@ def start_expiry_gamma_scanner():
         return
         
     # Get active expiry day instrument
-    # We want weekly expiry (closest expiry which is today!)
+    # We want weekly expiry (closest active expiry which is today or upcoming today!)
     opts = df[(df["name"] == name) & (df["segment"].isin(["NFO-OPT", "BFO-OPT"]))]
     if opts.empty:
         print(f"No option contracts found for {name} today.")
@@ -99,12 +99,19 @@ def start_expiry_gamma_scanner():
         
     opts = opts.copy()
     opts["expiry"] = pd.to_datetime(opts["expiry"])
-    closest_expiry = opts["expiry"].min()
     today_date = datetime.datetime.now(IST).date()
     
-    # Expiry validation
+    # Filter active contracts on or after today so past expiries don't block
+    active_opts = opts[opts["expiry"].dt.date >= today_date]
+    if active_opts.empty:
+        print(f"No future/today contracts found for {name}.")
+        return
+
+    closest_expiry = active_opts["expiry"].min()
+    
+    # Expiry validation: Must be today's 0-DTE
     if closest_expiry.date() != today_date:
-        print(f"Closest expiry for {name} is {closest_expiry.date()}, not today ({today_date}). Standby.")
+        print(f"Closest active expiry for {name} is {closest_expiry.date()}, not today ({today_date}). Standby.")
         return
         
     # Get Spot token
@@ -114,9 +121,9 @@ def start_expiry_gamma_scanner():
         print(f"Spot index token not found for {name}.")
         return
     spot_token = int(spots.iloc[0]["instrument_token"])
-    lot_size = int(opts.iloc[0].get("lot_size", 10))
+    lot_size = int(active_opts.iloc[0].get("lot_size", 10 if name == "SENSEX" else 25))
     
-    print(f"Expiry Gamma Scanner started for {name} (Lot Size: {lot_size}). Spot Token: {spot_token}")
+    print(f"Expiry Gamma Scanner started for {name} on Expiry {today_date} (Lot Size: {lot_size}). Spot Token: {spot_token}")
     
     # Track the active options strikes
     active_option_tokens = []
@@ -134,13 +141,14 @@ def start_expiry_gamma_scanner():
     if initial_spot <= 0:
         return
         
-    strikes = sorted(opts["strike"].unique())
+    strikes = sorted(active_opts["strike"].unique())
     atm_strike = min(strikes, key=lambda x: abs(x - initial_spot))
     idx = strikes.index(atm_strike)
     
-    # Track ATM +/- 10 strikes
-    selected_strikes = strikes[max(0, idx - 10): min(len(strikes), idx + 11)]
-    expiry_opts = opts[(opts["expiry"] == closest_expiry) & (opts["strike"].isin(selected_strikes))]
+    # Track ATM +/- 6 strikes (13 strikes * 2 = 26 contracts)
+    # This keeps WebSocket feed lightweight, fast, and focused on active strikes
+    selected_strikes = strikes[max(0, idx - 6): min(len(strikes), idx + 7)]
+    expiry_opts = active_opts[(active_opts["expiry"] == closest_expiry) & (active_opts["strike"].isin(selected_strikes))]
     
     for _, row in expiry_opts.iterrows():
         tkn = int(row["instrument_token"])
@@ -298,46 +306,48 @@ def start_expiry_gamma_scanner():
             # Between 1:30 PM (13:30) and 3:00 PM (15:00)
             is_afternoon = datetime.time(13, 30) <= now.time() <= datetime.time(15, 0)
             if is_afternoon:
+                max_otm_dist = 300 if name == "SENSEX" else 100
+                gamma_threshold = 0.0020 if name == "SENSEX" else 0.0050
+
                 for strike_data in gamma_profile:
-                    # check near-the-money OTM strikes (within 100 points)
                     dist = strike_data["strike"] - spot_price
                     # OTM Call: strike > spot, OTM Put: strike < spot
-                    is_otm_ce = 0 < dist <= 100
-                    is_otm_pe = -100 <= dist < 0
+                    is_otm_ce = 0 < dist <= max_otm_dist
+                    is_otm_pe = -max_otm_dist <= dist < 0
                     
-                    if is_otm_ce and strike_data["ce_gamma"] > 0.005:
+                    if is_otm_ce and strike_data["ce_gamma"] > gamma_threshold:
                         alert_key = f"hz_ce_{strike_data['strike']}"
                         last_alert = last_alert_time.get(alert_key, 0.0)
                         if time.time() - last_alert > 900: # 15 min cooldown
                             last_alert_time[alert_key] = time.time()
                             msg = (
-                                f"🔥 *0-DTE GAMMA SURGE ALERT: {name}*\n"
+                                f"🔥 *0-DTE GAMMA SURGE ALERT (CALL SIDE): {name}*\n"
                                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                                 f"⏰ Time: {now.strftime('%H:%M:%S')} IST\n"
                                 f"Time to Expiry: {int(minutes_left)} Mins Left\n"
                                 f"Spot Price: {spot_price:.2f}\n"
-                                f"Active Strike: {int(strike_data['strike'])} CE\n"
+                                f"🎯 *Hero-Zero Strike to BUY: {int(strike_data['strike'])} CE*\n"
                                 f"Premium LTP: ₹{strike_data['ce_ltp']:.2f}\n"
                                 f"Strike Gamma (Γ): {strike_data['ce_gamma']:.4f}\n"
-                                f"💡 *Market Implication*: Rapid delta expansion active. Small index moves will swing premium percentages heavily."
+                                f"💡 *Trade Direction*: SCENARIO A (Call Gamma Surge). Small index upside will explode CE premium."
                             )
                             send_telegram_message(msg, chat_id=env_config.TELE_CHAT_ID_BN, token=env_config.TELE_TOKEN_BN)
                             
-                    if is_otm_pe and strike_data["pe_gamma"] > 0.005:
+                    if is_otm_pe and strike_data["pe_gamma"] > gamma_threshold:
                         alert_key = f"hz_pe_{strike_data['strike']}"
                         last_alert = last_alert_time.get(alert_key, 0.0)
                         if time.time() - last_alert > 900: # 15 min cooldown
                             last_alert_time[alert_key] = time.time()
                             msg = (
-                                f"🔥 *0-DTE GAMMA SURGE ALERT: {name}*\n"
+                                f"🔥 *0-DTE GAMMA SURGE ALERT (PUT SIDE): {name}*\n"
                                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                                 f"⏰ Time: {now.strftime('%H:%M:%S')} IST\n"
                                 f"Time to Expiry: {int(minutes_left)} Mins Left\n"
                                 f"Spot Price: {spot_price:.2f}\n"
-                                f"Active Strike: {int(strike_data['strike'])} PE\n"
+                                f"🎯 *Hero-Zero Strike to BUY: {int(strike_data['strike'])} PE*\n"
                                 f"Premium LTP: ₹{strike_data['pe_ltp']:.2f}\n"
                                 f"Strike Gamma (Γ): {strike_data['pe_gamma']:.4f}\n"
-                                f"💡 *Market Implication*: Rapid delta expansion active. Small index moves will swing premium percentages heavily."
+                                f"💡 *Trade Direction*: SCENARIO B (Put Gamma Surge). Index downside/rejection will explode PE premium."
                             )
                             send_telegram_message(msg, chat_id=env_config.TELE_CHAT_ID_BN, token=env_config.TELE_TOKEN_BN)
                             

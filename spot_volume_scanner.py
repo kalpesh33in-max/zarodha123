@@ -25,12 +25,8 @@ def load_instruments():
     if "expiry" in df.columns:
         df["expiry_dt"] = pd.to_datetime(df["expiry"], errors="coerce")
         import datetime
-        now = datetime.datetime.now()
-        if now.month == 12:
-            next_month_start = datetime.date(now.year + 1, 1, 1)
-        else:
-            next_month_start = datetime.date(now.year, now.month + 1, 1)
-        df = df[df["expiry_dt"].isna() | (df["expiry_dt"].dt.date >= next_month_start)].copy()
+        today_date = datetime.datetime.now().date()
+        df = df[df["expiry_dt"].isna() | (df["expiry_dt"].dt.date >= today_date)].copy()
     return df
 
 def start_spot_volume_scanner():
@@ -98,10 +94,10 @@ def start_spot_volume_scanner():
             "opts_df": opts_df
         }
             
-    # 2. Indices (BANKNIFTY, NIFTY, SENSEX)
-    INDEX_TARGETS = ["BANKNIFTY", "NIFTY", "SENSEX"]
-    DEFAULT_STRIKE_STEPS = {"NIFTY": 50, "BANKNIFTY": 100, "SENSEX": 100, "CRUDEOILM": 50}
-    spot_index_map = {"NIFTY": "NIFTY 50", "BANKNIFTY": "NIFTY BANK", "SENSEX": "SENSEX"}
+    # 2. Indices (BANKNIFTY only - NIFTY and SENSEX permanently removed)
+    INDEX_TARGETS = ["BANKNIFTY"]
+    DEFAULT_STRIKE_STEPS = {"BANKNIFTY": 100, "CRUDEOILM": 50}
+    spot_index_map = {"BANKNIFTY": "NIFTY BANK"}
 
     for name in INDEX_TARGETS:
         futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
