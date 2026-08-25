@@ -491,6 +491,7 @@ def start_vol_spike_breakout_scanner():
     # Setup mapping for Spot/Future and Lot Sizes
     global symbol_lot_sizes, spot_future_map, option_metadata
     target_tokens = []
+    token_symbol_map = {}
     
     for name in WATCHLIST:
         futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")].sort_values(by="expiry")
@@ -505,14 +506,16 @@ def start_vol_spike_breakout_scanner():
         fut_symbol = f"{exchange}:{fut['tradingsymbol']}"
         spot_future_map[name] = fut_symbol
         
-        target_tokens.append(int(fut["instrument_token"]))
+        fut_tkn = int(fut["instrument_token"])
+        target_tokens.append(fut_tkn)
+        token_symbol_map[fut_tkn] = fut["tradingsymbol"]
         
         # Spot mapping
-        spot_symbol = f"NSE:{name}" if name != "BANKNIFTY" else "NSE:NIFTY BANK"
         spots = df[df["tradingsymbol"] == (name if name != "NIFTY BANK" else "NIFTY BANK")]
         if not spots.empty:
             spot_token = int(spots.iloc[0]["instrument_token"])
             target_tokens.append(spot_token)
+            token_symbol_map[spot_token] = name
             
         # Get ATM +- 5 options metadata
         # Resolve initial spot price
@@ -536,20 +539,16 @@ def start_vol_spike_breakout_scanner():
         
         for tick in ticks:
             tkn = tick["instrument_token"]
+            if tkn not in token_symbol_map:
+                continue
+
             ltp = tick["last_price"]
             vol = tick.get("volume_traded") or tick.get("volume", 0)
             oi = tick.get("oi", 0)
-            
-            # Map token back to symbol string
-            symbol_str = ""
-            for sym, f_sym in spot_future_map.items():
-                if f_sym in spot_future_map.values():
-                    # check if match token
-                    pass
-            # For simplicity, do a reverse lookup on token
+            sym_name = token_symbol_map[tkn]
             
             # Run live breakout checks
-            monitor_breakout_ticks(kite, str(tkn), ltp)
+            monitor_breakout_ticks(kite, sym_name, ltp)
             
             # Group into 1-minute candles
             if tkn not in current_minute:
@@ -561,7 +560,7 @@ def start_vol_spike_breakout_scanner():
             if current_minute[tkn] != minute_str:
                 # Candle completed!
                 closed_candle = minute_candles[tkn]
-                process_closed_1m_candle(kite, str(tkn), closed_candle)
+                process_closed_1m_candle(kite, sym_name, closed_candle)
                 
                 # Reset for next minute
                 current_minute[tkn] = minute_str
