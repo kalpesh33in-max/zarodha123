@@ -191,11 +191,23 @@ def start_expiry_gamma_scanner():
         while True:
             time.sleep(60) # Run every minute
             now = datetime.datetime.now(IST)
-            if now.weekday() > 4:
+            if now.weekday() > 4 or now.date().isoformat() in getattr(env_config, "NSE_HOLIDAYS", set()):
+                continue
+
+            # Strict 0-DTE check: only execute on today's actual expiry date
+            if now.date() != closest_expiry.date():
+                time.sleep(300)
+                continue
+
+            t = now.time()
+            market_start = datetime.time(9, 15)
+            market_end = datetime.time(15, 30)
+            if not (market_start <= t <= market_end):
+                time.sleep(30)
                 continue
                 
             # Expiry close time target is 15:30 IST
-            close_time = datetime.datetime.combine(now.date(), datetime.time(15, 30), tzinfo=IST)
+            close_time = datetime.datetime.combine(now.date(), market_end, tzinfo=IST)
             minutes_left = (close_time - now).total_seconds() / 60.0
             
             if minutes_left <= 0:
