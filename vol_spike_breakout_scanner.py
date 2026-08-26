@@ -7,11 +7,62 @@ import pandas as pd
 from zoneinfo import ZoneInfo
 from kiteconnect import KiteConnect
 
+import math
+
 # Import existing configs and tools
 import env_config
 from websocket_flow import register_ws_callbacks, add_shared_tokens, get_symbol_quotes, get_token_quotes
 from telegram_utils import send_telegram_message
-from pure_iv_scanner import calculate_iv, _get_time_to_expiry_years, iv_state
+
+RISK_FREE_RATE = 0.07
+
+def norm_cdf(x):
+    return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
+
+def norm_pdf(x):
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+def black_scholes_price(S, K, T, r, sigma, option_type="CE"):
+    if T <= 0 or sigma <= 0:
+        return max(0.0, S - K) if option_type == "CE" else max(0.0, K - S)
+    d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    if option_type == "CE":
+        return S * norm_cdf(d1) - K * math.exp(-r * T) * norm_cdf(d2)
+    else:
+        return K * math.exp(-r * T) * norm_cdf(-d2) - S * norm_cdf(-d1)
+
+def calculate_iv(target_price, S, K, T, r=RISK_FREE_RATE, option_type="CE", max_iterations=100, tolerance=1e-5):
+    intrinsic = max(0.0, S - K) if option_type == "CE" else max(0.0, K - S)
+    if target_price <= intrinsic or T <= 0:
+        return 0.001
+    sigma = 0.3
+    for _ in range(max_iterations):
+        price = black_scholes_price(S, K, T, r, sigma, option_type)
+        diff = price - target_price
+        if abs(diff) < tolerance:
+            return sigma
+        d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
+        vega = S * norm_pdf(d1) * math.sqrt(T)
+        if vega == 0:
+            return sigma
+        sigma -= diff / vega
+        if sigma <= 0:
+            sigma = 0.001
+        elif sigma > 5.0:
+            sigma = 5.0
+    return sigma
+
+def _get_time_to_expiry_years(expiry_date):
+    now = datetime.datetime.now(ZoneInfo("Asia/Kolkata"))
+    if hasattr(expiry_date, "date") and not isinstance(expiry_date, datetime.datetime):
+        expiry = datetime.datetime.combine(expiry_date, datetime.time(15, 30), tzinfo=ZoneInfo("Asia/Kolkata"))
+    else:
+        expiry = expiry_date
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+    diff = (expiry - now).total_seconds()
+    return max(0.0001, diff / (365.25 * 86400.0))
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -125,25 +176,16 @@ def analyze_option_chain_changes(kite, name, current_spot, spike_time, exp_date_
         quote = quotes.get(sym_key, {})
         current_oi = quote.get("oi", 0)
         current_ltp = quote.get("last_price", 0.0)
-        
-        # Calculate current IV
         current_iv = calculate_iv(current_ltp, current_spot, strike, T, option_type=opt_type) * 100
-        
-        # Retrieve historical state at spike time from pure_iv_scanner state
-        state_key = f"{name}_{strike}_{exp_date_str}"
-        hist_state = iv_state.get(state_key, {})
-        
-        open_iv = hist_state.get("open_iv_ce" if opt_type == "CE" else "open_iv_pe", 0.0) * 100
-        open_price = hist_state.get("open_price_ce" if opt_type == "CE" else "open_price_pe", current_ltp)
         
         results[strike] = results.get(strike, {})
         results[strike][opt_type] = {
             "oi": current_oi,
             "ltp": current_ltp,
             "iv": current_iv,
-            "oi_change_pct": ((current_oi - hist_state.get("ce_vol_total" if opt_type == "CE" else "pe_vol_total", current_oi)) / max(1, current_oi)) * 100,
-            "price_change_pct": ((current_ltp - open_price) / max(0.01, open_price)) * 100,
-            "iv_change_pct": current_iv - open_iv
+            "oi_change_pct": 0.0,
+            "price_change_pct": 0.0,
+            "iv_change_pct": 0.0
         }
     return results
 
@@ -184,28 +226,10 @@ def get_bank_consolidation_status(kite, direction, spike_banks):
         if is_aligned:
             aligned_count += 1
             
-        # Grab Option chain ATM CE/PE details
-        opt_details = ""
-        opts_df_bank = option_metadata.get(bank, pd.DataFrame())
-        if not opts_df_bank.empty and start_price > 0:
-            expiry_bank = pd.to_datetime(opts_df_bank.iloc[0]["expiry"]).strftime("%Y-%m-%d")
-            strikes_bank = sorted(opts_df_bank["strike"].unique())
-            atm_strike_bank = min(strikes_bank, key=lambda x: abs(x - curr_price))
-            
-            key_base = f"{bank}_{atm_strike_bank}_{expiry_bank}"
-            state_val = iv_state.get(key_base, {})
-            
-            c_dir = state_val.get("dir_ce", " ").strip()
-            p_dir = state_val.get("dir_pe", " ").strip()
-            c_iv = state_val.get("close_iv_ce", 0.0) * 100
-            p_iv = state_val.get("close_iv_pe", 0.0) * 100
-            
-            opt_details = f" | Option: CE:{c_dir} (IV={c_iv:.1f}%), PE:{p_dir} (IV={p_iv:.1f}%)"
-            
         dir_icon = "🟩" if is_aligned else "🟥"
         bank_status[bank] = {
             "icon": dir_icon,
-            "msg": f"Vol={format_volume(consol_vol)} | FutOI={oi_chg_pct:+.1f}% | Price={price_change_pct:+.2f}%{opt_details}"
+            "msg": f"Vol={format_volume(consol_vol)} | FutOI={oi_chg_pct:+.1f}% | Price={price_change_pct:+.2f}%"
         }
         
     return bank_status, aligned_count >= 3, aligned_count

@@ -266,15 +266,11 @@ def _get_instruments_mtime():
 
 
 def _drop_expired_contracts(df):
-    """Remove expired/rolling-off contracts from the in-memory instrument data."""
+    """Remove expired contracts from the in-memory instrument data."""
     if df is None or df.empty or "expiry" not in df.columns:
         return df
     now_ist = datetime.now(IST)
-    if now_ist.month == 12:
-        next_month_start = datetime(now_ist.year + 1, 1, 1).date()
-    else:
-        next_month_start = datetime(now_ist.year, now_ist.month + 1, 1).date()
-    cutoff = pd.Timestamp(next_month_start)
+    cutoff = pd.Timestamp(now_ist.date())
     return df[df["expiry"].notna() & (df["expiry"] >= cutoff)].copy()
 
 
@@ -1431,7 +1427,7 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=
         if oi > 0:
             stats["future_oi_quotes"] = stats.get("future_oi_quotes", 0) + 1
 
-    if prev_oi > 0:
+    if prev_oi > 0 and oi > 0:
         tick_lots = int(abs(oi - prev_oi) / lot_size)
         if stats is not None:
             stats["max_future_tick_lots"] = max(
@@ -1453,44 +1449,49 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=
     if key in active_watches:
         watch = active_watches[key]
         if now >= watch["end_time"]:
-            oi_chg = oi - watch["start_oi"]
-            p_chg = ltp - watch["start_price"]
-            final_lot_size = _normalize_lot_size(watch.get("lot_size")) or lot_size
-            final_lots = int(abs(oi_chg) / final_lot_size)
-            
-            action = classify_action(watch["symbol"], oi_chg, p_chg)
-            is_covering_unwinding = any(x in action for x in ["COVERING", "UNWINDING"])
-            
-            if watch["name"] == "CRUDEOILM":
-                req_threshold = 100 if is_covering_unwinding else 25
+            if oi <= 0:
+                # Discard zero/expired ticks
+                del active_watches[key]
             else:
-                req_threshold = 500 if is_covering_unwinding else 100
+                oi_chg = oi - watch["start_oi"]
+                p_chg = ltp - watch["start_price"]
+                final_lot_size = _normalize_lot_size(watch.get("lot_size")) or lot_size
+                final_lots = int(abs(oi_chg) / final_lot_size)
                 
-            if final_lots >= req_threshold:
-                strength = get_strength_label(final_lots, watch["name"])
-                p_icon = "▲" if p_chg >= 0 else "▼"
-                expiry_line = (
-                    f"EXPIRY: {watch['expiry_text']}\n"
-                    if watch.get("expiry_text")
-                    else ""
-                )
-                alert_text = (
-                    f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n"
-                    f"{expiry_line}"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"LOTS: {final_lots}\nPRICE: {ltp:.2f} ({p_icon})\nFUTURE PRICE: {ltp:.2f}\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"EXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {oi:,}\n"
-                    f"TIME: {now.strftime('%H:%M:%S')}"
-                )
-                alert_key = f"FUT:{name}:{watch['symbol']}:{watch['start_oi']}:{watch['start_price']}"
-                if not _burst_alert_recent(alert_key):
-                    alerts_list.append(alert_text)
-            del active_watches[key]
+                action = classify_action(watch["symbol"], oi_chg, p_chg)
+                is_covering_unwinding = any(x in action for x in ["COVERING", "UNWINDING"])
+                
+                if watch["name"] == "CRUDEOILM":
+                    req_threshold = 100 if is_covering_unwinding else 25
+                else:
+                    req_threshold = 500 if is_covering_unwinding else 100
+                    
+                if final_lots >= req_threshold:
+                    strength = get_strength_label(final_lots, watch["name"])
+                    p_icon = "▲" if p_chg >= 0 else "▼"
+                    expiry_line = (
+                        f"EXPIRY: {watch['expiry_text']}\n"
+                        if watch.get("expiry_text")
+                        else ""
+                    )
+                    alert_text = (
+                        f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n"
+                        f"{expiry_line}"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"LOTS: {final_lots}\nPRICE: {ltp:.2f} ({p_icon})\nFUTURE PRICE: {ltp:.2f}\n"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"EXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {oi:,}\n"
+                        f"TIME: {now.strftime('%H:%M:%S')}"
+                    )
+                    alert_key = f"FUT:{name}:{watch['symbol']}:{watch['start_oi']}:{watch['start_price']}"
+                    if not _burst_alert_recent(alert_key):
+                        alerts_list.append(alert_text)
+                del active_watches[key]
 
-    history.append({"time": now, "oi": oi, "price": ltp})
-    if len(history) > 20:
-        history.pop(0)
+    if oi > 0:
+        history.append({"time": now, "oi": oi, "price": ltp})
+        if len(history) > 20:
+            history.pop(0)
 
 
 def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list, stats=None):
@@ -1563,7 +1564,7 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
             if curr_oi > 0:
                 stats["option_oi_quotes"] = stats.get("option_oi_quotes", 0) + 1
 
-        if t_int not in day_open_oi_store:
+        if curr_oi > 0 and t_int not in day_open_oi_store:
             day_open_oi_store[t_int] = curr_oi
 
         if t_int not in option_history:
@@ -1572,7 +1573,7 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
         prev_oi = history[-1]["oi"] if history else 0
         prev_price = history[-1]["price"] if history else 0
 
-        if prev_oi > 0:
+        if prev_oi > 0 and curr_oi > 0:
             tick_lots = int(abs(curr_oi - prev_oi) / lot_size)
             if stats is not None:
                 stats["max_option_tick_lots"] = max(
@@ -1599,39 +1600,44 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
         if t_int in active_watches:
             watch = active_watches[t_int]
             if now >= watch["end_time"]:
-                oi_chg = curr_oi - watch["start_oi"]
-                p_chg = ltp - watch["start_price"]
-                final_lot_size = _normalize_lot_size(watch.get("lot_size")) or lot_size
-                final_lots = int(abs(oi_chg) / final_lot_size)
-                
-                action = classify_action(watch["symbol"], oi_chg, p_chg)
-                is_covering_unwinding = any(x in action for x in ["COVERING", "UNWINDING"])
-                
-                if watch["underlying"] == "CRUDEOILM":
-                    final_threshold = 100 if is_covering_unwinding else 25
+                if curr_oi <= 0:
+                    # Discard zero/expired ticks
+                    del active_watches[t_int]
                 else:
-                    final_threshold = 500 if is_covering_unwinding else 100
+                    oi_chg = curr_oi - watch["start_oi"]
+                    p_chg = ltp - watch["start_price"]
+                    final_lot_size = _normalize_lot_size(watch.get("lot_size")) or lot_size
+                    final_lots = int(abs(oi_chg) / final_lot_size)
                     
-                if final_lots >= final_threshold:
-                    strength = get_strength_label(final_lots, watch["underlying"])
-                    p_icon = "▲" if p_chg >= 0 else "▼"
-                    alert_text = (
-                        f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n"
-                        f"EXPIRY: {watch.get('expiry_text', 'NA')}\n"
-                        f"━━━━━━━━━━━━━━━\n"
-                        f"LOTS: {final_lots}\nPRICE: {ltp:.2f} ({p_icon})\nFUTURE PRICE: {u_ltp:.2f}\n"
-                        f"━━━━━━━━━━━━━━━\n"
-                        f"EXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {curr_oi:,}\n"
-                        f"TIME: {now.strftime('%H:%M:%S')}"
-                    )
-                    alert_key = f"OPT:{name}:{t_int}:{watch['start_oi']}:{watch['start_price']}"
-                    if not _burst_alert_recent(alert_key):
-                        alerts_list.append(alert_text)
-                del active_watches[t_int]
+                    action = classify_action(watch["symbol"], oi_chg, p_chg)
+                    is_covering_unwinding = any(x in action for x in ["COVERING", "UNWINDING"])
+                    
+                    if watch["underlying"] == "CRUDEOILM":
+                        final_threshold = 100 if is_covering_unwinding else 25
+                    else:
+                        final_threshold = 500 if is_covering_unwinding else 100
+                        
+                    if final_lots >= final_threshold:
+                        strength = get_strength_label(final_lots, watch["underlying"])
+                        p_icon = "▲" if p_chg >= 0 else "▼"
+                        alert_text = (
+                            f"{strength}\n🚨 {action}\nSymbol: {watch['symbol']}\n"
+                            f"EXPIRY: {watch.get('expiry_text', 'NA')}\n"
+                            f"━━━━━━━━━━━━━━━\n"
+                            f"LOTS: {final_lots}\nPRICE: {ltp:.2f} ({p_icon})\nFUTURE PRICE: {u_ltp:.2f}\n"
+                            f"━━━━━━━━━━━━━━━\n"
+                            f"EXISTING OI: {watch['start_oi']:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {curr_oi:,}\n"
+                            f"TIME: {now.strftime('%H:%M:%S')}"
+                        )
+                        alert_key = f"OPT:{name}:{t_int}:{watch['start_oi']}:{watch['start_price']}"
+                        if not _burst_alert_recent(alert_key):
+                            alerts_list.append(alert_text)
+                    del active_watches[t_int]
 
-        history.append({"time": now, "oi": curr_oi, "price": ltp})
-        if len(history) > 20:
-            history.pop(0)
+        if curr_oi > 0:
+            history.append({"time": now, "oi": curr_oi, "price": ltp})
+            if len(history) > 20:
+                history.pop(0)
 
 
 def _map_tracked_futures_by_name(fut_symbols, names=None):

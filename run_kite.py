@@ -85,11 +85,6 @@ def validate_and_start_scanner(source):
             scanner_thread.daemon = True
             scanner_thread.start()
             
-            from pure_iv_scanner import start_pure_iv_scanner
-            pure_iv_thread = threading.Thread(target=start_pure_iv_scanner)
-            pure_iv_thread.daemon = True
-            pure_iv_thread.start()
-            
             from spot_volume_scanner import start_spot_volume_scanner
             spot_vol_thread = threading.Thread(target=start_spot_volume_scanner)
             spot_vol_thread.daemon = True

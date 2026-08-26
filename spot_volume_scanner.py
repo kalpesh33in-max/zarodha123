@@ -362,25 +362,13 @@ def start_spot_volume_scanner():
                                 try:
                                     quotes = kite_quote(kite, symbols_to_quote)
                                     
-                                    from pure_iv_scanner import iv_state
-                                    closest_expiry = relevant_opts.iloc[0]["expiry"]
-                                    exp_date_str = pd.to_datetime(closest_expiry).strftime("%Y-%m-%d")
-
-                                    strike_data = {s: {"CE": 0, "PE": 0, "CE_IV": 0.0, "PE_IV": 0.0, "CE_DIR": " ", "PE_DIR": " "} for s in target_strikes}
+                                    strike_data = {s: {"CE": 0, "PE": 0} for s in target_strikes}
                                     for qs, data in quotes.items():
                                         if qs in symbol_to_strike:
                                             s = symbol_to_strike[qs]["strike"]
                                             t = symbol_to_strike[qs]["type"]
                                             strike_data[s][t] = data.get("oi", 0)
-                                            
-                                    for s in target_strikes:
-                                        key = f"{name}_{s}_{exp_date_str}"
-                                        state_val = iv_state.get(key, {})
-                                        strike_data[s]["CE_IV"] = state_val.get("roc_ce", 0.0)
-                                        strike_data[s]["PE_IV"] = state_val.get("roc_pe", 0.0)
-                                        strike_data[s]["CE_DIR"] = state_val.get("dir_ce", " ")
-                                        strike_data[s]["PE_DIR"] = state_val.get("dir_pe", " ")
-                                            
+
                                     def fmt_lakhs(v):
                                         if v == 0: return "0"
                                         if v <= 99000:
@@ -391,8 +379,8 @@ def start_spot_volume_scanner():
                                     max_pe = max(d["PE"] for d in strike_data.values())
                                     
                                     oi_table += "\n```\n"
-                                    oi_table += f"    C.ROC   | Call OI  |  Strike  |  Put OI  |   P.ROC   \n"
-                                    oi_table += f"------------+----------+----------+----------+-----------\n"
+                                    oi_table += f"   Call OI  |  Strike  |   Put OI   \n"
+                                    oi_table += f"------------+----------+------------\n"
                                     
                                     for s in target_strikes:
                                         ce_val = strike_data[s]["CE"]
@@ -409,20 +397,12 @@ def start_spot_volume_scanner():
                                         ce_oi_str = f"{ce_prefix}{ce_str:<5}"
                                         pe_oi_str = f"{pe_str:>5}{pe_suffix}"
                                         
-                                        c_iv = strike_data[s]["CE_IV"]
-                                        p_iv = strike_data[s]["PE_IV"]
-                                        c_dir = strike_data[s]["CE_DIR"].strip()
-                                        p_dir = strike_data[s]["PE_DIR"].strip()
-                                        
-                                        c_iv_str = f"{c_dir}{c_iv:+.1f}%" if c_iv != 0.0 else f"{c_dir}0.0%"
-                                        p_iv_str = f"{p_iv:+.1f}% {p_dir}" if p_iv != 0.0 else f"0.0% {p_dir}"
-                                        
                                         if s == atm_strike:
                                             strike_str = f"{int(s)} 🎯"
                                         else:
                                             strike_str = f"{int(s)}   "
                                             
-                                        oi_table += f" {c_iv_str:>11} | {ce_oi_str}  |  {strike_str} | {pe_oi_str}  | {p_iv_str:<10}\n"
+                                        oi_table += f"  {ce_oi_str:<7}  |  {strike_str} |  {pe_oi_str:>7}\n"
                                     oi_table += "```\n"
                                 except Exception as e:
                                     print("Error fetching OI quote:", e)

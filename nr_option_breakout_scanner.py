@@ -41,6 +41,7 @@ COMPRESSION_THRESHOLD_PCT = 10.0
 
 # candidate_key -> candidate info dict
 tracked_candidates = {}
+alerted_assets = {}  # underlying_name -> {"time": dt, "type": "CE"|"PE", "symbol": symbol}
 state_lock = threading.Lock()
 candidates_identified_date = None
 
@@ -85,13 +86,14 @@ def load_instruments():
 def identify_narrow_range_candidates(kite, df):
     """
     Runs at/after 10:15 AM to scan the first 1-Hour candle (09:15 to 10:15 IST)
-    for ATM +/- 1 Strikes (CE & PE) of Monthly contracts and filter those with Range % < 10%.
+    for the HIGHEST OI & Liquidity Strikes within ATM +/- 1 Strike of Monthly contracts.
+    Filters those with 1H Range % < 10%.
     """
-    global tracked_candidates, candidates_identified_date
+    global tracked_candidates, alerted_assets, candidates_identified_date
     now = datetime.datetime.now(IST)
     today_date = now.date()
 
-    print(f"[NR-1H] Scanning 1-Hour candle (09:15 - 10:15) across {len(WATCHLIST)} symbols...")
+    print(f"[NR-1H] Scanning 1-Hour candle (09:15 - 10:15) across {len(WATCHLIST)} symbols with High-OI filtering...")
 
     from_time = datetime.datetime.combine(today_date, datetime.time(9, 15), tzinfo=IST)
     to_time = datetime.datetime.combine(today_date, datetime.time(10, 15), tzinfo=IST)
@@ -115,7 +117,7 @@ def identify_narrow_range_candidates(kite, df):
             if underlying_price <= 0:
                 continue
 
-            # 2. Get active options and resolve strict MONTHLY expiry (ignores weeklies for Nifty/Sensex)
+            # 2. Get active options and resolve strict MONTHLY expiry
             opts = df[(df["name"] == name) & (df["instrument_type"].isin(["CE", "PE"]))]
             if opts.empty:
                 continue
@@ -135,14 +137,51 @@ def identify_narrow_range_candidates(kite, df):
             atm_strike = min(unique_strikes, key=lambda x: abs(x - underlying_price))
             atm_idx = unique_strikes.index(atm_strike)
 
-            # Selected strikes: ATM-1, ATM, ATM+1
+            # Selected strikes around ATM: ATM-1, ATM, ATM+1
             start_idx = max(0, atm_idx - 1)
             end_idx = min(len(unique_strikes), atm_idx + 2)
             selected_strikes = unique_strikes[start_idx:end_idx]
 
-            # 4. Check each Option contract for 1-Hour candle range < 10%
             target_opts = opts_active[opts_active["strike"].isin(selected_strikes)]
+            if target_opts.empty:
+                continue
+
+            # 4. Fetch quotes to determine Highest OI & Liquidity Strike
+            symbols_to_quote = [f"{r['exchange']}:{r['tradingsymbol']}" for _, r in target_opts.iterrows()]
+            quotes = {}
+            try:
+                quotes = kite.quote(symbols_to_quote)
+            except Exception as e:
+                print(f"[NR-1H] Quote fetch failed for {name}: {e}")
+
+            # Pick the single highest OI CE and single highest OI PE strike among ATM +/- 1
+            best_ce_row = None
+            max_ce_oi = -1
+            best_pe_row = None
+            max_pe_oi = -1
+
             for _, opt_row in target_opts.iterrows():
+                sym_key = f"{opt_row['exchange']}:{opt_row['tradingsymbol']}"
+                q = quotes.get(sym_key, {})
+                oi = q.get("oi", 0)
+                vol = q.get("volume", 0)
+                
+                # Combine OI with volume weight for best liquidity selection
+                liquidity_score = oi * 1000 + vol
+                
+                if opt_row["instrument_type"] == "CE":
+                    if liquidity_score > max_ce_oi:
+                        max_ce_oi = liquidity_score
+                        best_ce_row = (opt_row, oi)
+                elif opt_row["instrument_type"] == "PE":
+                    if liquidity_score > max_pe_oi:
+                        max_pe_oi = liquidity_score
+                        best_pe_row = (opt_row, oi)
+
+            liquid_rows = [r for r in [best_ce_row, best_pe_row] if r is not None]
+
+            # 5. Check 1-Hour candle range < 10% for selected highest-liquidity options
+            for opt_row, oi_val in liquid_rows:
                 opt_token = int(opt_row["instrument_token"])
                 opt_symbol = opt_row["tradingsymbol"]
                 opt_strike = float(opt_row["strike"])
@@ -176,32 +215,40 @@ def identify_narrow_range_candidates(kite, df):
                         "strike": opt_strike,
                         "type": opt_type,
                         "is_atm": is_atm_str,
+                        "oi": oi_val,
                         "high_1h": h_1h,
                         "low_1h": l_1h,
                         "range_pct": range_pct,
                         "alerted": False
                     }
-                    print(f"  [NR-1H CANDIDATE] {opt_symbol}: 1H High={h_1h:.2f}, Low={l_1h:.2f}, Range={range_pct:.2f}% (<10%)")
+                    print(f"  [NR-1H HIGH-OI CANDIDATE] {opt_symbol}: 1H High={h_1h:.2f}, Low={l_1h:.2f}, Range={range_pct:.2f}% (<10%) [OI: {oi_val:,}]")
         except Exception as e:
             continue
 
     with state_lock:
         tracked_candidates = new_candidates
+        alerted_assets.clear()
         candidates_identified_date = today_date
 
-    print(f"[NR-1H] Total {len(new_candidates)} compressed option candidates (<10% 1H Range) registered.")
+    print(f"[NR-1H] Total {len(new_candidates)} compressed high-liquidity option candidates registered.")
 
 
 def scan_15m_breakouts(kite):
     """
-    Runs after each completed 15-minute candle and fires an alert if candle closed above 1H High.
+    Runs after each completed 15-minute candle.
+    Enforces Strict Rules:
+    1. Single breakout alert per underlying asset per day (no secondary strike alerts).
+    2. Strict Directional Lock: Once PE alerts, CE is blocked for the day (and vice versa).
     """
-    global tracked_candidates
+    global tracked_candidates, alerted_assets
     now = datetime.datetime.now(IST)
     today_date = now.date()
 
     with state_lock:
-        active_list = [v for v in tracked_candidates.values() if not v["alerted"]]
+        active_list = [
+            v for v in tracked_candidates.values()
+            if not v["alerted"] and v["underlying"] not in alerted_assets
+        ]
 
     if not active_list:
         return
@@ -210,6 +257,13 @@ def scan_15m_breakouts(kite):
     to_time = now
 
     for cand in active_list:
+        underlying = cand["underlying"]
+        
+        # Check if asset already alerted in this or previous iteration
+        with state_lock:
+            if underlying in alerted_assets:
+                continue
+
         token = cand["token"]
         high_1h = cand["high_1h"]
 
@@ -229,7 +283,16 @@ def scan_15m_breakouts(kite):
 
         if candle_close > high_1h:
             with state_lock:
-                cand["alerted"] = True
+                # Lock asset for the rest of the day
+                alerted_assets[underlying] = {
+                    "time": now,
+                    "type": cand["type"],
+                    "symbol": cand["symbol"]
+                }
+                # Deactivate all other strikes for this underlying
+                for c in tracked_candidates.values():
+                    if c["underlying"] == underlying:
+                        c["alerted"] = True
 
             action_type = "BUY CALL (CE)" if cand["type"] == "CE" else "BUY PUT (PE)"
             direction_label = "CALL (Bullish Expansion)" if cand["type"] == "CE" else "PUT (Bearish Expansion)"
@@ -238,7 +301,7 @@ def scan_15m_breakouts(kite):
             msg = (
                 f"🚀 *15-MIN OPTION BREAKOUT (NR-1H)* 🚀\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Asset: *{cand['underlying']}*\n"
+                f"Asset: *{cand['underlying']}* (Highest OI Strike)\n"
                 f"Option Contract: *{cand['symbol']}{cand['is_atm']}*\n"
                 f"1-Hour Compression (09:15 - 10:15):\n"
                 f"  • 1H High: ₹{cand['high_1h']:.2f}\n"
@@ -249,10 +312,12 @@ def scan_15m_breakouts(kite):
                 f"  • 15M Close: *₹{candle_close:.2f}* (Closed ABOVE ₹{high_1h:.2f})\n"
                 f"  • Candle High: ₹{candle_high:.2f}\n"
                 f"  • Time: {now.strftime('%H:%M:%S')} IST (15M Candle @ {time_str})\n"
-                f"💡 *Action*: {action_type} - {direction_label}"
+                f"💡 *Action*: {action_type} - {direction_label}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🔒 *DIRECTION LOCKED*: {cand['type']} established for {cand['underlying']}. Subsequent strikes & opposite signals blocked for today."
             )
 
-            print(f"[NR-1H BREAKOUT] Triggered for {cand['symbol']} (Close {candle_close:.2f} > 1H High {high_1h:.2f})")
+            print(f"[NR-1H BREAKOUT] Triggered for {cand['symbol']} - Locked {cand['underlying']} in {cand['type']} direction.")
             send_telegram_message(msg, chat_id=env_config.TELE_CHAT_ID, token=env_config.TELE_TOKEN)
 
 
