@@ -66,9 +66,10 @@ def _get_time_to_expiry_years(expiry_date):
 
 IST = ZoneInfo("Asia/Kolkata")
 
-# CONFIGURATION (BANKNIFTY + Stocks with Lot Size <= 550)
+# CONFIGURATION (BANKNIFTY + 5 Major Banks + Stocks with Lot Size <= 550)
 WATCHLIST = [
     "BANKNIFTY",
+    "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
     "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "BAJAJ-AUTO",
     "BAJAJFINSV", "BHARTIARTL", "BRITANNIA", "CIPLA", "EICHERMOT",
     "GRASIM", "HCLTECH", "HEROMOTOCO", "HINDUNILVR", "INFY",
