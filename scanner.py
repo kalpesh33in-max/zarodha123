@@ -241,7 +241,7 @@ def run_scanner(kite, stop_event=None):
     dispatcher = AlertDispatcher()
     dispatcher.start(stop_event)
     
-    burst_scope = ["BANKNIFTY", "CRUDEOILM"]
+    burst_scope = ["BANKNIFTY", "stocks", "CRUDEOILM"]
     start_msg = (
         "Kite Scanner Login Successful. Priority scanner started. "
         f"Burst alerts enabled for: {', '.join(burst_scope)}. "
