@@ -270,8 +270,9 @@ def start_expiry_gamma_scanner():
                     call_wall = max(gamma_profile, key=lambda x: x["call_gex"])
                     put_wall = max(gamma_profile, key=lambda x: x["put_gex"])
 
-                    target_chat = getattr(env_config, "TELE_CHAT_ID_BN", None) or env_config.TELE_CHAT_ID
-                    target_token = getattr(env_config, "TELE_TOKEN_BN", None) or env_config.TELE_TOKEN
+                    # 0-DTE General Alerts Target: Default Channel (TELE_CHAT_ID)
+                    target_chat = env_config.TELE_CHAT_ID
+                    target_token = env_config.TELE_TOKEN
 
                     # 1. Gamma Flip Alert
                     if last_gex_sign is not None and last_gex_sign != current_gex_sign:
@@ -318,6 +319,13 @@ def start_expiry_gamma_scanner():
                         max_otm_dist = 500 if name == "SENSEX" else 150
                         gamma_threshold = 0.0015 if name == "SENSEX" else 0.0040
 
+                        def _send_hero_zero(hz_msg):
+                            # Send separately to Default Channel
+                            send_telegram_message(hz_msg, chat_id=env_config.TELE_CHAT_ID, token=env_config.TELE_TOKEN)
+                            # Send separately to BN Channel (if configured and distinct)
+                            if env_config.TELE_CHAT_ID_BN and env_config.TELE_CHAT_ID_BN != env_config.TELE_CHAT_ID:
+                                send_telegram_message(hz_msg, chat_id=env_config.TELE_CHAT_ID_BN, token=env_config.TELE_TOKEN_BN)
+
                         for strike_data in gamma_profile:
                             dist = strike_data["strike"] - spot_price
                             is_otm_ce = 0 < dist <= max_otm_dist
@@ -340,7 +348,7 @@ def start_expiry_gamma_scanner():
                                         f"Strike Gamma (Γ): {strike_data['ce_gamma']:.4f}\n"
                                         f"💡 *Trade Implication*: High Gamma acceleration. Small index upside will explode CE premium."
                                     )
-                                    send_telegram_message(msg, chat_id=target_chat, token=target_token)
+                                    _send_hero_zero(msg)
 
                             # Put Side Hero-Zero
                             if is_otm_pe and strike_data["pe_gamma"] >= gamma_threshold and 2.0 <= strike_data["pe_ltp"] <= 80.0:
@@ -359,7 +367,7 @@ def start_expiry_gamma_scanner():
                                         f"Strike Gamma (Γ): {strike_data['pe_gamma']:.4f}\n"
                                         f"💡 *Trade Implication*: High Gamma acceleration. Small index downside will explode PE premium."
                                     )
-                                    send_telegram_message(msg, chat_id=target_chat, token=target_token)
+                                    _send_hero_zero(msg)
 
             except Exception as e:
                 print(f"[GAMMA SCANNER] Loop error: {e}")

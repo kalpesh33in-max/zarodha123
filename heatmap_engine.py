@@ -17,7 +17,16 @@ BURST_OPTION_EXCLUDED_NAMES = {
     "SENSEX50",
 }
 STOCK_BURST_NAMES = {
-    "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"
+    "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK",
+    "BAJAJ-AUTO", "BAJAJFINSV", "BAJFINANCE", "BEL", "BHARTIARTL",
+    "BPCL", "BRITANNIA", "CIPLA", "COALINDIA", "DRREDDY",
+    "EICHERMOT", "GRASIM", "HCLTECH", "HDFCBANK", "HDFCLIFE",
+    "HEROMOTOCO", "HINDALCO", "HINDUNILVR", "ICICIBANK", "INDUSINDBK",
+    "INFY", "ITC", "JSWSTEEL", "KOTAKBANK", "LT",
+    "M&M", "MARUTI", "NESTLEIND", "NTPC", "ONGC",
+    "POWERGRID", "RELIANCE", "SBILIFE", "SBIN", "SHRIRAMFIN",
+    "SUNPHARMA", "TATACONSUM", "TATAMOTORS", "TATASTEEL", "TCS",
+    "TECHM", "TITAN", "TRENT", "ULTRACEMCO", "WIPRO"
 }
 NSE_BURST_TRACK_NAMES = []
 MCX_BURST_TRACK_NAMES = [
@@ -789,9 +798,21 @@ def _open_extreme_label(open_price, high, low):
 
 
 VOLUME_MISMATCH_WATCHLIST = [
-    "NIFTY", "SENSEX", "BANKNIFTY",
-    "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
-    "RELIANCE", "TCS", "INFY", "BAJFINANCE", "BHARTIARTL", "LT"
+    # Indices
+    "NIFTY", "SENSEX", "BANKNIFTY", "MIDCPNIFTY",
+    # Commodities (MCX)
+    "CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI",
+    # Nifty 50 Stocks & Heavyweights
+    "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK",
+    "BAJAJ-AUTO", "BAJAJFINSV", "BAJFINANCE", "BEL", "BHARTIARTL",
+    "BPCL", "BRITANNIA", "CIPLA", "COALINDIA", "DRREDDY",
+    "EICHERMOT", "GRASIM", "HCLTECH", "HDFCBANK", "HDFCLIFE",
+    "HEROMOTOCO", "HINDALCO", "HINDUNILVR", "ICICIBANK", "INDUSINDBK",
+    "INFY", "ITC", "JSWSTEEL", "KOTAKBANK", "LT",
+    "M&M", "MARUTI", "NESTLEIND", "NTPC", "ONGC",
+    "POWERGRID", "RELIANCE", "SBILIFE", "SBIN", "SHRIRAMFIN",
+    "SUNPHARMA", "TATACONSUM", "TATAMOTORS", "TATASTEEL", "TCS",
+    "TECHM", "TITAN", "TRENT", "ULTRACEMCO", "WIPRO"
 ]
 
 _volume_mismatch_triggered_slots = set()
@@ -917,19 +938,17 @@ def _build_timeframe_volume_mismatch_table(kite, interval_label, interval_code, 
             and volume_candle in ("🟢", "🔴")
         )
 
-        rows.append({
-            "name": name,
-            "price_candle": price_candle,
-            "volume_candle": volume_candle,
-            "gap_status": gap_status,
-            "is_mismatch": is_mismatch,
-        })
+        if is_mismatch:
+            rows.append({
+                "name": name,
+                "price_candle": price_candle,
+                "volume_candle": volume_candle,
+                "gap_status": gap_status,
+                "is_mismatch": is_mismatch,
+            })
 
     if not rows:
         return None
-
-    # Mismatched futures always placed at the top of the table
-    rows.sort(key=lambda r: not r["is_mismatch"])
 
     msg = f"📊 *{interval_label} VOLUME MISMATCH*\n"
     msg += f"⏰ Time: {now_ist.strftime('%H:%M:%S')} IST (Slot: {slot_time_str})\n\n"
