@@ -144,15 +144,15 @@ def _burst_loop(kite, dispatcher, stop_event):
 
 
 
-                # All burst alerts: Index, Stock Futures, and MCX
-                # Destination: Telegram default channel (TELE_CHAT_ID)
+                # All burst alerts: Index, Stock Options/Futures, and MCX
+                # Destination: Telegram BN channel (TELE_CHAT_ID_BN)
                 for alert in dict.fromkeys([*bn_alerts, *stock_alerts]):
-                    print(f"Sending burst alert to {TELE_CHAT_ID}")
+                    print(f"Sending burst alert to {TELE_CHAT_ID_BN}")
                     dispatcher.send(
                         PRIORITY_BURST,
                         alert,
-                        chat_id=TELE_CHAT_ID,
-                        token=TELE_TOKEN,
+                        chat_id=TELE_CHAT_ID_BN,
+                        token=TELE_TOKEN_BN,
                     )
             except Exception as e:
                 print(f"Error in burst scanner loop: {e}")
