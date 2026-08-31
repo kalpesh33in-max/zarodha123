@@ -276,8 +276,8 @@ def start_expiry_gamma_scanner():
 
                     # 1. Gamma Flip Alert
                     if last_gex_sign is not None and last_gex_sign != current_gex_sign:
-                        last_label = "POSITIVE (Mean-Reverting)" if last_gex_sign == "POSITIVE" else "NEGATIVE (Trend Acceleration)"
-                        curr_label = "POSITIVE (Mean-Reverting)" if current_gex_sign == "POSITIVE" else "NEGATIVE (Trend Acceleration)"
+                        last_label = "POSITIVE (Silent)" if last_gex_sign == "POSITIVE" else "NEGATIVE (Fire)"
+                        curr_label = "POSITIVE (Silent)" if current_gex_sign == "POSITIVE" else "NEGATIVE (Fire)"
                         msg = (
                             f"🔄 *GAMMA FLIP DETECTED: {name} 0-DTE*\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
