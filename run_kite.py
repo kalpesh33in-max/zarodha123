@@ -90,10 +90,6 @@ def validate_and_start_scanner(source):
             spot_vol_thread.daemon = True
             spot_vol_thread.start()
             
-            from vol_spike_breakout_scanner import start_vol_spike_breakout_scanner
-            vol_spike_thread = threading.Thread(target=start_vol_spike_breakout_scanner)
-            vol_spike_thread.daemon = True
-            vol_spike_thread.start()
             
             from expiry_gamma_scanner import start_expiry_gamma_scanner
             gamma_thread = threading.Thread(target=start_expiry_gamma_scanner)
@@ -104,6 +100,11 @@ def validate_and_start_scanner(source):
             nr_thread = threading.Thread(target=start_nr_option_breakout_scanner)
             nr_thread.daemon = True
             nr_thread.start()
+
+            from rvol_2candle_breakout_scanner import start_rvol_2candle_breakout_scanner
+            rvol_thread = threading.Thread(target=start_rvol_2candle_breakout_scanner)
+            rvol_thread.daemon = True
+            rvol_thread.start()
             
             return True
         except Exception as e:

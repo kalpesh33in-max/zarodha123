@@ -296,7 +296,7 @@ def start_spot_volume_scanner():
                             fut_vol = max(0, fut_state.get("current_vol", 0) - fut_state.get("start_vol", 0))
                             fut_lots = int(fut_vol / lot_size)
                             
-                        required_lots = 50 if name == "CRUDEOILM" else 500
+                        required_lots = 150 if name == "CRUDEOILM" else 1000
                         if spot_lots >= required_lots or fut_lots >= required_lots:
                             oi_table = ""
                             ref_price = 0
