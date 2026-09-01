@@ -143,7 +143,7 @@ def start_expiry_gamma_scanner():
                     continue
 
                 spot_token = int(spots.iloc[0]["instrument_token"])
-                lot_size = int(active_opts.iloc[0].get("lot_size", 10 if name == "SENSEX" else 25))
+                lot_size = int(active_opts.iloc[0].get("lot_size", 20 if name == "SENSEX" else 65))
 
                 # If new expiry day initialized
                 if current_expiry_date != today_date:
@@ -272,102 +272,103 @@ def start_expiry_gamma_scanner():
 
                     # 0-DTE General Alerts Target: Default Channel (TELE_CHAT_ID)
                     target_chat = env_config.TELE_CHAT_ID
-                    target_token = env_config.TELE_TOKEN
-
-                    # 1. Gamma Flip Alert
-                    if last_gex_sign is not None and last_gex_sign != current_gex_sign:
-                        last_label = "POSITIVE (Silent)" if last_gex_sign == "POSITIVE" else "NEGATIVE (Fire)"
-                        curr_label = "POSITIVE (Silent)" if current_gex_sign == "POSITIVE" else "NEGATIVE (Fire)"
-                        msg = (
-                            f"🔄 *GAMMA FLIP DETECTED: {name} 0-DTE*\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"⏰ Time: {now.strftime('%H:%M:%S')} IST\n"
-                            f"Spot Price: {spot_price:.2f}\n"
-                            f"Transition: {last_label} ➔ {curr_label}\n"
-                            f"Current Net GEX: {gex_in_cr:+.2f} Cr\n"
-                            f"Key Levels:\n"
-                            f"• Upper Call Wall: {int(call_wall['strike'])} (GEX: {call_wall['call_gex']/10_000_000.0:.1f} Cr)\n"
-                            f"• Lower Put Wall: {int(put_wall['strike'])} (GEX: {put_wall['put_gex']/10_000_000.0:.1f} Cr)\n"
-                            f"💡 *Market Implication*: Sharp volatility expansion expected."
-                        )
-                        send_telegram_message(msg, chat_id=target_chat, token=target_token)
-
-                    last_gex_sign = current_gex_sign
-
-                    # 2. Gamma Wall Approach Alert
-                    for wall, wall_type in [(call_wall, "Call"), (put_wall, "Put")]:
-                        dist_pct = abs(spot_price - wall["strike"]) / spot_price * 100.0
-                        if dist_pct < 0.15:
-                            alert_key = f"wall_{wall['strike']}_{wall_type}"
-                            last_alert = last_alert_time.get(alert_key, 0.0)
-                            if time.time() - last_alert > 600:
-                                last_alert_time[alert_key] = time.time()
-                                msg = (
-                                    f"⚡ *GAMMA WALL TEST: {name} 0-DTE*\n"
-                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                    f"⏰ Time: {now.strftime('%H:%M:%S')} IST\n"
-                                    f"Spot Price: {spot_price:.2f}\n"
-                                    f"Wall Level: {int(wall['strike'])} {wall_type} Wall\n"
-                                    f"Wall GEX: {wall['call_gex' if wall_type == 'Call' else 'put_gex']/10_000_000.0:.1f} Cr\n"
-                                    f"💡 *Market Implication*: Major Support/Resistance active."
-                                )
-                                send_telegram_message(msg, chat_id=target_chat, token=target_token)
-
-                    # 3. Hero-Zero Afternoon Gamma Spike Alert (13:00 to 15:15 IST)
-                    is_hero_zero_window = datetime.time(13, 0) <= now.time() <= datetime.time(15, 15)
+                    # Fire & Forget Hero-Zero Afternoon Squeeze Engine (13:50 to 15:05 IST)
+                    is_hero_zero_window = datetime.time(13, 50) <= now.time() <= datetime.time(15, 5)
                     if is_hero_zero_window:
-                        max_otm_dist = 500 if name == "SENSEX" else 150
-                        gamma_threshold = 0.0015 if name == "SENSEX" else 0.0040
+                        # Maintain rolling 30-minute spot history for breakout confirmation
+                        now_ts = now.timestamp()
+                        if not hasattr(main_supervisor, "spot_history"):
+                            main_supervisor.spot_history = []
+                            main_supervisor.hero_zero_locked_dir = None
 
-                        def _send_hero_zero(hz_msg):
-                            # Send separately to Default Channel
-                            send_telegram_message(hz_msg, chat_id=env_config.TELE_CHAT_ID, token=env_config.TELE_TOKEN)
-                            # Send separately to BN Channel (if configured and distinct)
-                            if env_config.TELE_CHAT_ID_BN and env_config.TELE_CHAT_ID_BN != env_config.TELE_CHAT_ID:
-                                send_telegram_message(hz_msg, chat_id=env_config.TELE_CHAT_ID_BN, token=env_config.TELE_TOKEN_BN)
+                        main_supervisor.spot_history.append((now_ts, spot_price))
+                        # Keep only last 30 minutes (1800 seconds)
+                        main_supervisor.spot_history = [
+                            (t_s, p) for t_s, p in main_supervisor.spot_history
+                            if now_ts - t_s <= 1800
+                        ]
 
-                        for strike_data in gamma_profile:
-                            dist = strike_data["strike"] - spot_price
-                            is_otm_ce = 0 < dist <= max_otm_dist
-                            is_otm_pe = -max_otm_dist <= dist < 0
+                        if len(main_supervisor.spot_history) >= 10:
+                            spot_prices_30m = [p for _, p in main_supervisor.spot_history]
+                            spot_30m_high = max(spot_prices_30m)
+                            spot_30m_low = min(spot_prices_30m)
+                            spot_30m_vwap = sum(spot_prices_30m) / len(spot_prices_30m)
 
-                            # Call Side Hero-Zero
-                            if is_otm_ce and strike_data["ce_gamma"] >= gamma_threshold and 2.0 <= strike_data["ce_ltp"] <= 80.0:
-                                alert_key = f"hz_ce_{strike_data['strike']}"
-                                last_alert = last_alert_time.get(alert_key, 0.0)
-                                if time.time() - last_alert > 900:
-                                    last_alert_time[alert_key] = time.time()
-                                    msg = (
-                                        f"🔥 *0-DTE HERO-ZERO GAMMA SURGE (CALL SIDE): {name}*\n"
-                                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                        f"⏰ Time: {now.strftime('%H:%M:%S')} IST\n"
-                                        f"Time to Expiry: {int(minutes_left)} Mins Left\n"
-                                        f"Spot Price: {spot_price:.2f}\n"
-                                        f"🎯 *Hero-Zero Strike: {int(strike_data['strike'])} CE*\n"
-                                        f"Premium LTP: ₹{strike_data['ce_ltp']:.2f}\n"
-                                        f"Strike Gamma (Γ): {strike_data['ce_gamma']:.4f}\n"
-                                        f"💡 *Trade Implication*: High Gamma acceleration. Small index upside will explode CE premium."
-                                    )
-                                    _send_hero_zero(msg)
+                            # Directional Breakout determination
+                            is_bullish_breakout = (spot_price >= spot_30m_high - 1.5) and (spot_price > spot_30m_vwap)
+                            is_bearish_breakdown = (spot_price <= spot_30m_low + 1.5) and (spot_price < spot_30m_vwap)
 
-                            # Put Side Hero-Zero
-                            if is_otm_pe and strike_data["pe_gamma"] >= gamma_threshold and 2.0 <= strike_data["pe_ltp"] <= 80.0:
-                                alert_key = f"hz_pe_{strike_data['strike']}"
-                                last_alert = last_alert_time.get(alert_key, 0.0)
-                                if time.time() - last_alert > 900:
-                                    last_alert_time[alert_key] = time.time()
-                                    msg = (
-                                        f"🔥 *0-DTE HERO-ZERO GAMMA SURGE (PUT SIDE): {name}*\n"
-                                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                        f"⏰ Time: {now.strftime('%H:%M:%S')} IST\n"
-                                        f"Time to Expiry: {int(minutes_left)} Mins Left\n"
-                                        f"Spot Price: {spot_price:.2f}\n"
-                                        f"🎯 *Hero-Zero Strike: {int(strike_data['strike'])} PE*\n"
-                                        f"Premium LTP: ₹{strike_data['pe_ltp']:.2f}\n"
-                                        f"Strike Gamma (Γ): {strike_data['pe_gamma']:.4f}\n"
-                                        f"💡 *Trade Implication*: High Gamma acceleration. Small index downside will explode PE premium."
-                                    )
-                                    _send_hero_zero(msg)
+                            # Identify single closest OTM strike
+                            otm_ce_strike_data = None
+                            otm_pe_strike_data = None
+
+                            for s_data in sorted(gamma_profile, key=lambda x: x["strike"]):
+                                s_val = s_data["strike"]
+                                if s_val > spot_price and otm_ce_strike_data is None:
+                                    otm_ce_strike_data = s_data
+                                if s_val < spot_price:
+                                    otm_pe_strike_data = s_data
+
+                            def _send_fire_and_forget(hz_msg):
+                                send_telegram_message(hz_msg, chat_id=env_config.TELE_CHAT_ID, token=env_config.TELE_TOKEN)
+                                if env_config.TELE_CHAT_ID_BN and env_config.TELE_CHAT_ID_BN != env_config.TELE_CHAT_ID:
+                                    send_telegram_message(hz_msg, chat_id=env_config.TELE_CHAT_ID_BN, token=env_config.TELE_TOKEN_BN)
+
+                            # Price sweet spot: ₹10 - ₹35 for Nifty, ₹25 - ₹90 for Sensex
+                            min_price = 25.0 if name == "SENSEX" else 10.0
+                            max_price = 90.0 if name == "SENSEX" else 35.0
+
+                            # 1. Bullish Call Side Hero-Zero
+                            if is_bullish_breakout and main_supervisor.hero_zero_locked_dir in (None, "CALL") and otm_ce_strike_data:
+                                ce_ltp = otm_ce_strike_data["ce_ltp"]
+                                ce_strike = int(otm_ce_strike_data["strike"])
+
+                                if min_price <= ce_ltp <= max_price:
+                                    alert_key = f"hz_ff_ce_{ce_strike}"
+                                    last_alert = last_alert_time.get(alert_key, 0.0)
+                                    if time.time() - last_alert > 1800:
+                                        last_alert_time[alert_key] = time.time()
+                                        main_supervisor.hero_zero_locked_dir = "CALL"
+
+                                        sl_price = max(4.0, round(ce_ltp * 0.45, 1))
+                                        tgt1_price = round(ce_ltp * 2.2, 1)
+                                        tgt2_price = round(ce_ltp * 3.8, 1)
+
+                                        msg = (
+                                            f"🚀 *HERO-ZERO: {name} {ce_strike} CE*\n"
+                                            f"Price: *₹{ce_ltp:.2f}*\n"
+                                            f"SL: *₹{sl_price:.2f}* | Target: *₹{tgt1_price:.2f}* / *₹{tgt2_price:.2f}*\n"
+                                            f"Spot: {spot_price:.2f} (30M High Break)\n"
+                                            f"Time: {now.strftime('%H:%M:%S')}"
+                                        )
+                                        print(f"[HERO-ZERO] Sent {name} {ce_strike} CE @ ₹{ce_ltp:.2f}")
+                                        _send_fire_and_forget(msg)
+
+                            # 2. Bearish Put Side Hero-Zero
+                            elif is_bearish_breakdown and main_supervisor.hero_zero_locked_dir in (None, "PUT") and otm_pe_strike_data:
+                                pe_ltp = otm_pe_strike_data["pe_ltp"]
+                                pe_strike = int(otm_pe_strike_data["strike"])
+
+                                if min_price <= pe_ltp <= max_price:
+                                    alert_key = f"hz_ff_pe_{pe_strike}"
+                                    last_alert = last_alert_time.get(alert_key, 0.0)
+                                    if time.time() - last_alert > 1800:
+                                        last_alert_time[alert_key] = time.time()
+                                        main_supervisor.hero_zero_locked_dir = "PUT"
+
+                                        sl_price = max(4.0, round(pe_ltp * 0.45, 1))
+                                        tgt1_price = round(pe_ltp * 2.2, 1)
+                                        tgt2_price = round(pe_ltp * 3.8, 1)
+
+                                        msg = (
+                                            f"🚨 *HERO-ZERO: {name} {pe_strike} PE*\n"
+                                            f"Price: *₹{pe_ltp:.2f}*\n"
+                                            f"SL: *₹{sl_price:.2f}* | Target: *₹{tgt1_price:.2f}* / *₹{tgt2_price:.2f}*\n"
+                                            f"Spot: {spot_price:.2f} (30M Low Break)\n"
+                                            f"Time: {now.strftime('%H:%M:%S')}"
+                                        )
+                                        print(f"[HERO-ZERO] Sent {name} {pe_strike} PE @ ₹{pe_ltp:.2f}")
+                                        _send_fire_and_forget(msg)
 
             except Exception as e:
                 print(f"[GAMMA SCANNER] Loop error: {e}")

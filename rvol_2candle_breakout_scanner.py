@@ -336,7 +336,7 @@ def start_rvol_2candle_breakout_scanner():
         if not futs.empty:
             futs = futs.sort_values(by="expiry")
             fut = futs.iloc[0]
-            lot_size = int(fut.get("lot_size", 10 if name == "SENSEX" else 25))
+            lot_size = int(fut.get("lot_size", 20 if name == "SENSEX" else 65))
             fut_tkn = int(fut["instrument_token"])
             fut_symbol = fut["tradingsymbol"]
 

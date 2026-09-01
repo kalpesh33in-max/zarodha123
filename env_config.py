@@ -1,5 +1,19 @@
 import os
 
+# Auto-load .env or .env.example
+for env_file in [".env", ".env.example"]:
+    if os.path.exists(env_file):
+        try:
+            with open(env_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip())
+        except Exception:
+            pass
+
 # Zerodha Credentials (Matching your Railway names)
 API_KEY = os.getenv("KITE_API_KEY", "YOUR_API_KEY")
 API_SECRET = os.getenv("KITE_API_SECRET", "YOUR_API_SECRET")

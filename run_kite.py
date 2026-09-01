@@ -105,6 +105,11 @@ def validate_and_start_scanner(source):
             rvol_thread = threading.Thread(target=start_rvol_2candle_breakout_scanner)
             rvol_thread.daemon = True
             rvol_thread.start()
+
+            from fo_institutional_breakout_scanner import start_fo_institutional_breakout_scanner
+            fo_thread = threading.Thread(target=start_fo_institutional_breakout_scanner)
+            fo_thread.daemon = True
+            fo_thread.start()
             
             return True
         except Exception as e:
