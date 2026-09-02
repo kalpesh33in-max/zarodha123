@@ -3540,8 +3540,9 @@ def _get_3c_atm_and_itm_options(kite, name, ref_price, direction, df_opts):
 
 def start_3candle_price_volume_divergence_scanner(kite=None):
     """
-    Scans 1-Hour 3-Candle Price & Volume Divergence patterns for 4 Indices, CRUDEOILM, and 32 Focus Stocks.
-    Evaluates both Future and ATM + 3 ITM Options at completed 1-Hour candle marks.
+    Scans 1-Hour 3-Candle Price & Volume Divergence patterns:
+    - On Future contracts (recommending ATM/ITM strike)
+    - Directly on individual ATM + 3 ITM Option contracts (CE and PE)
     """
     print("Starting 1-Hour 3-Candle Price & Volume Divergence Scanner...")
     import env_config
@@ -3574,7 +3575,7 @@ def start_3candle_price_volume_divergence_scanner(kite=None):
                     time.sleep(60)
                     continue
 
-                # Run after hour completions (e.g. 10:16, 11:16, 12:16, 13:16, 14:16, 15:16, and evening MCX hours)
+                # Run after completed 1-Hour candles (e.g. 10:16, 11:16, 12:16, 13:16, 14:16, 15:16, etc.)
                 slot_key = f"{now.date()}_{now.hour}"
                 if now.minute >= 15 and slot_key not in _3c_div_alerted_slots:
                     _3c_div_alerted_slots.add(slot_key)
@@ -3591,6 +3592,9 @@ def start_3candle_price_volume_divergence_scanner(kite=None):
                         if not is_mcx and not is_nse_open:
                             continue
 
+                        send_channel = env_config.TELE_CHAT_ID_BN if is_index_underlying(name) else (env_config.TELE_CHAT_ID_STOCKS if not is_mcx else env_config.TELE_CHAT_ID_BN)
+                        send_token = env_config.TELE_TOKEN_BN if is_index_underlying(name) else (env_config.TELE_TOKEN_STOCKS if not is_mcx else env_config.TELE_TOKEN_BN)
+
                         futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
                         if futs.empty:
                             continue
@@ -3599,45 +3603,97 @@ def start_3candle_price_volume_divergence_scanner(kite=None):
                         fut_token = int(fut_row["instrument_token"])
                         fut_symbol = fut_row["tradingsymbol"]
 
+                        # 1. EVALUATE FUTURE CONTRACT
                         try:
-                            candles = get_historical_data_cached(kite, fut_token, from_time, to_time, "60minute")
+                            fut_candles = get_historical_data_cached(kite, fut_token, from_time, to_time, "60minute")
                         except Exception:
-                            continue
+                            fut_candles = []
 
-                        if not candles or len(candles) < 4:
-                            continue
+                        fut_ltp = 0.0
+                        if fut_candles and len(fut_candles) >= 4:
+                            c1, c2, c3 = fut_candles[-4], fut_candles[-3], fut_candles[-2]
+                            fut_ltp = float(c3.get("close", 0))
+                            res_fut = _analyze_3candle_price_vol_divergence(c1, c2, c3)
+                            if res_fut:
+                                opts = df[(df["name"] == name) & (df["instrument_type"].isin(["CE", "PE"]))]
+                                df_opts_monthly = pd.DataFrame()
+                                if not opts.empty:
+                                    all_expiries = sorted(opts["expiry_dt"].dt.date.unique())
+                                    target_monthly_exp = _get_target_monthly_expiry_date(all_expiries, now.date())
+                                    if target_monthly_exp is not None:
+                                        df_opts_monthly = opts[opts["expiry_dt"].dt.date == target_monthly_exp].copy()
 
-                        # Take last 3 completed 1-hour candles
-                        c1, c2, c3 = candles[-4], candles[-3], candles[-2]
-                        res = _analyze_3candle_price_vol_divergence(c1, c2, c3)
-                        if res:
+                                opt_symbol, opt_ltp = _get_3c_atm_and_itm_options(
+                                    kite, name, res_fut["close"], res_fut["action"], df_opts_monthly
+                                )
+                                ltp_str = f"₹{opt_ltp:.2f}" if opt_ltp > 0 else "ATM"
+                                msg = (
+                                    f"📊 *1H 3C FUTURE: {res_fut['sentiment']}*\n"
+                                    f"Future: *{fut_symbol}* (₹{res_fut['close']:.2f})\n"
+                                    f"Pattern: {res_fut['condition']}\n"
+                                    f"━━━━━━━━━━━━━━━━━━━\n"
+                                    f"Action: *{res_fut['action']}*\n"
+                                    f"Recommended Strike: *{opt_symbol}*\n"
+                                    f"LTP: *{ltp_str}*\n"
+                                    f"TIME: {now.strftime('%H:%M:%S')}"
+                                )
+                                send_telegram_message(msg, chat_id=send_channel, token=send_token)
+
+                        # 2. EVALUATE INDIVIDUAL OPTION CONTRACTS (ATM + 3 ITM CE & PE)
+                        if fut_ltp <= 0 and fut_candles:
+                            fut_ltp = float(fut_candles[-1].get("close", 0))
+
+                        if fut_ltp > 0:
                             opts = df[(df["name"] == name) & (df["instrument_type"].isin(["CE", "PE"]))]
-                            target_monthly_exp = None
-                            df_opts_monthly = pd.DataFrame()
                             if not opts.empty:
                                 all_expiries = sorted(opts["expiry_dt"].dt.date.unique())
                                 target_monthly_exp = _get_target_monthly_expiry_date(all_expiries, now.date())
                                 if target_monthly_exp is not None:
-                                    df_opts_monthly = opts[opts["expiry_dt"].dt.date == target_monthly_exp].copy()
+                                    opts_active = opts[opts["expiry_dt"].dt.date == target_monthly_exp].copy()
+                                    unique_strikes = sorted(opts_active["strike"].unique())
+                                    if unique_strikes:
+                                        atm_strike = min(unique_strikes, key=lambda x: abs(x - fut_ltp))
+                                        atm_idx = unique_strikes.index(atm_strike)
 
-                            opt_symbol, opt_ltp = _get_3c_atm_and_itm_options(
-                                kite, name, res["close"], res["action"], df_opts_monthly
-                            )
+                                        # CE strikes: ATM + 3 below ATM
+                                        ce_strikes = unique_strikes[max(0, atm_idx - 3): atm_idx + 1]
+                                        # PE strikes: ATM + 3 above ATM
+                                        pe_strikes = unique_strikes[atm_idx: min(len(unique_strikes), atm_idx + 4)]
 
-                            ltp_str = f"₹{opt_ltp:.2f}" if opt_ltp > 0 else "ATM"
-                            msg = (
-                                f"📊 *1H 3C: {res['sentiment']}*\n"
-                                f"Asset: *{name} (FUT)* (₹{res['close']:.2f})\n"
-                                f"Pattern: {res['condition']}\n"
-                                f"━━━━━━━━━━━━━━━━━━━\n"
-                                f"Action: *{res['action']}*\n"
-                                f"Strike: *{opt_symbol}*\n"
-                                f"LTP: *{ltp_str}*\n"
-                                f"TIME: {now.strftime('%H:%M:%S')}"
-                            )
-                            send_channel = env_config.TELE_CHAT_ID_BN if is_index_underlying(name) else (env_config.TELE_CHAT_ID_STOCKS if not is_mcx else env_config.TELE_CHAT_ID_BN)
-                            send_token = env_config.TELE_TOKEN_BN if is_index_underlying(name) else (env_config.TELE_TOKEN_STOCKS if not is_mcx else env_config.TELE_TOKEN_BN)
-                            send_telegram_message(msg, chat_id=send_channel, token=send_token)
+                                        target_opts = opts_active[
+                                            (opts_active["instrument_type"] == "CE") & (opts_active["strike"].isin(ce_strikes)) |
+                                            (opts_active["instrument_type"] == "PE") & (opts_active["strike"].isin(pe_strikes))
+                                        ]
+
+                                        for _, opt_row in target_opts.iterrows():
+                                            opt_tkn = int(opt_row["instrument_token"])
+                                            opt_sym = opt_row["tradingsymbol"]
+                                            opt_type = opt_row["instrument_type"]
+                                            opt_strike = float(opt_row["strike"])
+                                            strike_label = "(ATM)" if opt_strike == atm_strike else f"({abs(atm_idx - unique_strikes.index(opt_strike))} ITM)"
+
+                                            try:
+                                                opt_candles = get_historical_data_cached(kite, opt_tkn, from_time, to_time, "60minute")
+                                            except Exception:
+                                                continue
+
+                                            if not opt_candles or len(opt_candles) < 4:
+                                                continue
+
+                                            oc1, oc2, oc3 = opt_candles[-4], opt_candles[-3], opt_candles[-2]
+                                            res_opt = _analyze_3candle_price_vol_divergence(oc1, oc2, oc3)
+                                            if res_opt:
+                                                action_verb = f"BUY {opt_type}" if "EXPANSION" in res_opt["type"] or "REVERSAL" in res_opt["type"] else "WATCH / EXIT"
+                                                msg = (
+                                                    f"📊 *1H 3C OPTION: {res_opt['sentiment']}*\n"
+                                                    f"Option: *{opt_sym} {strike_label}*\n"
+                                                    f"LTP: *₹{res_opt['close']:.2f}*\n"
+                                                    f"Pattern: {res_opt['condition']}\n"
+                                                    f"━━━━━━━━━━━━━━━━━━━\n"
+                                                    f"Action: *{action_verb}*\n"
+                                                    f"TIME: {now.strftime('%H:%M:%S')}"
+                                                )
+                                                send_telegram_message(msg, chat_id=send_channel, token=send_token)
             except Exception as e:
                 print(f"[3-CANDLE DIVERGENCE] Worker loop error: {e}")
             time.sleep(30)
