@@ -1636,6 +1636,7 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
                 active_watches[t_int] = {
                     "start_oi": prev_oi,
                     "start_price": prev_price,
+                    "start_vol": volume,
                     "end_time": now + timedelta(seconds=60),
                     "symbol": row["tradingsymbol"],
                     "underlying": name,
@@ -1652,6 +1653,7 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
                 else:
                     oi_chg = curr_oi - watch["start_oi"]
                     p_chg = ltp - watch["start_price"]
+                    vol_traded = max(0, volume - watch.get("start_vol", volume))
                     final_lot_size = _normalize_lot_size(watch.get("lot_size")) or lot_size
                     final_lots = int(abs(oi_chg) / final_lot_size)
                     
@@ -1663,7 +1665,9 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
                     else:
                         final_threshold = 500 if is_covering_unwinding else 100
                         
-                    if final_lots >= final_threshold:
+                    # Volume confirmation: Ensure actual trading volume occurred
+                    vol_lots = int(vol_traded / final_lot_size) if final_lot_size > 0 else vol_traded
+                    if final_lots >= final_threshold and (vol_lots >= 5 or vol_traded == 0):
                         strength = get_strength_label(final_lots, watch["underlying"])
                         p_icon = "▲" if p_chg >= 0 else "▼"
                         alert_text = (
@@ -1681,7 +1685,7 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
                     del active_watches[t_int]
 
         if curr_oi > 0:
-            history.append({"time": now, "oi": curr_oi, "price": ltp})
+            history.append({"time": now, "oi": curr_oi, "price": ltp, "vol": volume})
             if len(history) > 20:
                 history.pop(0)
 
