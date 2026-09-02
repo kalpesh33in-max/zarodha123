@@ -3624,19 +3624,16 @@ def start_3candle_price_volume_divergence_scanner(kite=None):
                                 kite, name, res["close"], res["action"], df_opts_monthly
                             )
 
-                            ltp_str = f"₹{opt_ltp:.2f}" if opt_ltp > 0 else "ATM Strike"
+                            ltp_str = f"₹{opt_ltp:.2f}" if opt_ltp > 0 else "ATM"
                             msg = (
-                                f"📊 *1H 3-CANDLE PATTERN: {res['sentiment']}*\n"
-                                f"Asset: *{name} (FUT)* (LTP: ₹{res['close']:.2f})\n"
-                                f"━━━━━━━━━━━━━━━━━━━\n"
-                                f"Price : {res['p_trend']}\n"
-                                f"Volume: {res['v_trend']}\n"
-                                f"Status: *{res['condition']}*\n"
+                                f"📊 *1H 3C: {res['sentiment']}*\n"
+                                f"Asset: *{name} (FUT)* (₹{res['close']:.2f})\n"
+                                f"Pattern: {res['condition']}\n"
                                 f"━━━━━━━━━━━━━━━━━━━\n"
                                 f"Action: *{res['action']}*\n"
-                                f"Option: *{opt_symbol}*\n"
-                                f"LTP   : *{ltp_str}*\n"
-                                f"TIME  : {now.strftime('%H:%M:%S')}"
+                                f"Strike: *{opt_symbol}*\n"
+                                f"LTP: *{ltp_str}*\n"
+                                f"TIME: {now.strftime('%H:%M:%S')}"
                             )
                             send_channel = env_config.TELE_CHAT_ID_BN if is_index_underlying(name) else (env_config.TELE_CHAT_ID_STOCKS if not is_mcx else env_config.TELE_CHAT_ID_BN)
                             send_token = env_config.TELE_TOKEN_BN if is_index_underlying(name) else (env_config.TELE_TOKEN_STOCKS if not is_mcx else env_config.TELE_TOKEN_BN)
