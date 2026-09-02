@@ -85,31 +85,10 @@ def validate_and_start_scanner(source):
             scanner_thread.daemon = True
             scanner_thread.start()
             
-            from spot_volume_scanner import start_spot_volume_scanner
-            spot_vol_thread = threading.Thread(target=start_spot_volume_scanner)
-            spot_vol_thread.daemon = True
-            spot_vol_thread.start()
-            
-            
-            from expiry_gamma_scanner import start_expiry_gamma_scanner
-            gamma_thread = threading.Thread(target=start_expiry_gamma_scanner)
-            gamma_thread.daemon = True
-            gamma_thread.start()
-            
-            from nr_option_breakout_scanner import start_nr_option_breakout_scanner
-            nr_thread = threading.Thread(target=start_nr_option_breakout_scanner)
-            nr_thread.daemon = True
-            nr_thread.start()
-
-            from rvol_2candle_breakout_scanner import start_rvol_2candle_breakout_scanner
-            rvol_thread = threading.Thread(target=start_rvol_2candle_breakout_scanner)
-            rvol_thread.daemon = True
-            rvol_thread.start()
-
-            from fo_institutional_breakout_scanner import start_fo_institutional_breakout_scanner
-            fo_thread = threading.Thread(target=start_fo_institutional_breakout_scanner)
-            fo_thread.daemon = True
-            fo_thread.start()
+            from heatmap_engine import start_unified_scanners
+            unified_thread = threading.Thread(target=start_unified_scanners, args=(kite,))
+            unified_thread.daemon = True
+            unified_thread.start()
             
             return True
         except Exception as e:

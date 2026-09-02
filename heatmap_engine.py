@@ -1,11 +1,15 @@
 import os
 import time
+import math
+import threading
+import requests
 import pandas as pd
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 direction_engine = None
 from kite_rate_limiter import kite_historical_data, kite_quote
-from websocket_flow import get_symbol_quotes, get_token_quotes
+from websocket_flow import get_symbol_quotes, get_token_quotes, register_ws_callbacks, add_shared_tokens
+from telegram_utils import send_telegram_message
 
 INDEX_BURST_NAMES = {"BANKNIFTY"}
 BURST_OPTION_EXCLUDED_NAMES = {
@@ -16,11 +20,19 @@ BURST_OPTION_EXCLUDED_NAMES = {
     "BANKEX",
     "SENSEX50",
 }
-STOCK_BURST_NAMES = set()
-NSE_BURST_TRACK_NAMES = []
-MCX_BURST_TRACK_NAMES = []
-MCX_BURST_NAMES = set()
-BURST_TRACK_NAMES = []
+STOCK_BURST_NAMES = {
+    "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
+    "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "BAJAJ-AUTO",
+    "BAJAJFINSV", "BHARTIARTL", "BRITANNIA", "CIPLA", "EICHERMOT",
+    "GRASIM", "HCLTECH", "HEROMOTOCO", "HINDUNILVR", "INFY",
+    "LT", "M&M", "MARUTI", "NESTLEIND", "RELIANCE",
+    "SBILIFE", "SUNPHARMA", "TATACONSUM", "TCS", "TITAN",
+    "TRENT", "ULTRACEMCO"
+}
+NSE_BURST_TRACK_NAMES = sorted(INDEX_BURST_NAMES | STOCK_BURST_NAMES)
+MCX_BURST_TRACK_NAMES = ["CRUDEOILM"]
+MCX_BURST_NAMES = {"CRUDEOILM"}
+BURST_TRACK_NAMES = sorted(INDEX_BURST_NAMES | STOCK_BURST_NAMES | MCX_BURST_NAMES)
 ENABLE_INDEX_BURST_ALERTS = os.getenv("ENABLE_INDEX_BURST_ALERTS", "true").lower() in (
     "true",
     "1",
@@ -803,27 +815,43 @@ VOLUME_MISMATCH_WATCHLIST = [
 _volume_mismatch_triggered_slots = set()
 
 
-def _get_active_future_for_mismatch(name):
-    df = load_futures_data()
-    if df is None or df.empty:
-        return None
-    rows = df[df["name"] == name]
-    if rows.empty:
-        return None
-    preferred_expiry = get_target_monthly_expiry(rows["expiry"].unique())
-    if preferred_expiry is None:
-        return None
-    selected = rows[rows["expiry"] == preferred_expiry]
-    if selected.empty:
-        return None
-    row = selected.iloc[0]
-    exchange = str(row.get("exchange", "") or "").strip() or "NFO"
-    return {
-        "name": name,
-        "symbol": f"{exchange}:{row['tradingsymbol']}",
-        "token": int(row["instrument_token"]),
-        "tradingsymbol": str(row["tradingsymbol"]),
-    }
+def _get_mismatch_instruments(name):
+    """Returns future contract and (if stock) spot equity contract."""
+    df_fut = load_futures_data()
+    df_all = _load_instruments_df()
+    
+    instruments = []
+    # 1. Monthly Future Contract
+    if df_fut is not None and not df_fut.empty:
+        rows = df_fut[df_fut["name"] == name]
+        if not rows.empty:
+            preferred_expiry = get_target_monthly_expiry(rows["expiry"].unique())
+            if preferred_expiry is not None:
+                selected = rows[rows["expiry"] == preferred_expiry]
+                if not selected.empty:
+                    row = selected.iloc[0]
+                    exchange = str(row.get("exchange", "") or "").strip() or "NFO"
+                    label = f"{name}(F)"
+                    instruments.append({
+                        "label": label,
+                        "token": int(row["instrument_token"]),
+                        "is_spot": False
+                    })
+
+    # 2. Spot Contract for individual Stocks
+    is_index = name in {"NIFTY", "SENSEX", "BANKNIFTY", "MIDCPNIFTY", "CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI"}
+    if not is_index and df_all is not None and not df_all.empty:
+        spots = df_all[(df_all["tradingsymbol"] == name) & (df_all["segment"] == "NSE")]
+        if not spots.empty:
+            spot_row = spots.iloc[0]
+            label = f"{name}(S)"
+            instruments.append({
+                "label": label,
+                "token": int(spot_row["instrument_token"]),
+                "is_spot": True
+            })
+
+    return instruments
 
 
 def _build_timeframe_volume_mismatch_table(kite, interval_label, interval_code, slot_time_str, now_ist):
@@ -835,102 +863,107 @@ def _build_timeframe_volume_mismatch_table(kite, interval_label, interval_code, 
     rows = []
 
     for name in VOLUME_MISMATCH_WATCHLIST:
-        contract = _get_active_future_for_mismatch(name)
-        if not contract:
-            continue
+        items = _get_mismatch_instruments(name)
+        for item in items:
+            label = item["label"]
+            token = item["token"]
 
-        token = contract["token"]
-        try:
-            candles = get_historical_data_cached(kite, token, from_time, to_time, interval_code)
-        except Exception as e:
-            print(f"Volume mismatch data error for {name} ({interval_code}): {e}")
-            continue
-
-        if not candles:
-            continue
-
-        today_candles = []
-        prev_day_candles = []
-        for c in candles:
-            c_date = c.get("date")
-            if c_date is None:
+            try:
+                candles = get_historical_data_cached(kite, token, from_time, to_time, interval_code)
+            except Exception as e:
+                print(f"Volume mismatch data error for {label} ({interval_code}): {e}")
                 continue
-            if hasattr(c_date, "astimezone"):
-                c_date = c_date.astimezone(IST)
-            if c_date.date() == now_ist.date():
-                today_candles.append(c)
-            elif c_date.date() < now_ist.date():
-                prev_day_candles.append(c)
 
-        if not today_candles:
-            continue
+            if not candles:
+                continue
 
-        # Opening completed candle of today
-        completed_candle = today_candles[0]
-        
-        # Prior candle from previous trading day's close
-        prev_candle = prev_day_candles[-1] if prev_day_candles else None
+            today_candles = []
+            prev_day_candles = []
+            for c in candles:
+                c_date = c.get("date")
+                if c_date is None:
+                    continue
+                if hasattr(c_date, "astimezone"):
+                    c_date = c_date.astimezone(IST)
+                if c_date.date() == now_ist.date():
+                    today_candles.append(c)
+                elif c_date.date() < now_ist.date():
+                    prev_day_candles.append(c)
 
-        o = float(completed_candle.get("open", 0) or 0)
-        c = float(completed_candle.get("close", 0) or 0)
-        vol = float(completed_candle.get("volume", 0) or 0)
-        if o <= 0 or c <= 0:
-            continue
+            if not today_candles:
+                continue
 
-        # 1. Price Candle Color: Green if Close > Open, Red if Close < Open
-        if c > o:
-            price_candle = "🟢"
-        elif c < o:
-            price_candle = "🔴"
-        else:
-            price_candle = "⚪"
+            completed_candle = today_candles[0]
+            prev_candle = prev_day_candles[-1] if prev_day_candles else None
 
-        # 2. Volume Candle Color: Green if Close > Prev Candle Close, Red if Close < Prev Candle Close
-        if prev_candle:
-            prev_c = float(prev_candle.get("close", 0) or 0)
-            prev_vol = float(prev_candle.get("volume", 0) or 0)
-            if prev_c > 0:
-                if c > prev_c:
-                    volume_candle = "🟢"
-                elif c < prev_c:
-                    volume_candle = "🔴"
+            o = float(completed_candle.get("open", 0) or 0)
+            h = float(completed_candle.get("high", 0) or 0)
+            l = float(completed_candle.get("low", 0) or 0)
+            c = float(completed_candle.get("close", 0) or 0)
+
+            if o <= 0 or c <= 0 or h <= 0 or l <= 0:
+                continue
+
+            # 1. Price Candle Color: Green if Close > Open, Red if Close < Open
+            if c > o:
+                price_candle = "🟢"
+            elif c < o:
+                price_candle = "🔴"
+            else:
+                price_candle = "⚪"
+
+            # 2. Volume Candle Color: Green if Close > Prev Candle Close, Red if Close < Prev Candle Close
+            if prev_candle:
+                prev_c = float(prev_candle.get("close", 0) or 0)
+                if prev_c > 0:
+                    if c > prev_c:
+                        volume_candle = "🟢"
+                    elif c < prev_c:
+                        volume_candle = "🔴"
+                    else:
+                        volume_candle = "⚪"
                 else:
                     volume_candle = "⚪"
             else:
                 volume_candle = "⚪"
-        else:
-            prev_vol = 0.0
-            volume_candle = "⚪"
 
-        # 3. Gap Status: Day's Open vs Previous Day Close
-        day_open = o
-        prev_day_close = float(prev_day_candles[-1].get("close", 0) or 0) if prev_day_candles else 0.0
-
-        if prev_day_close > 0 and day_open > 0:
-            if day_open > prev_day_close:
-                gap_status = "🔼"
-            elif day_open < prev_day_close:
-                gap_status = "🔽"
+            # 3. Gap Status: Day's Open vs Previous Day Close
+            prev_day_close = float(prev_day_candles[-1].get("close", 0) or 0) if prev_day_candles else 0.0
+            if prev_day_close > 0 and o > 0:
+                if o > prev_day_close:
+                    gap_status = "🔼"
+                elif o < prev_day_close:
+                    gap_status = "🔽"
+                else:
+                    gap_status = "🟰"
             else:
                 gap_status = "🟰"
-        else:
-            gap_status = "🟰"
 
-        # 4. Mismatch Check (Mandatory: Price Candle != Volume Candle)
-        is_mismatch = (
-            price_candle != volume_candle
-            and price_candle in ("🟢", "🔴")
-            and volume_candle in ("🟢", "🔴")
-        )
+            # 4. CS (Candle Status: OH, OL, NO)
+            # Tolerance for float comparison
+            if abs(o - h) <= 1e-4:
+                cs_status = "OH"
+            elif abs(o - l) <= 1e-4:
+                cs_status = "OL"
+            else:
+                cs_status = "NO"
 
-        if is_mismatch:
-            rows.append({
-                "name": name,
-                "price_candle": price_candle,
-                "volume_candle": volume_candle,
-                "gap_status": gap_status,
-                "is_mismatch": is_mismatch,
-            })
+            # 5. Mismatch Check (Mandatory: Price Candle != Volume Candle)
+            is_mismatch = (
+                price_candle != volume_candle
+                and price_candle in ("🟢", "🔴")
+                and volume_candle in ("🟢", "🔴")
+            )
+
+            if is_mismatch:
+                rows.append({
+                    "script": label,
+                    "price_candle": price_candle,
+                    "volume_candle": volume_candle,
+                    "gap_status": gap_status,
+                    "cs": cs_status,
+                    "is_mismatch": is_mismatch,
+                })
 
     if not rows:
         return None
@@ -938,10 +971,10 @@ def _build_timeframe_volume_mismatch_table(kite, interval_label, interval_code, 
     msg = f"📊 *{interval_label} VOLUME MISMATCH*\n"
     msg += f"⏰ Time: {now_ist.strftime('%H:%M:%S')} IST (Slot: {slot_time_str})\n\n"
     msg += "```\n"
-    msg += "Future        | Price | Volume |  Gap \n"
-    msg += "--------------+-------+--------+------\n"
+    msg += "SCRIPT        | PRICE | VOLUME | GAP | CS \n"
+    msg += "--------------+-------+--------+-----+----\n"
     for r in rows:
-        msg += f"{r['name']:<14}|   {r['price_candle']}  |   {r['volume_candle']}   |  {r['gap_status']} \n"
+        msg += f"{r['script']:<14}|   {r['price_candle']}  |   {r['volume_candle']}   |  {r['gap_status']} | {r['cs']:<3}\n"
     msg += "```"
     return msg
 
@@ -1897,3 +1930,1480 @@ def calculate_heatmap(kite):
 
     gap_alerts = build_monthly_future_gap_alerts(kite)
     return 0, "", bn_alerts, stock_alerts, gap_alerts
+
+
+# ==============================================================================
+# ================= UNIFIED REAL-TIME SCANNERS & ALERT ENGINES =================
+# ==============================================================================
+
+# Helper: Read access token
+def _get_access_token():
+    token = os.getenv("KITE_ACCESS_TOKEN", "").strip()
+    if not token and os.path.exists("access_token.txt"):
+        try:
+            with open("access_token.txt", "rb") as f:
+                raw = f.read()
+                if raw.startswith(b"\xff\xfe"):
+                    token = raw.decode("utf-16le").strip().replace("\ufeff", "")
+                else:
+                    token = raw.decode("utf-8", errors="ignore").strip()
+        except Exception:
+            pass
+    return token
+
+def _load_instruments_df():
+    if not os.path.exists("instruments.csv"):
+        return pd.DataFrame()
+    df = pd.read_csv("instruments.csv", low_memory=False)
+    if "expiry" in df.columns:
+        df["expiry_dt"] = pd.to_datetime(df["expiry"], errors="coerce")
+        today_date = datetime.now(IST).date()
+        df = df[df["expiry_dt"].isna() | (df["expiry_dt"].dt.date >= today_date)].copy()
+    return df
+
+
+# ------------------------------------------------------------------------------
+# 1. SPOT & FUTURE VOLUME SCANNER (1-Minute Spikes + ATM OI Table)
+# ------------------------------------------------------------------------------
+_spot_vol_state_lock = threading.Lock()
+_spot_vol_candle_state = {}
+_spot_vol_symbol_metadata = {}
+
+def _reset_spot_candle_state(tkn, current_vol):
+    _spot_vol_candle_state[tkn] = {
+        "start_vol": current_vol,
+        "high": -1.0,
+        "low": float('inf'),
+        "close": -1.0
+    }
+
+def start_spot_volume_scanner(kite=None):
+    """Tracks Spot & Future volume anomalies on the single shared WebSocket feed."""
+    print("Starting Spot & Future Volume Scanner Engine...")
+    import env_config
+    from kiteconnect import KiteConnect
+
+    token = _get_access_token()
+    if not kite and token:
+        try:
+            kite = KiteConnect(api_key=env_config.API_KEY)
+            kite.set_access_token(token)
+        except Exception as e:
+            print("Failed to initialize Kite for Spot Scanner:", e)
+            kite = None
+
+    df = _load_instruments_df()
+    if df.empty:
+        return
+
+    target_tokens = []
+    global _spot_vol_symbol_metadata
+    _spot_vol_symbol_metadata.clear()
+
+    # 1. Focus Stocks: BOTH Spot and Future
+    for name in STOCK_BURST_NAMES:
+        futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
+        if futs.empty:
+            continue
+        futs = futs.sort_values(by="expiry")
+        fut = futs.iloc[0]
+        lot_size = int(fut.get("lot_size", 1))
+        fut_tkn = int(fut["instrument_token"])
+        target_tokens.append(fut_tkn)
+
+        spot_tkn = None
+        spots = df[(df["tradingsymbol"] == name) & (df["segment"] == "NSE")]
+        if not spots.empty:
+            spot = spots.iloc[0]
+            spot_tkn = int(spot["instrument_token"])
+            target_tokens.append(spot_tkn)
+
+        opts = df[(df["name"] == name) & (df["instrument_type"].isin(["CE", "PE"]))]
+        strike_step = 50
+        opts_df = pd.DataFrame()
+        if not opts.empty:
+            sample_strikes = sorted(opts["strike"].unique())
+            strike_step = sample_strikes[1] - sample_strikes[0] if len(sample_strikes) > 1 else 50
+            closest_expiry = opts["expiry"].min()
+            opts_df = opts[opts["expiry"] == closest_expiry]
+
+        _spot_vol_symbol_metadata[name] = {
+            "spot_tkn": spot_tkn,
+            "fut_tkn": fut_tkn,
+            "lot_size": lot_size,
+            "is_mcx": False,
+            "is_stock": True,
+            "symbol": fut["tradingsymbol"],
+            "strike_step": strike_step,
+            "opts_df": opts_df
+        }
+
+    # 2. Indices (BANKNIFTY)
+    INDEX_TARGETS = ["BANKNIFTY"]
+    DEFAULT_STRIKE_STEPS = {"BANKNIFTY": 100, "CRUDEOILM": 50}
+    spot_index_map = {"BANKNIFTY": "NIFTY BANK"}
+
+    for name in INDEX_TARGETS:
+        futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
+        if not futs.empty:
+            futs = futs.sort_values(by="expiry")
+            fut = futs.iloc[0]
+            lot_size = int(fut.get("lot_size", 1))
+            tkn = int(fut["instrument_token"])
+            target_tokens.append(tkn)
+
+            spot_name = spot_index_map.get(name)
+            spots = df[(df["tradingsymbol"] == spot_name) & (df["segment"] == "INDICES")]
+            spot_tkn = int(spots.iloc[0]["instrument_token"]) if not spots.empty else None
+            if spot_tkn:
+                target_tokens.append(spot_tkn)
+
+            opts = df[(df["name"] == name) & (df["instrument_type"].isin(["CE", "PE"]))]
+            strike_step = DEFAULT_STRIKE_STEPS.get(name, 50)
+            opts_df = pd.DataFrame()
+            if not opts.empty:
+                closest_expiry = opts["expiry"].min()
+                opts_df = opts[opts["expiry"] == closest_expiry]
+
+            _spot_vol_symbol_metadata[name] = {
+                "spot_tkn": spot_tkn,
+                "fut_tkn": tkn,
+                "lot_size": lot_size,
+                "is_mcx": False,
+                "is_stock": False,
+                "symbol": fut["tradingsymbol"],
+                "strike_step": strike_step,
+                "opts_df": opts_df
+            }
+
+    # 3. Commodities (CRUDEOILM)
+    for name in MCX_BURST_NAMES:
+        futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
+        if not futs.empty:
+            futs = futs.sort_values(by="expiry")
+            fut = futs.iloc[0]
+            lot_size = 10 if name == "CRUDEOILM" else int(fut.get("lot_size", 1))
+            tkn = int(fut["instrument_token"])
+            target_tokens.append(tkn)
+
+            opts = df[(df["name"] == name) & (df["instrument_type"].isin(["CE", "PE"]))]
+            strike_step = 50
+            opts_df = pd.DataFrame()
+            if not opts.empty:
+                sample_strikes = sorted(opts["strike"].unique())
+                strike_step = sample_strikes[1] - sample_strikes[0] if len(sample_strikes) > 1 else 50
+                closest_expiry = opts["expiry"].min()
+                opts_df = opts[opts["expiry"] == closest_expiry]
+
+            _spot_vol_symbol_metadata[name] = {
+                "spot_tkn": None,
+                "fut_tkn": tkn,
+                "lot_size": lot_size,
+                "is_mcx": True,
+                "is_stock": False,
+                "symbol": fut["tradingsymbol"],
+                "strike_step": strike_step,
+                "opts_df": opts_df
+            }
+
+    if not target_tokens:
+        print("[SPOT SCANNER] No targets configured.")
+        return
+
+    print(f"[SPOT SCANNER] Tracking {len(target_tokens)} Spot/Future instruments on shared WebSocket.")
+
+    def on_ticks(ws, ticks):
+        with _spot_vol_state_lock:
+            for tick in ticks:
+                tkn = tick["instrument_token"]
+                ltp = tick["last_price"]
+                vol = tick.get("volume_traded") or tick.get("volume", 0)
+                oi = tick.get("oi", 0)
+
+                if tkn not in _spot_vol_candle_state:
+                    _reset_spot_candle_state(tkn, vol)
+
+                c_state = _spot_vol_candle_state[tkn]
+                c_state["close"] = ltp
+                if c_state["high"] == -1.0 or ltp > c_state["high"]:
+                    c_state["high"] = ltp
+                if c_state["low"] == float('inf') or ltp < c_state["low"]:
+                    c_state["low"] = ltp
+                c_state["current_vol"] = vol
+                c_state["oi"] = oi
+
+    def on_connect(ws, response):
+        add_shared_tokens(target_tokens)
+
+    register_ws_callbacks(on_connect, on_ticks)
+    add_shared_tokens(target_tokens)
+
+    def reporting_loop():
+        import env_config
+        last_reported_minute = None
+
+        while True:
+            time.sleep(0.5)
+            now = datetime.now(IST)
+            if now.weekday() > 4:
+                time.sleep(60)
+                continue
+
+            t = now.time()
+            is_nse_holiday = now.date().isoformat() in env_config.NSE_HOLIDAYS
+            is_nse_open = datetime.strptime("09:00", "%H:%M").time() <= t <= datetime.strptime("15:30", "%H:%M").time() and not is_nse_holiday
+            is_mcx_open = datetime.strptime("15:30", "%H:%M").time() <= t <= datetime.strptime("23:30", "%H:%M").time()
+
+            if not is_nse_open and not is_mcx_open:
+                time.sleep(60)
+                continue
+
+            current_minute = now.strftime("%Y-%m-%d %H:%M")
+            if now.second >= 2 and current_minute != last_reported_minute:
+                last_reported_minute = current_minute
+                alerts = []
+
+                def format_vol(v):
+                    if v >= 1_000_000:
+                        val = v / 1_000_000
+                        return f"{int(val)}M" if val.is_integer() else f"{val:.1f}M"
+                    elif v >= 1_000:
+                        val = v / 1_000
+                        return f"{int(val)}K" if val.is_integer() else f"{val:.1f}K"
+                    return str(int(v))
+
+                with _spot_vol_state_lock:
+                    for name, meta in _spot_vol_symbol_metadata.items():
+                        is_mcx = meta["is_mcx"]
+                        if is_mcx and not is_mcx_open:
+                            continue
+                        if not is_mcx and not is_nse_open:
+                            for tkn in [meta["spot_tkn"], meta["fut_tkn"]]:
+                                if tkn and tkn in _spot_vol_candle_state:
+                                    _reset_spot_candle_state(tkn, _spot_vol_candle_state[tkn].get("current_vol", 0))
+                            continue
+
+                        spot_tkn = meta["spot_tkn"]
+                        fut_tkn = meta["fut_tkn"]
+                        lot_size = meta["lot_size"]
+
+                        spot_state = _spot_vol_candle_state.get(spot_tkn) if spot_tkn else None
+                        fut_state = _spot_vol_candle_state.get(fut_tkn) if fut_tkn else None
+
+                        spot_vol = 0
+                        spot_lots = 0
+                        fut_vol = 0
+                        fut_lots = 0
+
+                        spot_valid = spot_state and spot_state["high"] != -1.0
+                        fut_valid = fut_state and fut_state["high"] != -1.0
+
+                        if spot_valid:
+                            spot_vol = max(0, spot_state.get("current_vol", 0) - spot_state.get("start_vol", 0))
+                            spot_lots = int(spot_vol / lot_size)
+
+                        if fut_valid:
+                            fut_vol = max(0, fut_state.get("current_vol", 0) - fut_state.get("start_vol", 0))
+                            fut_lots = int(fut_vol / lot_size)
+
+                        required_lots = 150 if name == "CRUDEOILM" else 500
+                        if spot_lots >= required_lots or fut_lots >= required_lots:
+                            oi_table = ""
+                            ref_price = 0
+
+                            if meta["is_stock"] and spot_tkn:
+                                s_high = spot_state["high"] if spot_valid else 0
+                                s_low = spot_state["low"] if spot_valid else 0
+                                s_close = spot_state["close"] if spot_valid else 0
+                                s_mid = (s_high - s_low) / 2.0 if spot_valid else 0
+                                buy_price = s_low + s_mid if spot_valid else 0
+                                ref_price = buy_price
+
+                                f_high = fut_state["high"] if fut_valid else 0
+                                f_low = fut_state["low"] if fut_valid else 0
+                                f_close = fut_state["close"] if fut_valid else 0
+                                f_mid = (f_high - f_low) / 2.0 if fut_valid else 0
+
+                                msg = (
+                                    f"Symbol: {meta['symbol']} ({lot_size} lots)\n"
+                                    f"S-V(L): {format_vol(spot_vol)}({spot_lots} L) & F-V(L): {format_vol(fut_vol)}({fut_lots} L)\n"
+                                    f"S-Price: {s_close:.2f} F-Price: {f_close:.2f}\n"
+                                    f"S-Candle C: {s_mid:.2f} FC: {f_mid:.2f}\n"
+                                    f"Buying Price: {buy_price:.2f}\n"
+                                )
+                            else:
+                                price_source = spot_state if spot_valid else fut_state
+                                c_high = price_source["high"]
+                                c_low = price_source["low"]
+                                c_close = price_source["close"]
+                                c_mid = (c_high - c_low) / 2.0
+                                buy_price = c_low + c_mid
+                                ref_price = buy_price
+
+                                msg = (
+                                    f"Symbol: {meta['symbol']} ({lot_size} lots)\n"
+                                    f"Volume(Lots): {format_vol(fut_vol)}({fut_lots} L)\n"
+                                    f"Price : {c_close:.2f}\n"
+                                    f"Candle C: {c_mid:.2f}\n"
+                                    f"Buying price: {buy_price:.2f}\n"
+                                )
+
+                            if kite and ref_price > 0 and meta.get("opts_df") is not None and not meta["opts_df"].empty:
+                                strike_step = meta["strike_step"]
+                                atm_strike = round(ref_price / strike_step) * strike_step
+                                target_strikes = [atm_strike + i * strike_step for i in range(-2, 3)]
+
+                                opts_df = meta["opts_df"]
+                                relevant_opts = opts_df[opts_df["strike"].astype(float).round(2).isin(target_strikes)]
+
+                                symbols_to_quote = []
+                                symbol_to_strike = {}
+                                for _, row in relevant_opts.iterrows():
+                                    qs = f"{row['exchange']}:{row['tradingsymbol']}"
+                                    symbols_to_quote.append(qs)
+                                    symbol_to_strike[qs] = {
+                                        "strike": float(row["strike"]),
+                                        "type": row["instrument_type"]
+                                    }
+
+                                try:
+                                    quotes = kite_quote(kite, symbols_to_quote)
+                                    strike_data = {s: {"CE": 0, "PE": 0} for s in target_strikes}
+                                    for qs, data in quotes.items():
+                                        if qs in symbol_to_strike:
+                                            s = symbol_to_strike[qs]["strike"]
+                                            t_type = symbol_to_strike[qs]["type"]
+                                            strike_data[s][t_type] = data.get("oi", 0)
+
+                                    def fmt_lakhs(v):
+                                        if v == 0: return "0"
+                                        if v <= 99000: return f"{int(round(v/1000))}K"
+                                        return f"{v/100000:.1f}L"
+
+                                    max_ce = max(d["CE"] for d in strike_data.values())
+                                    max_pe = max(d["PE"] for d in strike_data.values())
+
+                                    oi_table += "\n```\n"
+                                    oi_table += f"   Call OI  |  Strike  |   Put OI   \n"
+                                    oi_table += f"------------+----------+------------\n"
+
+                                    for s in target_strikes:
+                                        ce_val = strike_data[s]["CE"]
+                                        pe_val = strike_data[s]["PE"]
+                                        ce_str = fmt_lakhs(ce_val)
+                                        pe_str = fmt_lakhs(pe_val)
+
+                                        is_max_ce = (ce_val == max_ce and ce_val > 0)
+                                        is_max_pe = (pe_val == max_pe and pe_val > 0)
+
+                                        ce_prefix = "🔥" if is_max_ce else "  "
+                                        pe_suffix = "🔥" if is_max_pe else "  "
+
+                                        ce_oi_str = f"{ce_prefix}{ce_str:<5}"
+                                        pe_oi_str = f"{pe_str:>5}{pe_suffix}"
+
+                                        strike_str = f"{int(s)} 🎯" if s == atm_strike else f"{int(s)}   "
+                                        oi_table += f"  {ce_oi_str:<7}  |  {strike_str} |  {pe_oi_str:>7}\n"
+                                    oi_table += "```\n"
+                                except Exception as e:
+                                    print("Error fetching OI quote:", e)
+
+                            msg += oi_table
+                            msg += f"TIME: {now.strftime('%H:%M:%S')}\n"
+                            alerts.append(msg)
+
+                        if spot_tkn and spot_tkn in _spot_vol_candle_state:
+                            _reset_spot_candle_state(spot_tkn, _spot_vol_candle_state[spot_tkn].get("current_vol", 0))
+                        if fut_tkn and fut_tkn in _spot_vol_candle_state:
+                            _reset_spot_candle_state(fut_tkn, _spot_vol_candle_state[fut_tkn].get("current_vol", 0))
+
+                token_stocks = os.getenv("TELE_TOKEN_STOCKS", env_config.TELE_TOKEN)
+                chat_stocks = os.getenv("CHAT_ID_STOCKS", env_config.TELE_CHAT_ID)
+                for alert in alerts:
+                    try:
+                        send_telegram_message(alert, chat_id=chat_stocks, token=token_stocks)
+                    except Exception as e:
+                        print(f"Error sending spot volume alert: {e}")
+
+    threading.Thread(target=reporting_loop, daemon=True).start()
+
+
+# ------------------------------------------------------------------------------
+# 2. 1-HOUR NARROW RANGE (NR-1H) 15-MINUTE OPTION BREAKOUT SCANNER
+# ------------------------------------------------------------------------------
+NR_WATCHLIST = [
+    "NIFTY", "SENSEX", "BANKNIFTY", "MIDCPNIFTY",
+    "360ONE", "ADANIENSOL", "ADANIENT", "ADANIGREEN", "ADANIPORTS",
+    "APLAPOLLO", "ASIANPAINT", "ASTRAL", "AUROPHARMA", "AXISBANK",
+    "ABB", "BAJAJ-AUTO", "BAJAJFINSV", "BAJFINANCE", "BDL",
+    "BHARATFORG", "BHARTIARTL", "BLUESTARCO", "BSE", "BRITANNIA", "CDSL",
+    "CGPOWER", "CHOLAFIN", "CIPLA", "COCHINSHIP", "COFORGE",
+    "COLPAL", "CUMMINSIND", "DALBHARAT", "DMART", "DIVISLAB",
+    "DRREDDY", "EICHERMOT", "GLENMARK", "GODFRYPHLP", "GODREJCP",
+    "GODREJPROP", "GRASIM", "GVT&D", "HAL", "HAVELLS",
+    "HCLTECH", "HDFCAMC", "HDFCBANK", "HEROMOTOCO", "HINDALCO",
+    "HINDUNILVR", "HYUNDAI", "ICICIBANK", "ICICIGI", "INDUSINDBK",
+    "JINDALSTEL", "JSWSTEEL", "KAYNES", "KPITTECH", "LAURUSLABS",
+    "LODHA", "LT", "LTM", "LUPIN", "M&M",
+    "MANKIND", "MARUTI", "MAXHEALTH", "MAZDOCK", "MCX",
+    "MFSL", "MOTILALOFS", "MPHASIS", "MUTHOOTFIN", "NAM-INDIA",
+    "NAUKRI", "NESTLEIND", "OBEROIRLTY", "OFSS", "PAYTM",
+    "PERSISTENT", "PHOENIXLTD", "PIIND", "PNBHOUSING", "POLICYBZR",
+    "PRESTIGE", "RADICO", "RELIANCE", "SBICARD", "SBILIFE",
+    "SBIN", "SHRIRAMFIN", "SHREECEM", "SIEMENS", "SRF",
+    "SUNPHARMA", "SUPREMEIND", "TATACONSUM", "TATAELXSI", "TCS",
+    "TECHM", "TIINDIA", "TITAN", "TORNTPHARM", "TRENT",
+    "TVSMOTOR", "UNITDSPR", "ULTRACEMCO", "UNOMINDA", "VOLTAS"
+]
+
+_nr_tracked_candidates = {}
+_nr_alerted_assets = {}
+_nr_state_lock = threading.Lock()
+_nr_candidates_identified_date = None
+
+def _get_target_monthly_expiry_date(expiries, target_date):
+    valid = [e for e in expiries if e >= target_date]
+    if not valid:
+        return None
+    month_groups = {}
+    for e in valid:
+        key = (e.year, e.month)
+        if key not in month_groups or e > month_groups[key]:
+            month_groups[key] = e
+    nearest_month_key = sorted(month_groups.keys())[0]
+    return month_groups[nearest_month_key]
+
+def _get_nr_highest_oi_option(kite, name, ref_price, direction, df_opts):
+    target_type = "CE" if direction == "BULLISH" else "PE"
+    action_verb = "BUY CALL (CE)" if direction == "BULLISH" else "BUY PUT (PE)"
+
+    if df_opts is None or df_opts.empty or ref_price <= 0:
+        return action_verb, f"(ATM {target_type} Strike)", 0.0, 0
+
+    opts_side = df_opts[df_opts["instrument_type"] == target_type]
+    if opts_side.empty:
+        return action_verb, f"(ATM {target_type} Strike)", 0.0, 0
+
+    unique_strikes = sorted(opts_side["strike"].unique())
+    if not unique_strikes:
+        return action_verb, f"(ATM {target_type} Strike)", 0.0, 0
+
+    atm_strike = min(unique_strikes, key=lambda x: abs(x - ref_price))
+    idx = unique_strikes.index(atm_strike)
+    selected_strikes = unique_strikes[max(0, idx - 1): min(len(unique_strikes), idx + 2)]
+    target_opts = opts_side[opts_side["strike"].isin(selected_strikes)]
+    if target_opts.empty:
+        return action_verb, f"(ATM {target_type} Strike)", 0.0, 0
+
+    symbols_to_quote = [f"{r['exchange']}:{r['tradingsymbol']}" for _, r in target_opts.iterrows()]
+    try:
+        quotes = kite.quote(symbols_to_quote)
+    except Exception:
+        quotes = {}
+
+    best_strike = None
+    max_oi = -1
+    best_ltp = 0.0
+    best_symbol = ""
+    for _, row in target_opts.iterrows():
+        sym_key = f"{row['exchange']}:{row['tradingsymbol']}"
+        q = quotes.get(sym_key, {})
+        oi = q.get("oi", 0)
+        ltp = float(q.get("last_price", 0.0))
+        strike_val = float(row["strike"])
+        if oi > max_oi or (oi == max_oi and strike_val == atm_strike):
+            max_oi = oi
+            best_strike = strike_val
+            best_ltp = ltp
+            best_symbol = row["tradingsymbol"]
+
+    if best_symbol:
+        is_atm_str = " (ATM)" if best_strike == atm_strike else ""
+        return action_verb, f"{best_symbol}{is_atm_str}", best_ltp, max_oi
+    return action_verb, f"(ATM {target_type} Strike)", 0.0, 0
+
+
+def _identify_nr_candidates(kite, df):
+    """
+    Runs at 10:15 AM to scan 1-Hour Future Candles (09:15 to 10:15 IST).
+    Filters symbols where 1H Future Range % < 1.0%.
+    """
+    global _nr_tracked_candidates, _nr_alerted_assets, _nr_candidates_identified_date
+    now = datetime.now(IST)
+    today_date = now.date()
+
+    print(f"[NR-1H] Scanning 1-Hour Future Candles (09:15 - 10:15) across {len(NR_WATCHLIST)} symbols (< 1.0% Compression)...")
+    from_time = datetime.combine(today_date, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
+    to_time = datetime.combine(today_date, datetime.strptime("10:15", "%H:%M").time(), tzinfo=IST)
+
+    new_candidates = {}
+    for name in NR_WATCHLIST:
+        try:
+            futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
+            if futs.empty:
+                continue
+            futs = futs.sort_values(by="expiry")
+            fut_row = futs.iloc[0]
+            fut_token = int(fut_row["instrument_token"])
+            fut_symbol = fut_row["tradingsymbol"]
+
+            fut_candles = kite.historical_data(fut_token, from_time, to_time, "60minute")
+            if not fut_candles:
+                continue
+
+            c1h = fut_candles[0]
+            h_1h = float(c1h.get("high", 0.0))
+            l_1h = float(c1h.get("low", 0.0))
+            c_1h = float(c1h.get("close", 0.0))
+
+            if l_1h <= 0 or h_1h <= l_1h:
+                continue
+
+            # 1H Future Range % Formula: ((High - Low) / Low) * 100
+            range_pct = ((h_1h - l_1h) / l_1h) * 100.0
+
+            # STRICT 1.0% Compression Threshold
+            if range_pct < 1.0:
+                opts = df[(df["name"] == name) & (df["instrument_type"].isin(["CE", "PE"]))]
+                target_monthly_exp = None
+                df_opts_monthly = pd.DataFrame()
+                if not opts.empty:
+                    all_expiries = sorted(opts["expiry_dt"].dt.date.unique())
+                    target_monthly_exp = _get_target_monthly_expiry_date(all_expiries, today_date)
+                    if target_monthly_exp is not None:
+                        df_opts_monthly = opts[opts["expiry_dt"].dt.date == target_monthly_exp].copy()
+
+                new_candidates[name] = {
+                    "token": fut_token,
+                    "symbol": fut_symbol,
+                    "underlying": name,
+                    "high_1h": h_1h,
+                    "low_1h": l_1h,
+                    "close_1h": c_1h,
+                    "range_pct": range_pct,
+                    "opts_df": df_opts_monthly,
+                    "alerted": False
+                }
+                print(f"  [NR-1H FUTURE COMPRESSED] {name}: 1H High={h_1h:.2f}, Low={l_1h:.2f}, Range={range_pct:.2f}% (< 1.0%)")
+        except Exception:
+            continue
+
+    with _nr_state_lock:
+        _nr_tracked_candidates = new_candidates
+        _nr_alerted_assets.clear()
+        _nr_candidates_identified_date = today_date
+
+    print(f"[NR-1H] Registered {len(new_candidates)} compressed Future candidates (< 1.0% Range).")
+
+
+def _scan_nr_15m_breakouts(kite):
+    """
+    Evaluates completed 15-minute Future candles for Breakout (> 1H High) or Breakdown (< 1H Low).
+    Recommends Highest OI ATM Option & locks direction for the day.
+    """
+    now = datetime.now(IST)
+    today_date = now.date()
+    with _nr_state_lock:
+        active_list = [
+            v for v in _nr_tracked_candidates.values()
+            if not v["alerted"] and v["underlying"] not in _nr_alerted_assets
+        ]
+
+    if not active_list:
+        return
+
+    from_time = datetime.combine(today_date, datetime.strptime("10:15", "%H:%M").time(), tzinfo=IST)
+    to_time = now
+
+    for cand in active_list:
+        token = cand["token"]
+        name = cand["underlying"]
+        high_1h = cand["high_1h"]
+        low_1h = cand["low_1h"]
+
+        try:
+            candles = kite.historical_data(token, from_time, to_time, "15minute")
+        except Exception:
+            continue
+
+        if not candles:
+            continue
+
+        last_candle = candles[-1]
+        c_time = last_candle.get("date")
+        if c_time and c_time.minute == now.minute and (now.minute % 15 != 0):
+            candles_completed = candles[:-1]
+        else:
+            candles_completed = candles
+
+        if not candles_completed:
+            continue
+
+        eval_candle = candles_completed[-1]
+        candle_close = float(eval_candle.get("close", 0.0))
+        candle_high = float(eval_candle.get("high", 0.0))
+        candle_low = float(eval_candle.get("low", 0.0))
+
+        is_bullish = candle_close > high_1h
+        is_bearish = candle_close < low_1h
+
+        if is_bullish or is_bearish:
+            direction = "BULLISH" if is_bullish else "BEARISH"
+            with _nr_state_lock:
+                if name in _nr_alerted_assets:
+                    continue
+                cand["alerted"] = True
+                _nr_alerted_assets[name] = {
+                    "time": now,
+                    "direction": direction
+                }
+
+            action_verb, opt_symbol, opt_ltp, max_oi = _get_nr_highest_oi_option(
+                kite, name, candle_close, direction, cand["opts_df"]
+            )
+
+            time_str = eval_candle.get("date").strftime("%H:%M") if eval_candle.get("date") else "Completed"
+            oi_text = f" (OI: {max_oi:,})" if max_oi > 0 else ""
+            ltp_text = f"₹{opt_ltp:.2f}" if opt_ltp > 0 else "ATM Strike"
+
+            if is_bullish:
+                header = "🚀 *NR-1H FUTURE BREAKOUT*"
+                level_line = f"15M Close: *₹{candle_close:.2f}* (Broke 1H High ₹{high_1h:.2f})"
+            else:
+                header = "🚨 *NR-1H FUTURE BREAKDOWN*"
+                level_line = f"15M Close: *₹{candle_close:.2f}* (Broke 1H Low ₹{low_1h:.2f})"
+
+            msg = (
+                f"{header}\n"
+                f"Asset: *{name}* (1H Range: {cand['range_pct']:.2f}%)\n"
+                f"{level_line}\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"Action: *{action_verb}*\n"
+                f"Strike: *{opt_symbol}*\n"
+                f"LTP: *{ltp_text}*{oi_text}\n"
+                f"TIME: {now.strftime('%H:%M:%S')}"
+            )
+            print(f"[NR-1H FUTURE] Triggered {name} {direction} -> {action_verb} {opt_symbol}")
+            import env_config
+            send_telegram_message(msg, chat_id=env_config.TELE_CHAT_ID, token=env_config.TELE_TOKEN)
+
+def start_nr_option_breakout_scanner(kite=None):
+    """Initializes 1-Hour Narrow Range (NR-1H) option compression scanner."""
+    print("Starting 1-Hour Narrow Range (NR-1H) Option Breakout Scanner...")
+    import env_config
+    from kiteconnect import KiteConnect
+
+    token = _get_access_token()
+    if not kite and token:
+        try:
+            kite = KiteConnect(api_key=env_config.API_KEY)
+            kite.set_access_token(token)
+        except Exception:
+            pass
+
+    df = _load_instruments_df()
+    last_scanned_slot = None
+
+    def worker_loop():
+        nonlocal df, last_scanned_slot, kite
+        while True:
+            try:
+                now = datetime.now(IST)
+                if now.weekday() > 4:
+                    time.sleep(60)
+                    continue
+
+                t = now.time()
+                if not (datetime.strptime("09:15", "%H:%M").time() <= t <= datetime.strptime("15:30", "%H:%M").time()):
+                    time.sleep(30)
+                    continue
+
+                global _nr_candidates_identified_date
+                if t >= datetime.strptime("10:15", "%H:%M").time() and _nr_candidates_identified_date != now.date():
+                    if df.empty:
+                        df = _load_instruments_df()
+                    if kite:
+                        _identify_nr_candidates(kite, df)
+
+                if t >= datetime.strptime("10:30", "%H:%M").time() and kite:
+                    current_slot = (now.hour, (now.minute // 15) * 15)
+                    if current_slot != last_scanned_slot and (now.minute % 15 == 0 and now.second >= 10 or now.minute % 15 > 0):
+                        last_scanned_slot = current_slot
+                        _scan_nr_15m_breakouts(kite)
+            except Exception as e:
+                print(f"[NR-1H] Scanner error: {e}")
+            time.sleep(10)
+
+    threading.Thread(target=worker_loop, daemon=True).start()
+
+
+# ------------------------------------------------------------------------------
+# 3. EXPIRY GAMMA (0-DTE & HERO-ZERO) ENGINE
+# ------------------------------------------------------------------------------
+_gamma_spot_price = 0.0
+_gamma_option_quotes = {}
+_gamma_last_alert_time = {}
+_gamma_current_expiry_date = None
+
+def _norm_pdf(x):
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+def _calc_gamma(spot, strike, iv_pct, minutes_to_close, r=0.07):
+    if minutes_to_close <= 0 or iv_pct <= 0 or spot <= 0 or strike <= 0:
+        return 0.0
+    sigma = iv_pct / 100.0
+    T = minutes_to_close / (375.0 * 252.0)
+    try:
+        d1 = (math.log(spot / strike) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
+        return _norm_pdf(d1) / (spot * sigma * math.sqrt(T))
+    except (ZeroDivisionError, ValueError):
+        return 0.0
+
+def start_expiry_gamma_scanner(kite=None):
+    """Tracks 0-DTE Gamma squeeze and afternoon Hero-Zero breakout plays."""
+    print("Starting Expiry Gamma & Hero-Zero Scanner Engine...")
+    import env_config
+    from kiteconnect import KiteConnect
+
+    def supervisor():
+        global _gamma_spot_price, _gamma_option_quotes, _gamma_current_expiry_date, _gamma_last_alert_time
+        while True:
+            try:
+                now = datetime.now(IST)
+                today_date = now.date()
+                if now.weekday() > 4 or now.date().isoformat() in getattr(env_config, "NSE_HOLIDAYS", set()):
+                    time.sleep(60)
+                    continue
+
+                # Tuesday = NIFTY, Thursday = SENSEX
+                weekday = now.weekday()
+                if weekday == 1:
+                    name, exchange = "NIFTY", "NSE"
+                elif weekday == 3:
+                    name, exchange = "SENSEX", "BSE"
+                else:
+                    time.sleep(300)
+                    continue
+
+                t = now.time()
+                if not (datetime.strptime("09:15", "%H:%M").time() <= t <= datetime.strptime("15:30", "%H:%M").time()):
+                    time.sleep(30)
+                    continue
+
+                token = _get_access_token()
+                if not token:
+                    time.sleep(30)
+                    continue
+
+                kite_client = KiteConnect(api_key=env_config.API_KEY)
+                kite_client.set_access_token(token)
+
+                df = _load_instruments_df()
+                if df.empty:
+                    time.sleep(30)
+                    continue
+
+                opts = df[(df["name"] == name) & (df["segment"].isin(["NFO-OPT", "BFO-OPT"]))].copy()
+                if opts.empty:
+                    time.sleep(60)
+                    continue
+
+                opts["expiry"] = pd.to_datetime(opts["expiry"])
+                active_opts = opts[opts["expiry"].dt.date >= today_date]
+                if active_opts.empty:
+                    time.sleep(60)
+                    continue
+
+                closest_expiry = active_opts["expiry"].min()
+                if closest_expiry.date() != today_date:
+                    time.sleep(300)
+                    continue
+
+                spot_tsym = "NIFTY 50" if name == "NIFTY" else "SENSEX"
+                spot_symbol = "NSE:NIFTY 50" if name == "NIFTY" else "BSE:SENSEX"
+                spots = df[(df["tradingsymbol"] == spot_tsym) & (df["segment"] == "INDICES")]
+                if spots.empty:
+                    spots = df[df["tradingsymbol"] == spot_tsym]
+                if spots.empty:
+                    time.sleep(30)
+                    continue
+
+                spot_token = int(spots.iloc[0]["instrument_token"])
+                lot_size = int(active_opts.iloc[0].get("lot_size", 20 if name == "SENSEX" else 65))
+
+                if _gamma_current_expiry_date != today_date:
+                    _gamma_current_expiry_date = today_date
+                    _gamma_last_alert_time.clear()
+                    print(f"🟢 [0-DTE GAMMA] Tracking {name} on Expiry {today_date} (Spot Token: {spot_token})")
+
+                    try:
+                        spot_quote = kite_client.quote([spot_symbol]).get(spot_symbol, {})
+                        initial_spot = float(spot_quote.get("last_price", 0.0))
+                    except Exception:
+                        initial_spot = 0.0
+
+                    if initial_spot <= 0:
+                        time.sleep(10)
+                        continue
+
+                    strikes = sorted(active_opts["strike"].unique())
+                    atm_strike = min(strikes, key=lambda x: abs(x - initial_spot))
+                    idx = strikes.index(atm_strike)
+                    selected_strikes = strikes[max(0, idx - 8): min(len(strikes), idx + 9)]
+                    expiry_opts = active_opts[(active_opts["expiry"] == closest_expiry) & (active_opts["strike"].isin(selected_strikes))]
+
+                    active_option_tokens = []
+                    token_to_strike_info = {}
+                    for _, row in expiry_opts.iterrows():
+                        tkn = int(row["instrument_token"])
+                        active_option_tokens.append(tkn)
+                        token_to_strike_info[tkn] = {
+                            "strike": float(row["strike"]),
+                            "type": row["instrument_type"],
+                            "symbol": row["tradingsymbol"]
+                        }
+
+                    target_tokens = [spot_token] + active_option_tokens
+
+                    def on_ticks(ws, ticks):
+                        global _gamma_spot_price, _gamma_option_quotes
+                        for tick in ticks:
+                            tkn = tick["instrument_token"]
+                            ltp = tick["last_price"]
+                            if tkn == spot_token:
+                                _gamma_spot_price = ltp
+                            elif tkn in token_to_strike_info:
+                                _gamma_option_quotes[tkn] = {
+                                    "ltp": ltp,
+                                    "oi": tick.get("oi", 0),
+                                    "iv": tick.get("iv", 0.0) or 15.0,
+                                    "volume": tick.get("volume_traded") or tick.get("volume", 0)
+                                }
+
+                    def on_connect(ws, response):
+                        add_shared_tokens(target_tokens)
+
+                    register_ws_callbacks(on_connect, on_ticks)
+                    add_shared_tokens(target_tokens)
+
+                market_end = datetime.strptime("15:30", "%H:%M").time()
+                close_time = datetime.combine(now.date(), market_end, tzinfo=IST)
+                minutes_left = (close_time - now).total_seconds() / 60.0
+
+                if minutes_left <= 0 or _gamma_spot_price <= 0 or not _gamma_option_quotes:
+                    time.sleep(10)
+                    continue
+
+                # Evaluate afternoon Hero-Zero Squeeze (13:00 to 15:05 IST)
+                is_hero_zero_window = datetime.strptime("13:00", "%H:%M").time() <= now.time() <= datetime.strptime("15:05", "%H:%M").time()
+                if is_hero_zero_window:
+                    now_ts = now.timestamp()
+                    if not hasattr(supervisor, "spot_history"):
+                        supervisor.spot_history = []
+                        supervisor.hero_zero_locked_dir = None
+
+                    supervisor.spot_history.append((now_ts, _gamma_spot_price))
+                    supervisor.spot_history = [(t_s, p) for t_s, p in supervisor.spot_history if now_ts - t_s <= 1800]
+
+                    if len(supervisor.spot_history) >= 10:
+                        spot_prices_30m = [p for _, p in supervisor.spot_history]
+                        spot_30m_high = max(spot_prices_30m)
+                        spot_30m_low = min(spot_prices_30m)
+                        spot_30m_vwap = sum(spot_prices_30m) / len(spot_prices_30m)
+
+                        is_bullish_breakout = (_gamma_spot_price >= spot_30m_high - 1.5) and (_gamma_spot_price > spot_30m_vwap)
+                        is_bearish_breakdown = (_gamma_spot_price <= spot_30m_low + 1.5) and (_gamma_spot_price < spot_30m_vwap)
+
+                        otm_ce_strike_data = None
+                        otm_pe_strike_data = None
+                        for tkn, info in token_to_strike_info.items():
+                            s_val = info["strike"]
+                            q = _gamma_option_quotes.get(tkn, {})
+                            if s_val > _gamma_spot_price and info["type"] == "CE" and otm_ce_strike_data is None:
+                                otm_ce_strike_data = {"strike": s_val, "ltp": q.get("ltp", 0.0), "symbol": info["symbol"]}
+                            if s_val < _gamma_spot_price and info["type"] == "PE":
+                                otm_pe_strike_data = {"strike": s_val, "ltp": q.get("ltp", 0.0), "symbol": info["symbol"]}
+
+                        min_price = 25.0 if name == "SENSEX" else 10.0
+                        max_price = 90.0 if name == "SENSEX" else 35.0
+
+                        if is_bullish_breakout and supervisor.hero_zero_locked_dir in (None, "CALL") and otm_ce_strike_data:
+                            ce_ltp = otm_ce_strike_data["ltp"]
+                            ce_strike = int(otm_ce_strike_data["strike"])
+                            if min_price <= ce_ltp <= max_price:
+                                alert_key = f"hz_ff_ce_{ce_strike}"
+                                if time.time() - _gamma_last_alert_time.get(alert_key, 0.0) > 1800:
+                                    _gamma_last_alert_time[alert_key] = time.time()
+                                    supervisor.hero_zero_locked_dir = "CALL"
+                                    msg = (
+                                        f"🚀 *HERO-ZERO: {name} {ce_strike} CE*\n"
+                                        f"Price: *₹{ce_ltp:.2f}*\n"
+                                        f"SL: *₹{max(4.0, round(ce_ltp * 0.45, 1)):.2f}* | Target: *₹{round(ce_ltp * 2.2, 1):.2f}*\n"
+                                        f"Spot: {_gamma_spot_price:.2f} (30M High Break)\n"
+                                        f"Time: {now.strftime('%H:%M:%S')}"
+                                    )
+                                    send_telegram_message(msg, chat_id=env_config.TELE_CHAT_ID, token=env_config.TELE_TOKEN)
+
+                        elif is_bearish_breakdown and supervisor.hero_zero_locked_dir in (None, "PUT") and otm_pe_strike_data:
+                            pe_ltp = otm_pe_strike_data["ltp"]
+                            pe_strike = int(otm_pe_strike_data["strike"])
+                            if min_price <= pe_ltp <= max_price:
+                                alert_key = f"hz_ff_pe_{pe_strike}"
+                                if time.time() - _gamma_last_alert_time.get(alert_key, 0.0) > 1800:
+                                    _gamma_last_alert_time[alert_key] = time.time()
+                                    supervisor.hero_zero_locked_dir = "PUT"
+                                    msg = (
+                                        f"🚨 *HERO-ZERO: {name} {pe_strike} PE*\n"
+                                        f"Price: *₹{pe_ltp:.2f}*\n"
+                                        f"SL: *₹{max(4.0, round(pe_ltp * 0.45, 1)):.2f}* | Target: *₹{round(pe_ltp * 2.2, 1):.2f}*\n"
+                                        f"Spot: {_gamma_spot_price:.2f} (30M Low Break)\n"
+                                        f"Time: {now.strftime('%H:%M:%S')}"
+                                    )
+                                    send_telegram_message(msg, chat_id=env_config.TELE_CHAT_ID, token=env_config.TELE_TOKEN)
+            except Exception as e:
+                print(f"[GAMMA SCANNER] Supervisor error: {e}")
+            time.sleep(30)
+
+    threading.Thread(target=supervisor, daemon=True).start()
+
+
+# ------------------------------------------------------------------------------
+# 4. 2-CANDLE RVOL BREAKOUT SCANNER (4 Indices + Crude + 32 Stocks)
+# ------------------------------------------------------------------------------
+RVOL_INDICES = ["BANKNIFTY", "NIFTY", "SENSEX", "MIDCPNIFTY"]
+RVOL_COMMODITIES = ["CRUDEOILM"]
+RVOL_STOCKS = [
+    "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
+    "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "BAJAJ-AUTO",
+    "BAJAJFINSV", "BHARTIARTL", "BRITANNIA", "CIPLA", "EICHERMOT",
+    "GRASIM", "HCLTECH", "HEROMOTOCO", "HINDUNILVR", "INFY",
+    "LT", "M&M", "MARUTI", "NESTLEIND", "RELIANCE",
+    "SBILIFE", "SUNPHARMA", "TATACONSUM", "TCS", "TITAN",
+    "TRENT", "ULTRACEMCO"
+]
+
+_rvol_candle_history = {}
+_rvol_candle_state = {}
+_rvol_current_minute = {}
+_rvol_token_metadata = {}
+_rvol_option_contracts_cache = {}
+_rvol_last_alert_times = {}
+_rvol_state_lock = threading.Lock()
+_rvol_kite_client = None
+
+def _rvol_highest_oi_option(name, ref_price, direction):
+    global _rvol_kite_client, _rvol_option_contracts_cache
+    target_type = "CE" if direction == "BULLISH" else "PE"
+    action_verb = "BUY CALL (CE)" if direction == "BULLISH" else "BUY PUT (PE)"
+
+    if not _rvol_kite_client or name not in _rvol_option_contracts_cache or ref_price <= 0:
+        return f"Action:- *{action_verb}*\n(ATM {target_type} Strike)"
+
+    opts = _rvol_option_contracts_cache.get(name)
+    if opts is None or opts.empty:
+        return f"Action:- *{action_verb}*\n(ATM {target_type} Strike)"
+
+    opts_side = opts[opts["instrument_type"] == target_type]
+    if opts_side.empty:
+        return f"Action:- *{action_verb}*\n(ATM {target_type} Strike)"
+
+    unique_strikes = sorted(opts_side["strike"].unique())
+    if not unique_strikes:
+        return f"Action:- *{action_verb}*\n(ATM {target_type} Strike)"
+
+    atm_strike = min(unique_strikes, key=lambda x: abs(x - ref_price))
+    idx = unique_strikes.index(atm_strike)
+    selected_strikes = unique_strikes[max(0, idx - 1): min(len(unique_strikes), idx + 2)]
+    target_opts = opts_side[opts_side["strike"].isin(selected_strikes)]
+    if target_opts.empty:
+        return f"Action:- *{action_verb}*\n(ATM {target_type} Strike)"
+
+    symbols_to_quote = [f"{r['exchange']}:{r['tradingsymbol']}" for _, r in target_opts.iterrows()]
+    try:
+        quotes = _rvol_kite_client.quote(symbols_to_quote)
+    except Exception:
+        quotes = {}
+
+    best_strike = None
+    max_oi = -1
+    best_ltp = 0.0
+    best_symbol = ""
+    for _, row in target_opts.iterrows():
+        sym_key = f"{row['exchange']}:{row['tradingsymbol']}"
+        q = quotes.get(sym_key, {})
+        oi = q.get("oi", 0)
+        ltp = q.get("last_price", 0.0)
+        strike_val = float(row["strike"])
+        if oi > max_oi or (oi == max_oi and strike_val == atm_strike):
+            max_oi = oi
+            best_strike = strike_val
+            best_ltp = ltp
+            best_symbol = row["tradingsymbol"]
+
+    if best_symbol and best_strike is not None:
+        return f"Action:- *{action_verb}*\n*{best_symbol}*\nLTP: *₹{best_ltp:.2f}*"
+    return f"Action:- *{action_verb}*\n(ATM {target_type} Strike)"
+
+def _analyze_2candle_pattern(c1, c2, is_mcx=False):
+    c1_c, c1_o, c1_h, c1_l, c1_lots = c1["close"], c1["open"], c1["high"], c1["low"], c1["lots"]
+    c2_c, c2_o, c2_h, c2_l, c2_lots = c2["close"], c2["open"], c2["high"], c2["low"], c2["lots"]
+
+    c1_range = max(0.01, c1_h - c1_l)
+    c2_range = max(0.01, c2_h - c2_l)
+    c1_body_ratio = abs(c1_c - c1_o) / c1_range
+    c2_body_ratio = abs(c2_c - c2_o) / c2_range
+
+    c1_req_lots = 75 if is_mcx else 500
+    c2_req_lots = 50 if is_mcx else 300
+
+    if c1_lots < c1_req_lots or c2_lots < c2_req_lots:
+        return False, None, 0, {}
+
+    if c1_c < c1_o and c2_c < c2_o:
+        c1_lower_wick = max(0.0, c1_c - c1_l) / c1_range
+        c2_lower_wick = max(0.0, c2_c - c2_l) / c2_range
+        if (c1_body_ratio >= 0.60 and c1_lower_wick <= 0.20) and (c2_c < c1_l and c2_body_ratio >= 0.60 and c2_lower_wick <= 0.20):
+            return True, "BEARISH", 9, {"c1_lots": c1_lots, "c2_lots": c2_lots, "broken_level": c1_l}
+
+    elif c1_c > c1_o and c2_c > c2_o:
+        c1_upper_wick = max(0.0, c1_h - c1_c) / c1_range
+        c2_upper_wick = max(0.0, c2_h - c2_c) / c2_range
+        if (c1_body_ratio >= 0.60 and c1_upper_wick <= 0.20) and (c2_c > c1_h and c2_body_ratio >= 0.60 and c2_upper_wick <= 0.20):
+            return True, "BULLISH", 9, {"c1_lots": c1_lots, "c2_lots": c2_lots, "broken_level": c1_h}
+
+    return False, None, 0, {}
+
+def _process_rvol_1m_candle(token, closed_candle):
+    with _rvol_state_lock:
+        meta = _rvol_token_metadata.get(token)
+        if not meta:
+            return
+        if token not in _rvol_candle_history:
+            _rvol_candle_history[token] = []
+        hist = _rvol_candle_history[token]
+        hist.append(closed_candle)
+        if len(hist) > 10:
+            hist.pop(0)
+        if len(hist) < 2:
+            return
+        c1, c2 = hist[-2], hist[-1]
+
+    is_mcx = meta.get("is_mcx", False)
+    is_signal, direction, score, details = _analyze_2candle_pattern(c1, c2, is_mcx=is_mcx)
+    if is_signal:
+        now = datetime.now(IST)
+        name = meta["name"]
+        display_label = meta["display_label"]
+        alert_key = f"{display_label}_{direction}"
+
+        with _rvol_state_lock:
+            if time.time() - _rvol_last_alert_times.get(alert_key, 0.0) < 300:
+                return
+            _rvol_last_alert_times[alert_key] = time.time()
+
+        signal_header = "🚀 *1-MIN 2-CANDLE BREAKOUT*" if direction == "BULLISH" else "🚨 *1-MIN 2-CANDLE BREAKDOWN*"
+        action_line = _rvol_highest_oi_option(name, c2["close"], direction)
+        msg = (
+            f"{signal_header}\n"
+            f"Asset: *{display_label}* (₹{c2['close']:.2f})\n"
+            f"Vol: C1: *{details['c1_lots']}L* | C2: *{details['c2_lots']}L*\n"
+            f"Broken: *₹{details['broken_level']:.2f}*\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"{action_line}\n"
+            f"TIME: {now.strftime('%H:%M:%S')}"
+        )
+        import env_config
+        chat_stocks = getattr(env_config, "TELE_CHAT_ID_STOCKS", env_config.TELE_CHAT_ID)
+        token_stocks = getattr(env_config, "TELE_TOKEN_STOCKS", env_config.TELE_TOKEN)
+        send_telegram_message(msg, chat_id=chat_stocks, token=token_stocks)
+
+def start_rvol_2candle_breakout_scanner(kite=None):
+    """Initializes 2-Candle 1-Minute Volume Breakout/Breakdown Scanner."""
+    print("Starting 2-Candle 1-Minute RVOL Breakout Scanner...")
+    global _rvol_kite_client, _rvol_option_contracts_cache, _rvol_token_metadata
+    import env_config
+    from kiteconnect import KiteConnect
+
+    token = _get_access_token()
+    if not _rvol_kite_client and token:
+        try:
+            _rvol_kite_client = KiteConnect(api_key=env_config.API_KEY)
+            _rvol_kite_client.set_access_token(token)
+        except Exception:
+            pass
+
+    df = _load_instruments_df()
+    if df.empty:
+        return
+
+    target_tokens = []
+    # 1. Index Futures
+    for name in RVOL_INDICES:
+        futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
+        if not futs.empty:
+            futs = futs.sort_values(by="expiry")
+            fut = futs.iloc[0]
+            lot_size = int(fut.get("lot_size", 20 if name == "SENSEX" else 65))
+            fut_tkn = int(fut["instrument_token"])
+            target_tokens.append(fut_tkn)
+            _rvol_token_metadata[fut_tkn] = {
+                "name": name,
+                "display_label": fut["tradingsymbol"],
+                "lot_size": lot_size,
+                "is_mcx": False,
+                "is_spot": False
+            }
+
+    # 2. MCX Commodities
+    for name in RVOL_COMMODITIES:
+        futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
+        if not futs.empty:
+            futs = futs.sort_values(by="expiry")
+            fut = futs.iloc[0]
+            lot_size = 10 if name == "CRUDEOILM" else int(fut.get("lot_size", 1))
+            fut_tkn = int(fut["instrument_token"])
+            target_tokens.append(fut_tkn)
+            _rvol_token_metadata[fut_tkn] = {
+                "name": name,
+                "display_label": fut["tradingsymbol"],
+                "lot_size": lot_size,
+                "is_mcx": True,
+                "is_spot": False
+            }
+
+    # 3. 32 Focus Stocks (Spot & Future)
+    for name in RVOL_STOCKS:
+        futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
+        if not futs.empty:
+            futs = futs.sort_values(by="expiry")
+            fut = futs.iloc[0]
+            lot_size = int(fut.get("lot_size", 1))
+            fut_tkn = int(fut["instrument_token"])
+            target_tokens.append(fut_tkn)
+            _rvol_token_metadata[fut_tkn] = {
+                "name": name,
+                "display_label": f"{fut['tradingsymbol']} (FUT)",
+                "lot_size": lot_size,
+                "is_mcx": False,
+                "is_spot": False
+            }
+
+        spots = df[(df["tradingsymbol"] == name) & (df["segment"] == "NSE")]
+        if not spots.empty:
+            spot_tkn = int(spots.iloc[0]["instrument_token"])
+            target_tokens.append(spot_tkn)
+            _rvol_token_metadata[spot_tkn] = {
+                "name": name,
+                "display_label": f"{name} (SPOT)",
+                "lot_size": lot_size,
+                "is_mcx": False,
+                "is_spot": True
+            }
+
+    # Cache closest options for strike lookup
+    for name in (RVOL_INDICES + RVOL_COMMODITIES + RVOL_STOCKS):
+        opts = df[(df["name"] == name) & (df["instrument_type"].isin(["CE", "PE"]))]
+        if not opts.empty:
+            closest_expiry = opts["expiry"].min()
+            _rvol_option_contracts_cache[name] = opts[opts["expiry"] == closest_expiry].copy()
+
+    def on_ticks(ws, ticks):
+        now = datetime.now(IST)
+        minute_str = now.strftime("%Y-%m-%d %H:%M")
+
+        with _rvol_state_lock:
+            for tick in ticks:
+                tkn = tick["instrument_token"]
+                if tkn not in _rvol_token_metadata:
+                    continue
+
+                ltp = tick["last_price"]
+                vol = tick.get("volume_traded") or tick.get("volume", 0)
+                meta = _rvol_token_metadata[tkn]
+                lot_size = meta["lot_size"]
+
+                if tkn not in _rvol_current_minute:
+                    _rvol_current_minute[tkn] = minute_str
+                    _rvol_candle_state[tkn] = {
+                        "open": ltp, "high": ltp, "low": ltp, "close": ltp,
+                        "start_vol": vol, "current_vol": vol
+                    }
+
+                if _rvol_current_minute[tkn] != minute_str:
+                    c = _rvol_candle_state[tkn]
+                    candle_vol = max(0, c["current_vol"] - c["start_vol"])
+                    closed_candle = {
+                        "open": c["open"], "high": c["high"], "low": c["low"], "close": c["close"],
+                        "volume": candle_vol, "lots": int(candle_vol / lot_size),
+                        "minute": _rvol_current_minute[tkn]
+                    }
+                    _rvol_current_minute[tkn] = minute_str
+                    _rvol_candle_state[tkn] = {
+                        "open": ltp, "high": ltp, "low": ltp, "close": ltp,
+                        "start_vol": vol, "current_vol": vol
+                    }
+                    threading.Thread(target=_process_rvol_1m_candle, args=(tkn, closed_candle), daemon=True).start()
+                else:
+                    c = _rvol_candle_state[tkn]
+                    c["close"] = ltp
+                    c["high"] = max(c["high"], ltp)
+                    c["low"] = min(c["low"], ltp)
+                    c["current_vol"] = vol
+
+    def on_connect(ws, response):
+        add_shared_tokens(target_tokens)
+
+    register_ws_callbacks(on_connect, on_ticks)
+    add_shared_tokens(target_tokens)
+
+
+# ------------------------------------------------------------------------------
+# 5. ALL-F&O INSTITUTIONAL VOLUME SHOCK & BREAKOUT SCANNER
+# ------------------------------------------------------------------------------
+_fo_future_metadata = {}
+_fo_rolling_candles = {}
+_fo_current_minute = {}
+_fo_minute_candles = {}
+_fo_option_contracts_cache = {}
+_fo_last_alert_times = {}
+_fo_state_lock = threading.Lock()
+_fo_kite_client = None
+
+def _fo_highest_oi_option(name, ref_price, direction):
+    global _fo_kite_client, _fo_option_contracts_cache
+    target_type = "CE" if direction == "BULLISH" else "PE"
+    action_verb = "BUY CALL (CE)" if direction == "BULLISH" else "BUY PUT (PE)"
+
+    if not _fo_kite_client or name not in _fo_option_contracts_cache or ref_price <= 0:
+        return action_verb, "(ATM Strike)", 0.0
+
+    opts = _fo_option_contracts_cache.get(name)
+    if opts is None or opts.empty:
+        return action_verb, f"(ATM {target_type} Strike)", 0.0
+
+    opts_side = opts[opts["instrument_type"] == target_type]
+    if opts_side.empty:
+        return action_verb, f"(ATM {target_type} Strike)", 0.0
+
+    unique_strikes = sorted(opts_side["strike"].unique())
+    if not unique_strikes:
+        return action_verb, f"(ATM {target_type} Strike)", 0.0
+
+    atm_strike = min(unique_strikes, key=lambda x: abs(x - ref_price))
+    idx = unique_strikes.index(atm_strike)
+    selected_strikes = unique_strikes[max(0, idx - 1): min(len(unique_strikes), idx + 2)]
+    target_opts = opts_side[opts_side["strike"].isin(selected_strikes)]
+    if target_opts.empty:
+        return action_verb, f"(ATM {target_type} Strike)", 0.0
+
+    symbols_to_quote = [f"{r['exchange']}:{r['tradingsymbol']}" for _, r in target_opts.iterrows()]
+    try:
+        quotes = _fo_kite_client.quote(symbols_to_quote)
+    except Exception:
+        quotes = {}
+
+    best_strike = None
+    max_oi = -1
+    best_ltp = 0.0
+    best_symbol = ""
+    for _, row in target_opts.iterrows():
+        sym_key = f"{row['exchange']}:{row['tradingsymbol']}"
+        q = quotes.get(sym_key, {})
+        oi = q.get("oi", 0)
+        ltp = float(q.get("last_price", 0.0))
+        strike_val = float(row["strike"])
+        if oi > max_oi or (oi == max_oi and strike_val == atm_strike):
+            max_oi = oi
+            best_strike = strike_val
+            best_ltp = ltp
+            best_symbol = row["tradingsymbol"]
+
+    if best_symbol:
+        return action_verb, best_symbol, best_ltp
+    return action_verb, f"(ATM {target_type} Strike)", 0.0
+
+def _process_fo_1m_candle(token, closed_candle):
+    with _fo_state_lock:
+        meta = _fo_future_metadata.get(token)
+        if not meta:
+            return
+        if token not in _fo_rolling_candles:
+            _fo_rolling_candles[token] = []
+        history = _fo_rolling_candles[token]
+        history.append(closed_candle)
+        if len(history) > 61:
+            history.pop(0)
+        if len(history) < 15:
+            return
+
+        past_volumes = [c["volume"] for c in history[:-1][-20:]]
+        avg_vol_20m = sum(past_volumes) / len(past_volumes) if past_volumes else 1.0
+        past_highs = [c["high"] for c in history[:-1]]
+        past_lows = [c["low"] for c in history[:-1]]
+        high_60m = max(past_highs)
+        low_60m = min(past_lows)
+
+    c_o, c_h, c_l, c_c = closed_candle["open"], closed_candle["high"], closed_candle["low"], closed_candle["close"]
+    c_vol, c_lots = closed_candle["volume"], closed_candle["lots"]
+    c_range = max(0.05, c_h - c_l)
+    body_ratio = abs(c_c - c_o) / c_range
+    rvol = c_vol / max(1.0, avg_vol_20m)
+
+    if rvol < 8.0 or c_lots < 250 or body_ratio < 0.55:
+        return
+
+    is_bullish = (c_c > c_o) and (c_c > high_60m)
+    is_bearish = (c_c < c_o) and (c_c < low_60m)
+    if not (is_bullish or is_bearish):
+        return
+
+    direction = "BULLISH" if is_bullish else "BEARISH"
+    name = meta["name"]
+    alert_key = f"{name}_{direction}"
+
+    with _fo_state_lock:
+        if time.time() - _fo_last_alert_times.get(alert_key, 0.0) < 900:
+            return
+        _fo_last_alert_times[alert_key] = time.time()
+
+    now = datetime.now(IST)
+    action_verb, opt_symbol, opt_ltp = _fo_highest_oi_option(name, c_c, direction)
+    opt_line = f"Option: *{opt_symbol}*"
+    if opt_ltp > 0:
+        opt_line += f" (LTP: ₹{opt_ltp:.2f})"
+
+    header = "🚀 *INSTITUTIONAL VOLUME BREAKOUT (ALL F&O)*" if is_bullish else "🚨 *INSTITUTIONAL VOLUME BREAKDOWN (ALL F&O)*"
+    level_line = f"Broke 60M High: *₹{high_60m:.2f}*" if is_bullish else f"Broke 60M Low: *₹{low_60m:.2f}*"
+
+    msg = (
+        f"{header}\n"
+        f"Stock: *{name}* (₹{c_c:.2f})\n"
+        f"Volume: *{c_lots} Lots* ({rvol:.1f}x of 20M Avg)\n"
+        f"{level_line}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Action: *{action_verb}*\n"
+        f"{opt_line}\n"
+        f"Time: {now.strftime('%H:%M:%S')} IST"
+    )
+    import env_config
+    target_chat = getattr(env_config, "TELE_CHAT_ID_STOCKS", env_config.TELE_CHAT_ID)
+    target_token = getattr(env_config, "TELE_TOKEN_STOCKS", env_config.TELE_TOKEN)
+    send_telegram_message(msg, chat_id=target_chat, token=target_token)
+
+def start_fo_institutional_breakout_scanner(kite=None):
+    """Initializes All-F&O Institutional Volume Shock & Breakout Scanner."""
+    print("Starting All-F&O Institutional Volume Shock Scanner...")
+    global _fo_kite_client, _fo_option_contracts_cache, _fo_future_metadata
+    import env_config
+    from kiteconnect import KiteConnect
+
+    token = _get_access_token()
+    if not _fo_kite_client and token:
+        try:
+            _fo_kite_client = KiteConnect(api_key=env_config.API_KEY)
+            _fo_kite_client.set_access_token(token)
+        except Exception:
+            pass
+
+    df = _load_instruments_df()
+    if df.empty:
+        return
+
+    excluded_idx = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "SENSEX50"}
+    stock_futs = df[
+        (df["segment"] == "NFO-FUT") &
+        (~df["name"].isin(excluded_idx)) &
+        (df["name"].notna())
+    ].copy()
+
+    if stock_futs.empty:
+        return
+
+    target_tokens = []
+    for name, rows in stock_futs.groupby("name"):
+        rows_sorted = rows.sort_values(by="expiry")
+        near_fut = rows_sorted.iloc[0]
+        fut_tkn = int(near_fut["instrument_token"])
+        lot_size = int(near_fut.get("lot_size", 1))
+
+        target_tokens.append(fut_tkn)
+        _fo_future_metadata[fut_tkn] = {
+            "name": name,
+            "symbol": near_fut["tradingsymbol"],
+            "lot_size": lot_size
+        }
+
+        opts = df[(df["name"] == name) & (df["segment"] == "NFO-OPT")]
+        if not opts.empty:
+            closest_exp = opts["expiry"].min()
+            _fo_option_contracts_cache[name] = opts[opts["expiry"] == closest_exp].copy()
+
+    def on_ticks(ws, ticks):
+        now = datetime.now(IST)
+        minute_str = now.strftime("%Y-%m-%d %H:%M")
+
+        with _fo_state_lock:
+            for tick in ticks:
+                tkn = tick["instrument_token"]
+                if tkn not in _fo_future_metadata:
+                    continue
+
+                ltp = tick["last_price"]
+                vol = tick.get("volume_traded") or tick.get("volume", 0)
+                lot_size = _fo_future_metadata[tkn]["lot_size"]
+
+                if tkn not in _fo_current_minute:
+                    _fo_current_minute[tkn] = minute_str
+                    _fo_minute_candles[tkn] = {
+                        "open": ltp, "high": ltp, "low": ltp, "close": ltp,
+                        "start_vol": vol, "current_vol": vol
+                    }
+
+                if _fo_current_minute[tkn] != minute_str:
+                    c = _fo_minute_candles[tkn]
+                    candle_vol = max(0, c["current_vol"] - c["start_vol"])
+                    closed_candle = {
+                        "open": c["open"], "high": c["high"], "low": c["low"], "close": c["close"],
+                        "volume": candle_vol, "lots": int(candle_vol / lot_size),
+                        "minute": _fo_current_minute[tkn]
+                    }
+                    _fo_current_minute[tkn] = minute_str
+                    _fo_minute_candles[tkn] = {
+                        "open": ltp, "high": ltp, "low": ltp, "close": ltp,
+                        "start_vol": vol, "current_vol": vol
+                    }
+                    threading.Thread(target=_process_fo_1m_candle, args=(tkn, closed_candle), daemon=True).start()
+                else:
+                    c = _fo_minute_candles[tkn]
+                    c["close"] = ltp
+                    c["high"] = max(c["high"], ltp)
+                    c["low"] = min(c["low"], ltp)
+                    c["current_vol"] = vol
+
+    def on_connect(ws, response):
+        add_shared_tokens(target_tokens)
+
+    register_ws_callbacks(on_connect, on_ticks)
+    add_shared_tokens(target_tokens)
+
+
+# ------------------------------------------------------------------------------
+# 6. UNIFIED MASTER SCANNER STARTER
+# ------------------------------------------------------------------------------
+def start_unified_scanners(kite=None):
+    """
+    Spawns all consolidated scanner engines under 1 single shared WebSocket pipeline:
+    - Spot & Future Volume Scanner
+    - 1-Hour Narrow Range (NR-1H) 15-Minute Option Breakout Scanner
+    - 0-DTE Expiry Gamma Exposure & Afternoon Hero-Zero Engine
+    - 2-Candle Relative Volume (RVOL) Breakout Scanner
+    - All-F&O Institutional 1-Minute Volume Shock Scanner
+    """
+    print("🚀 Initializing Consolidated Unified Market Scanners...")
+    start_spot_volume_scanner(kite)
+    start_nr_option_breakout_scanner(kite)
+    start_expiry_gamma_scanner(kite)
+    start_rvol_2candle_breakout_scanner(kite)
+    start_fo_institutional_breakout_scanner(kite)
+    print("✅ All Consolidated Alert Engines Active on Single Shared WebSocket.")
+
