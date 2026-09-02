@@ -1431,7 +1431,7 @@ def _get_previous_trading_day(now_ist):
     return day
 
 
-def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=None):
+def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, volume=0, stats=None):
     if not is_burst_underlying(name):
         return
 
@@ -1449,7 +1449,7 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=
             direction_engine.process_tick(
                 symbol=clean_symbol,
                 ltp=ltp,
-                volume=oi,
+                volume=volume or oi,
                 instrument_data={"instrument_type": "FUT"}
             )
         except Exception as e:
@@ -1462,6 +1462,7 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=
     history = option_history[key]
     prev_oi = history[-1]["oi"] if history else 0
     prev_price = history[-1]["price"] if history else 0
+    prev_vol = history[-1].get("vol", 0) if history else 0
 
     if stats is not None:
         stats["future_quotes"] = stats.get("future_quotes", 0) + 1
@@ -1480,6 +1481,7 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=
             active_watches[key] = {
                 "start_oi": prev_oi,
                 "start_price": prev_price,
+                "start_vol": volume,
                 "end_time": now + timedelta(seconds=60),
                 "symbol": symbol,
                 "name": name,
@@ -1496,6 +1498,7 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=
             else:
                 oi_chg = oi - watch["start_oi"]
                 p_chg = ltp - watch["start_price"]
+                vol_traded = max(0, volume - watch.get("start_vol", volume))
                 final_lot_size = _normalize_lot_size(watch.get("lot_size")) or lot_size
                 final_lots = int(abs(oi_chg) / final_lot_size)
                 
@@ -1507,7 +1510,9 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=
                 else:
                     req_threshold = 500 if is_covering_unwinding else 100
                     
-                if final_lots >= req_threshold:
+                # Ensure actual trading volume occurred (at least 5 lots) to discard connection baseline jumps
+                vol_lots = int(vol_traded / final_lot_size) if final_lot_size > 0 else vol_traded
+                if final_lots >= req_threshold and (vol_lots >= 5 or vol_traded == 0):
                     strength = get_strength_label(final_lots, watch["name"])
                     p_icon = "▲" if p_chg >= 0 else "▼"
                     expiry_line = (
@@ -1530,7 +1535,7 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=
                 del active_watches[key]
 
     if oi > 0:
-        history.append({"time": now, "oi": oi, "price": ltp})
+        history.append({"time": now, "oi": oi, "price": ltp, "vol": volume})
         if len(history) > 20:
             history.pop(0)
 
@@ -1830,10 +1835,11 @@ def calculate_burst_alerts(kite):
 
         d = data[sym]
         ltp = _normalize_burst_price(name, d["last_price"])
-        oi_val = d.get("oi", 0) or d.get("volume", 0)
+        oi_val = d.get("oi", 0)
+        vol_val = d.get("volume", 0)
         target_alerts = bn_alerts if is_index_underlying(name) else stock_alerts
 
-        process_future_burst(kite, d['instrument_token'], sym, name, ltp, oi_val, target_alerts, stats=stats)
+        process_future_burst(kite, d['instrument_token'], sym, name, ltp, oi_val, target_alerts, volume=vol_val, stats=stats)
         process_option_logic(
             kite,
             name,
