@@ -3592,8 +3592,8 @@ def start_3candle_price_volume_divergence_scanner(kite=None):
                         if not is_mcx and not is_nse_open:
                             continue
 
-                        send_channel = env_config.TELE_CHAT_ID_BN if is_index_underlying(name) else (env_config.TELE_CHAT_ID_STOCKS if not is_mcx else env_config.TELE_CHAT_ID_BN)
-                        send_token = env_config.TELE_TOKEN_BN if is_index_underlying(name) else (env_config.TELE_TOKEN_STOCKS if not is_mcx else env_config.TELE_TOKEN_BN)
+                        send_channel = env_config.TELE_CHAT_ID_STOCKS
+                        send_token = env_config.TELE_TOKEN_STOCKS
 
                         futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
                         if futs.empty:
