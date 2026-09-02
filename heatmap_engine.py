@@ -1830,10 +1830,10 @@ def calculate_burst_alerts(kite):
 
         d = data[sym]
         ltp = _normalize_burst_price(name, d["last_price"])
-        volume = d.get("volume", 0)
+        oi_val = d.get("oi", 0) or d.get("volume", 0)
         target_alerts = bn_alerts if is_index_underlying(name) else stock_alerts
 
-        process_future_burst(kite, d['instrument_token'], sym, name, ltp, volume, target_alerts, stats=stats)
+        process_future_burst(kite, d['instrument_token'], sym, name, ltp, oi_val, target_alerts, stats=stats)
         process_option_logic(
             kite,
             name,
