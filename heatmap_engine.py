@@ -62,7 +62,7 @@ MCX_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_OPTION_BURST_THRESHOLD_LOTS", "100
 INDEX_FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("INDEX_FUTURE_BURST_THRESHOLD_LOTS", str(FUTURE_BURST_THRESHOLD_LOTS)))
 STOCK_FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("STOCK_FUTURE_BURST_THRESHOLD_LOTS", str(FUTURE_BURST_THRESHOLD_LOTS)))
 MCX_FUTURE_BURST_THRESHOLD_LOTS = int(os.getenv("MCX_FUTURE_BURST_THRESHOLD_LOTS", "500"))
-BURST_REST_FALLBACK_CACHE_SECONDS = int(os.getenv("BURST_REST_FALLBACK_CACHE_SECONDS", "3"))
+BURST_REST_FALLBACK_CACHE_SECONDS = int(os.getenv("BURST_REST_FALLBACK_CACHE_SECONDS", "10"))
 DEBUG_BURST_PRICE_NORMALIZATION = os.getenv("DEBUG_BURST_PRICE_NORMALIZATION", "false").lower() in ("true", "1", "yes", "on")
 DEBUG_BURST_STRIKES = os.getenv("DEBUG_BURST_STRIKES", "false").lower() in ("true", "1", "yes", "on")
 INDEX_SYMBOL = "NSE:NIFTY BANK"
@@ -1810,7 +1810,8 @@ def calculate_burst_alerts(kite):
         token for token in all_opt_tokens
         if str(int(token)) not in opt_quotes
     ]
-    if all_opt_tokens and (quote_source == "rest_fallback" or missing_option_tokens):
+    # Only invoke expensive REST fallback if we have NO WebSocket quotes at all (e.g. during initial startup)
+    if all_opt_tokens and quote_source == "rest_fallback" and not opt_quotes:
         fallback_opt_quotes = _get_burst_option_quotes_with_fallback(kite, all_opt_tokens)
         if fallback_opt_quotes:
             opt_quotes.update(fallback_opt_quotes)
