@@ -3393,7 +3393,263 @@ def start_fo_institutional_breakout_scanner(kite=None):
 
 
 # ------------------------------------------------------------------------------
-# 6. UNIFIED MASTER SCANNER STARTER
+# 6. 1-HOUR 3-CANDLE PRICE & VOLUME DIVERGENCE ENGINE (FUTURES & ATM+3 ITM OPTIONS)
+# ------------------------------------------------------------------------------
+PRICE_VOL_3C_WATCHLIST = [
+    # 4 Indices
+    "NIFTY", "SENSEX", "BANKNIFTY", "MIDCPNIFTY",
+    # 1 Commodity (MCX)
+    "CRUDEOILM",
+    # 32 Core Focus Stocks
+    "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK",
+    "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "BAJAJ-AUTO",
+    "BAJAJFINSV", "BHARTIARTL", "BRITANNIA", "CIPLA", "EICHERMOT",
+    "GRASIM", "HCLTECH", "HEROMOTOCO", "HINDUNILVR", "INFY",
+    "LT", "M&M", "MARUTI", "NESTLEIND", "RELIANCE",
+    "SBILIFE", "SUNPHARMA", "TATACONSUM", "TCS", "TITAN",
+    "TRENT", "ULTRACEMCO"
+]
+
+_3c_div_alerted_slots = set()
+
+def _analyze_3candle_price_vol_divergence(c1, c2, c3):
+    """
+    Evaluates 3 consecutive 1-Hour candles (c1 -> c2 -> c3) for 4 Price & Volume patterns:
+    1. Price LL + Vol HH (Selling Absorption / Bullish Climax Reversal)
+    2. Price LL + Vol LL (Selling Exhaustion / Thin Volume Breakdown)
+    3. Price HH + Vol HH (Bullish Expansion / Aggressive Institutional Buy)
+    4. Price HH + Vol LL (Buying Exhaustion / Bearish Divergence Trap)
+    """
+    l1, l2, l3 = float(c1.get("low", 0)), float(c2.get("low", 0)), float(c3.get("low", 0))
+    h1, h2, h3 = float(c1.get("high", 0)), float(c2.get("high", 0)), float(c3.get("high", 0))
+    close1, close2, close3 = float(c1.get("close", 0)), float(c2.get("close", 0)), float(c3.get("close", 0))
+    v1, v2, v3 = float(c1.get("volume", 0)), float(c2.get("volume", 0)), float(c3.get("volume", 0))
+
+    if l1 <= 0 or l2 <= 0 or l3 <= 0 or h1 <= 0 or h2 <= 0 or h3 <= 0 or v1 <= 0 or v2 <= 0 or v3 <= 0:
+        return None
+
+    is_price_ll = (l3 < l2 < l1) and (close3 < close2 < close1)
+    is_price_hh = (h3 > h2 > h1) and (close3 > close2 > close1)
+    is_vol_hh = (v3 > v2 > v1)
+    is_vol_ll = (v3 < v2 < v1)
+
+    # Criteria 1: Price LL + Vol HH
+    if is_price_ll and is_vol_hh:
+        return {
+            "type": "ABSORPTION_REVERSAL",
+            "condition": "Price LL + Vol HH (Selling Absorption Trap)",
+            "action": "BUY CALL (CE)",
+            "sentiment": "🟢 BULLISH REVERSAL",
+            "p_trend": f"{close1:.1f} ➔ {close2:.1f} ➔ {close3:.1f} (LL)",
+            "v_trend": f"{v1:,.0f} ➔ {v2:,.0f} ➔ {v3:,.0f} (HH 🟢)",
+            "close": close3
+        }
+
+    # Criteria 2: Price LL + Vol LL
+    if is_price_ll and is_vol_ll:
+        return {
+            "type": "SELLING_EXHAUSTION",
+            "condition": "Price LL + Vol LL (Selling Volume Exhaustion)",
+            "action": "WATCH REVERSAL / CAUTION SELL",
+            "sentiment": "⚠️ BEARISH EXHAUSTION",
+            "p_trend": f"{close1:.1f} ➔ {close2:.1f} ➔ {close3:.1f} (LL)",
+            "v_trend": f"{v1:,.0f} ➔ {v2:,.0f} ➔ {v3:,.0f} (LL 🔴)",
+            "close": close3
+        }
+
+    # Criteria 3: Price HH + Vol HH
+    if is_price_hh and is_vol_hh:
+        return {
+            "type": "BULLISH_EXPANSION",
+            "condition": "Price HH + Vol HH (Institutional Trend Expansion)",
+            "action": "BUY CALL (CE)",
+            "sentiment": "🚀 BULLISH EXPANSION",
+            "p_trend": f"{close1:.1f} ➔ {close2:.1f} ➔ {close3:.1f} (HH)",
+            "v_trend": f"{v1:,.0f} ➔ {v2:,.0f} ➔ {v3:,.0f} (HH 🟢)",
+            "close": close3
+        }
+
+    # Criteria 4: Price HH + Vol LL
+    if is_price_hh and is_vol_ll:
+        return {
+            "type": "BUYING_EXHAUSTION",
+            "condition": "Price HH + Vol LL (Buying Exhaustion / Divergence Trap)",
+            "action": "BUY PUT (PE)",
+            "sentiment": "🚨 BEARISH DIVERGENCE",
+            "p_trend": f"{close1:.1f} ➔ {close2:.1f} ➔ {close3:.1f} (HH)",
+            "v_trend": f"{v1:,.0f} ➔ {v2:,.0f} ➔ {v3:,.0f} (LL 🔴)",
+            "close": close3
+        }
+
+    return None
+
+def _get_3c_atm_and_itm_options(kite, name, ref_price, direction, df_opts):
+    target_type = "CE" if "CALL" in direction or "BULLISH" in direction else "PE"
+    if df_opts is None or df_opts.empty or ref_price <= 0:
+        return f"(ATM {target_type} Strike)", 0.0
+
+    opts_side = df_opts[df_opts["instrument_type"] == target_type]
+    if opts_side.empty:
+        return f"(ATM {target_type} Strike)", 0.0
+
+    unique_strikes = sorted(opts_side["strike"].unique())
+    if not unique_strikes:
+        return f"(ATM {target_type} Strike)", 0.0
+
+    atm_strike = min(unique_strikes, key=lambda x: abs(x - ref_price))
+    idx = unique_strikes.index(atm_strike)
+
+    # ATM + 3 ITM strikes:
+    # CE ITM: strikes at or below ATM
+    # PE ITM: strikes at or above ATM
+    if target_type == "CE":
+        selected_strikes = unique_strikes[max(0, idx - 3): idx + 1]
+    else:
+        selected_strikes = unique_strikes[idx: min(len(unique_strikes), idx + 4)]
+
+    target_opts = opts_side[opts_side["strike"].isin(selected_strikes)]
+    if target_opts.empty:
+        return f"(ATM {target_type} Strike)", 0.0
+
+    symbols_to_quote = [f"{r['exchange']}:{r['tradingsymbol']}" for _, r in target_opts.iterrows()]
+    try:
+        quotes = kite.quote(symbols_to_quote)
+    except Exception:
+        quotes = {}
+
+    best_strike = None
+    max_oi = -1
+    best_ltp = 0.0
+    best_symbol = ""
+    for _, row in target_opts.iterrows():
+        sym_key = f"{row['exchange']}:{row['tradingsymbol']}"
+        q = quotes.get(sym_key, {})
+        oi = q.get("oi", 0)
+        ltp = float(q.get("last_price", 0.0))
+        strike_val = float(row["strike"])
+        if oi > max_oi or (oi == max_oi and strike_val == atm_strike):
+            max_oi = oi
+            best_strike = strike_val
+            best_ltp = ltp
+            best_symbol = row["tradingsymbol"]
+
+    if best_symbol:
+        is_atm = " (ATM)" if best_strike == atm_strike else f" ({abs(idx - unique_strikes.index(best_strike))} ITM)"
+        return f"{best_symbol}{is_atm}", best_ltp
+    return f"(ATM {target_type} Strike)", 0.0
+
+def start_3candle_price_volume_divergence_scanner(kite=None):
+    """
+    Scans 1-Hour 3-Candle Price & Volume Divergence patterns for 4 Indices, CRUDEOILM, and 32 Focus Stocks.
+    Evaluates both Future and ATM + 3 ITM Options at completed 1-Hour candle marks.
+    """
+    print("Starting 1-Hour 3-Candle Price & Volume Divergence Scanner...")
+    import env_config
+    from kiteconnect import KiteConnect
+
+    token = _get_access_token()
+    if not kite and token:
+        try:
+            kite = KiteConnect(api_key=env_config.API_KEY)
+            kite.set_access_token(token)
+        except Exception:
+            pass
+
+    df = _load_instruments_df()
+
+    def scanner_loop():
+        nonlocal df, kite
+        while True:
+            try:
+                now = datetime.now(IST)
+                if now.weekday() > 4:
+                    time.sleep(60)
+                    continue
+
+                t = now.time()
+                is_nse_open = datetime.strptime("09:15", "%H:%M").time() <= t <= datetime.strptime("15:30", "%H:%M").time()
+                is_mcx_open = datetime.strptime("15:30", "%H:%M").time() <= t <= datetime.strptime("23:30", "%H:%M").time()
+
+                if not is_nse_open and not is_mcx_open:
+                    time.sleep(60)
+                    continue
+
+                # Run after hour completions (e.g. 10:16, 11:16, 12:16, 13:16, 14:16, 15:16, and evening MCX hours)
+                slot_key = f"{now.date()}_{now.hour}"
+                if now.minute >= 15 and slot_key not in _3c_div_alerted_slots:
+                    _3c_div_alerted_slots.add(slot_key)
+                    if df.empty:
+                        df = _load_instruments_df()
+
+                    from_time = datetime.combine(_get_previous_trading_day(now), datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
+                    to_time = now
+
+                    for name in PRICE_VOL_3C_WATCHLIST:
+                        is_mcx = (name == "CRUDEOILM")
+                        if is_mcx and not is_mcx_open and t < datetime.strptime("15:30", "%H:%M").time():
+                            continue
+                        if not is_mcx and not is_nse_open:
+                            continue
+
+                        futs = df[(df["name"] == name) & (df["instrument_type"] == "FUT")]
+                        if futs.empty:
+                            continue
+                        futs = futs.sort_values(by="expiry")
+                        fut_row = futs.iloc[0]
+                        fut_token = int(fut_row["instrument_token"])
+                        fut_symbol = fut_row["tradingsymbol"]
+
+                        try:
+                            candles = get_historical_data_cached(kite, fut_token, from_time, to_time, "60minute")
+                        except Exception:
+                            continue
+
+                        if not candles or len(candles) < 4:
+                            continue
+
+                        # Take last 3 completed 1-hour candles
+                        c1, c2, c3 = candles[-4], candles[-3], candles[-2]
+                        res = _analyze_3candle_price_vol_divergence(c1, c2, c3)
+                        if res:
+                            opts = df[(df["name"] == name) & (df["instrument_type"].isin(["CE", "PE"]))]
+                            target_monthly_exp = None
+                            df_opts_monthly = pd.DataFrame()
+                            if not opts.empty:
+                                all_expiries = sorted(opts["expiry_dt"].dt.date.unique())
+                                target_monthly_exp = _get_target_monthly_expiry_date(all_expiries, now.date())
+                                if target_monthly_exp is not None:
+                                    df_opts_monthly = opts[opts["expiry_dt"].dt.date == target_monthly_exp].copy()
+
+                            opt_symbol, opt_ltp = _get_3c_atm_and_itm_options(
+                                kite, name, res["close"], res["action"], df_opts_monthly
+                            )
+
+                            ltp_str = f"₹{opt_ltp:.2f}" if opt_ltp > 0 else "ATM Strike"
+                            msg = (
+                                f"📊 *1H 3-CANDLE PATTERN: {res['sentiment']}*\n"
+                                f"Asset: *{name} (FUT)* (LTP: ₹{res['close']:.2f})\n"
+                                f"━━━━━━━━━━━━━━━━━━━\n"
+                                f"Price : {res['p_trend']}\n"
+                                f"Volume: {res['v_trend']}\n"
+                                f"Status: *{res['condition']}*\n"
+                                f"━━━━━━━━━━━━━━━━━━━\n"
+                                f"Action: *{res['action']}*\n"
+                                f"Option: *{opt_symbol}*\n"
+                                f"LTP   : *{ltp_str}*\n"
+                                f"TIME  : {now.strftime('%H:%M:%S')}"
+                            )
+                            send_channel = env_config.TELE_CHAT_ID_BN if is_index_underlying(name) else (env_config.TELE_CHAT_ID_STOCKS if not is_mcx else env_config.TELE_CHAT_ID_BN)
+                            send_token = env_config.TELE_TOKEN_BN if is_index_underlying(name) else (env_config.TELE_TOKEN_STOCKS if not is_mcx else env_config.TELE_TOKEN_BN)
+                            send_telegram_message(msg, chat_id=send_channel, token=send_token)
+            except Exception as e:
+                print(f"[3-CANDLE DIVERGENCE] Worker loop error: {e}")
+            time.sleep(30)
+
+    threading.Thread(target=scanner_loop, daemon=True).start()
+
+
+# ------------------------------------------------------------------------------
+# 7. UNIFIED MASTER SCANNER STARTER
 # ------------------------------------------------------------------------------
 def start_unified_scanners(kite=None):
     """
@@ -3403,6 +3659,7 @@ def start_unified_scanners(kite=None):
     - 0-DTE Expiry Gamma Exposure & Afternoon Hero-Zero Engine
     - 2-Candle Relative Volume (RVOL) Breakout Scanner
     - All-F&O Institutional 1-Minute Volume Shock Scanner
+    - 1-Hour 3-Candle Price & Volume Divergence Scanner (Futures & ATM+3 ITM Options)
     """
     print("🚀 Initializing Consolidated Unified Market Scanners...")
     start_spot_volume_scanner(kite)
@@ -3410,5 +3667,7 @@ def start_unified_scanners(kite=None):
     start_expiry_gamma_scanner(kite)
     start_rvol_2candle_breakout_scanner(kite)
     start_fo_institutional_breakout_scanner(kite)
+    start_3candle_price_volume_divergence_scanner(kite)
     print("✅ All Consolidated Alert Engines Active on Single Shared WebSocket.")
+
 
