@@ -1475,7 +1475,7 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, stats=
                 stats.get("max_future_tick_lots", 0),
                 tick_lots,
             )
-        trigger_threshold = 25 if name == "CRUDEOILM" else 100
+        trigger_threshold = 25 if name == "CRUDEOILM" else min(50, threshold)
         if tick_lots >= trigger_threshold and key not in active_watches:
             active_watches[key] = {
                 "start_oi": prev_oi,
@@ -1621,7 +1621,7 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
                     stats.get("max_option_tick_lots", 0),
                     tick_lots,
                 )
-            trigger_threshold = 25 if name == "CRUDEOILM" else 100
+            trigger_threshold = 25 if name == "CRUDEOILM" else min(50, threshold)
             if tick_lots >= trigger_threshold and t_int not in active_watches:
                 expiry_text = (
                     row["expiry"].strftime("%d-%m-%Y")
