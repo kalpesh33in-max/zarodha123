@@ -1505,11 +1505,8 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, volume
                 action = classify_action(watch["symbol"], oi_chg, p_chg)
                 is_covering_unwinding = any(x in action for x in ["COVERING", "UNWINDING"])
                 
-                u_name = str(watch.get("name", "")).upper()
-                if u_name == "CRUDEOILM":
+                if watch["name"] == "CRUDEOILM":
                     req_threshold = 100 if is_covering_unwinding else 25
-                elif u_name in {"BANKNIFTY", "HDFCBANK", "ICICIBANK"}:
-                    req_threshold = 100
                 else:
                     req_threshold = 500 if is_covering_unwinding else 100
                     
