@@ -208,6 +208,7 @@ class FlowEngine:
             get_burst_relevant_options,
             get_burst_subscription_names,
             get_spot_symbol,
+            is_mcx_underlying,
             load_futures_data,
             load_options_data,
         )
@@ -231,6 +232,7 @@ class FlowEngine:
         spot_symbols_by_name = {
             name: get_spot_symbol(name)
             for name in burst_names
+            if not is_mcx_underlying(name)
         }
 
         fut_by_name = {}

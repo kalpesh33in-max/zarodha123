@@ -100,7 +100,7 @@ _last_burst_session = None
 IST = ZoneInfo("Asia/Kolkata")
 NSE_BURST_START_TIME = datetime.strptime("09:00", "%H:%M").time()
 NSE_BURST_END_TIME = datetime.strptime("15:30", "%H:%M").time()
-MCX_BURST_START_TIME = datetime.strptime("15:30", "%H:%M").time()
+MCX_BURST_START_TIME = datetime.strptime("09:00", "%H:%M").time()
 MCX_BURST_END_TIME = datetime.strptime("23:30:59", "%H:%M:%S").time()
 MONTHLY_FUTURE_GAP_THRESHOLD_PCT = 2.0
 MONTHLY_FUTURE_NEXT_GAP_MAX_PCT = 1.0
@@ -179,9 +179,12 @@ def get_burst_session(now_ist=None):
 
     from env_config import NSE_HOLIDAYS
     t = now_ist.time()
-    # NSE session ends at 15:30:00
+    # NSE day session (09:00 to 15:30:00)
     if NSE_BURST_START_TIME <= t < NSE_BURST_END_TIME:
         if now_ist.date().isoformat() in NSE_HOLIDAYS:
+            # On NSE holidays, MCX is still open if within MCX hours
+            if MCX_BURST_START_TIME <= t <= MCX_BURST_END_TIME:
+                return "mcx"
             return None
         return "nse"
     # MCX evening session (15:30 to 23:30 IST)
@@ -195,34 +198,44 @@ def is_burst_session_open(now_ist=None):
 
 
 def get_active_burst_names(now_ist=None):
+    """
+    Returns active burst names based on market session.
+    First Priority: Stock Options/Futures, Index Options/Futures (BANKNIFTY), and CRUDEOILM Options/Futures.
+    CRUDEOILM is actively tracked across all market hours (09:00 to 23:30 IST).
+    """
     now_ist = now_ist or datetime.now(IST)
     t = now_ist.time()
     session = get_burst_session(now_ist)
-    if session == "mcx":
-        return ["CRUDEOILM"]
+    if not session:
+        return []
+
+    names = set()
+    # 1. MCX CRUDEOILM: Active from 09:00 to 23:30 IST
+    if ENABLE_MCX_BURST_ALERTS and (MCX_BURST_START_TIME <= t <= MCX_BURST_END_TIME):
+        names.update(MCX_BURST_NAMES)
+
+    # 2. NSE Stocks & Indices: Active 09:15 to 15:30 (skipping first 6 min open noise 09:15-09:21)
     if session == "nse":
-        if datetime.strptime("09:15", "%H:%M").time() <= t < datetime.strptime("09:21", "%H:%M").time():
-            return []
-        return sorted(set(INDEX_BURST_NAMES) | set(STOCK_BURST_NAMES))
-    return []
+        if not (datetime.strptime("09:15", "%H:%M").time() <= t < datetime.strptime("09:21", "%H:%M").time()):
+            names.update(INDEX_BURST_NAMES)
+            names.update(STOCK_BURST_NAMES)
+
+    return sorted(names)
 
 
 def get_burst_subscription_names(now_ist=None):
     now_ist = now_ist or datetime.now(IST)
     active_names = get_active_burst_names(now_ist)
     if active_names:
+        # Guarantee CRUDEOILM is included so websocket subscriptions are never dropped during transitions
+        if ENABLE_MCX_BURST_ALERTS:
+            return sorted(set(active_names) | set(MCX_BURST_NAMES))
         return active_names
 
-    if now_ist.weekday() <= 4:
-        t = now_ist.time()
-        if datetime.strptime("09:15", "%H:%M").time() <= t < datetime.strptime("09:21", "%H:%M").time():
-            return []  # skip burst alerts between 09:15 and 09:20
-        if t < NSE_BURST_START_TIME:
-            return sorted(set(INDEX_BURST_NAMES) | set(STOCK_BURST_NAMES))
-        if NSE_BURST_END_TIME <= t <= MCX_BURST_END_TIME:
-            return ["CRUDEOILM"]
-
-    return sorted(set(INDEX_BURST_NAMES) | set(STOCK_BURST_NAMES))
+    names = set(INDEX_BURST_NAMES) | set(STOCK_BURST_NAMES)
+    if ENABLE_MCX_BURST_ALERTS:
+        names.update(MCX_BURST_NAMES)
+    return sorted(names)
 
 
 def non_burst_alerts_paused_today():
@@ -1899,7 +1912,7 @@ def calculate_burst_alerts(kite):
     spot_symbols_by_name = {
         name: get_spot_symbol(name)
         for name in track_names
-        if session == "nse"
+        if not is_mcx_underlying(name)
     }
     symbols = list(dict.fromkeys([*fut_symbols, *spot_symbols_by_name.values()]))
     future_threshold = max(get_future_burst_threshold(name) for name in track_names)
