@@ -69,6 +69,42 @@ def send_telegram_message(message, chat_id=None, token=None, is_burst=False):
         print(f"Error sending Telegram message: {e}")
         return None
 
+def edit_telegram_message(message_id, message, chat_id=None, token=None):
+    target_token, target_id = _resolve_telegram_target(chat_id=chat_id, token=token)
+    if not target_token or not _is_valid_chat_id(target_id) or not message_id:
+        return None
+
+    url = f"https://api.telegram.org/bot{target_token}/editMessageText"
+    payload = {
+        "chat_id": target_id,
+        "message_id": message_id,
+        "text": message
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        return response.json()
+    except Exception as e:
+        print(f"Error editing Telegram message: {e}")
+        return None
+
+def pin_telegram_message(message_id, chat_id=None, token=None, disable_notification=True):
+    target_token, target_id = _resolve_telegram_target(chat_id=chat_id, token=token)
+    if not target_token or not _is_valid_chat_id(target_id) or not message_id:
+        return None
+
+    url = f"https://api.telegram.org/bot{target_token}/pinChatMessage"
+    payload = {
+        "chat_id": target_id,
+        "message_id": message_id,
+        "disable_notification": disable_notification
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        return response.json()
+    except Exception as e:
+        print(f"Error pinning Telegram message: {e}")
+        return None
+
 def broadcast_startup_message(message):
     import env_config
     for target_token, target_id in (

@@ -3814,6 +3814,11 @@ def start_unified_scanners(kite=None):
         start_pattern_volume_scanner(kite)
     except Exception as e:
         print(f"Failed to start Pattern Volume Scanner: {e}")
+    try:
+        from banknifty_radar import start_banknifty_radar
+        start_banknifty_radar(kite)
+    except Exception as e:
+        print(f"Failed to start Bank Nifty Radar: {e}")
     print("✅ All Consolidated Alert Engines Active on Single Shared WebSocket.")
 
 
