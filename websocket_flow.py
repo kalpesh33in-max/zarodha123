@@ -77,7 +77,7 @@ def update_symbol_quote(symbol, quote):
         _meta["last_tick_time"] = now
 
 
-def get_token_quotes(tokens, max_age_seconds=15):
+def get_token_quotes(tokens, max_age_seconds=300):
     now = time.time()
     fresh = {}
     wanted = {str(token) for token in tokens}
@@ -85,19 +85,19 @@ def get_token_quotes(tokens, max_age_seconds=15):
     with _cache_lock:
         for token in wanted:
             data = _token_quotes.get(token)
-            if data and now - data.get("ts", 0) <= max_age_seconds:
+            if data and (max_age_seconds is None or now - data.get("ts", 0) <= max_age_seconds):
                 fresh[token] = dict(data)
     return fresh
 
 
-def get_symbol_quotes(symbols, max_age_seconds=15):
+def get_symbol_quotes(symbols, max_age_seconds=300):
     now = time.time()
     fresh = {}
 
     with _cache_lock:
         for symbol in symbols:
             data = _symbol_quotes.get(symbol)
-            if data and now - data.get("ts", 0) <= max_age_seconds:
+            if data and (max_age_seconds is None or now - data.get("ts", 0) <= max_age_seconds):
                 fresh[symbol] = dict(data)
     return fresh
 
@@ -253,7 +253,10 @@ class FlowEngine:
         ]
         try:
             if missing_bootstrap_symbols:
-                symbol_quotes.update(kite_quote(self.kite, missing_bootstrap_symbols))
+                fresh_bootstrap = kite_quote(self.kite, missing_bootstrap_symbols)
+                symbol_quotes.update(fresh_bootstrap)
+                for sym, q in fresh_bootstrap.items():
+                    update_symbol_quote(sym, q)
         except Exception as e:
             print(f"WebSocket bootstrap quote failed: {e}")
 
@@ -266,6 +269,8 @@ class FlowEngine:
             tokens.add(token)
             base_tokens.add(token)
             symbol_by_token[token] = symbol
+            if symbol in symbol_quotes:
+                update_token_quote(str(token), symbol_quotes[symbol])
 
         if include_index_tokens:
             index_rows = self._load_index_rows()

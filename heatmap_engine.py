@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 direction_engine = None
 from kite_rate_limiter import kite_historical_data, kite_quote
-from websocket_flow import get_symbol_quotes, get_token_quotes, register_ws_callbacks, add_shared_tokens
+from websocket_flow import get_symbol_quotes, get_token_quotes, get_ws_status, register_ws_callbacks, add_shared_tokens
 from telegram_utils import send_telegram_message
 
 INDEX_BURST_NAMES = {"BANKNIFTY"}
@@ -508,7 +508,7 @@ def get_future_expiry_text(symbol):
     return expiry.strftime("%d-%m-%Y") if hasattr(expiry, "strftime") else str(expiry)
 
 
-def get_symbol_quotes_with_fallback(kite, symbols, max_age_seconds=15):
+def get_symbol_quotes_with_fallback(kite, symbols, max_age_seconds=300):
     data = get_symbol_quotes(symbols, max_age_seconds=max_age_seconds)
     missing = [symbol for symbol in symbols if symbol not in data]
     for i in range(0, len(missing), 500):
@@ -516,22 +516,26 @@ def get_symbol_quotes_with_fallback(kite, symbols, max_age_seconds=15):
         if not chunk:
             continue
         try:
-            data.update(kite_quote(kite, chunk))
+            fresh = kite_quote(kite, chunk)
+            data.update(fresh)
+            for sym, q in fresh.items():
+                from websocket_flow import update_symbol_quote
+                update_symbol_quote(sym, q)
         except Exception as e:
             print(f"Fallback symbol quote error: {e}")
     return data
 
 
-def get_symbol_quotes_ws_only(symbols, max_age_seconds=15):
+def get_symbol_quotes_ws_only(symbols, max_age_seconds=300):
     return get_symbol_quotes(symbols, max_age_seconds=max_age_seconds)
 
 
-def get_option_quotes_ws_only(tokens, max_age_seconds=15):
+def get_option_quotes_ws_only(tokens, max_age_seconds=300):
     token_strings = [str(int(token)) for token in tokens]
     return get_token_quotes(token_strings, max_age_seconds=max_age_seconds)
 
 
-def get_option_quotes_with_fallback(kite, tokens, max_age_seconds=15):
+def get_option_quotes_with_fallback(kite, tokens, max_age_seconds=300):
     token_strings = [str(int(token)) for token in tokens]
     data = get_token_quotes(token_strings, max_age_seconds=max_age_seconds)
     missing = [int(token) for token in token_strings if token not in data]
@@ -541,7 +545,11 @@ def get_option_quotes_with_fallback(kite, tokens, max_age_seconds=15):
             continue
         try:
             fresh = kite_quote(kite, chunk)
-            data.update({str(key): value for key, value in fresh.items()})
+            fresh_str = {str(key): value for key, value in fresh.items()}
+            data.update(fresh_str)
+            for t, q in fresh_str.items():
+                from websocket_flow import update_token_quote
+                update_token_quote(t, q)
         except Exception as e:
             print(f"Fallback option quote error: {e}")
     return data
@@ -1540,7 +1548,7 @@ def process_future_burst(kite, token, symbol, name, ltp, oi, alerts_list, volume
             history.pop(0)
 
 
-def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list, stats=None):
+def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list, stats=None, fut_symbol=""):
     if not is_burst_underlying(name):
         return
 
@@ -1640,8 +1648,11 @@ def process_option_logic(kite, name, underlying_data, option_quotes, alerts_list
                     "end_time": now + timedelta(seconds=60),
                     "symbol": row["tradingsymbol"],
                     "underlying": name,
+                    "name": name,
                     "lot_size": lot_size,
                     "expiry_text": expiry_text,
+                    "underlying_future_symbol": fut_symbol,
+                    "start_u_ltp": u_ltp,
                 }
 
         if t_int in active_watches:
@@ -1743,6 +1754,138 @@ def _burst_alert_recent(alert_key, cooldown_seconds=120):
     return False
 
 
+def sweep_active_watches(kite, data, opt_quotes, bn_alerts, stock_alerts):
+    if not active_watches:
+        return
+
+    now = datetime.now(IST)
+    to_delete = []
+
+    for key, watch in list(active_watches.items()):
+        end_time = watch.get("end_time")
+        if not end_time or now < end_time:
+            continue
+
+        name = watch.get("name") or watch.get("underlying") or ""
+        symbol = watch.get("symbol", "")
+        lot_size = _normalize_lot_size(watch.get("lot_size"))
+        start_oi = watch.get("start_oi", 0)
+        start_price = watch.get("start_price", 0.0)
+        start_vol = watch.get("start_vol", 0)
+        target_alerts = bn_alerts if is_index_underlying(name) else stock_alerts
+
+        is_future = isinstance(key, str) and key.startswith("FUT_")
+
+        if is_future:
+            q = data.get(symbol)
+            if not q:
+                ws_q = get_symbol_quotes([symbol], max_age_seconds=None).get(symbol)
+                if ws_q:
+                    q = ws_q
+
+            curr_oi = q.get("oi", 0) if q else 0
+            curr_ltp = _normalize_burst_price(name, q.get("last_price", 0)) if q else 0.0
+            curr_vol = q.get("volume", 0) if q else 0
+
+            if curr_oi <= 0:
+                if now >= end_time + timedelta(seconds=15):
+                    to_delete.append(key)
+                continue
+
+            oi_chg = curr_oi - start_oi
+            p_chg = curr_ltp - start_price
+            vol_traded = max(0, curr_vol - start_vol)
+            final_lot_size = lot_size or get_future_lot_size(symbol)
+            final_lots = int(abs(oi_chg) / final_lot_size) if final_lot_size > 0 else 0
+
+            action = classify_action(symbol, oi_chg, p_chg)
+            is_covering_unwinding = any(x in action for x in ["COVERING", "UNWINDING"])
+            if name == "CRUDEOILM":
+                req_threshold = 100 if is_covering_unwinding else 25
+            else:
+                req_threshold = 500 if is_covering_unwinding else 100
+
+            vol_lots = int(vol_traded / final_lot_size) if final_lot_size > 0 else vol_traded
+            if final_lots >= req_threshold and (vol_lots >= 5 or vol_traded == 0):
+                strength = get_strength_label(final_lots, name)
+                p_icon = "▲" if p_chg >= 0 else "▼"
+                expiry_line = f"EXPIRY: {watch['expiry_text']}\n" if watch.get("expiry_text") else ""
+                alert_text = (
+                    f"{strength}\n🚨 {action}\nSymbol: {symbol}\n"
+                    f"{expiry_line}"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"LOTS: {final_lots}\nPRICE: {curr_ltp:.2f} ({p_icon})\nFUTURE PRICE: {curr_ltp:.2f}\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"EXISTING OI: {start_oi:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {curr_oi:,}\n"
+                    f"TIME: {now.strftime('%H:%M:%S')}"
+                )
+                alert_key = f"FUT:{name}:{symbol}:{start_oi}:{start_price}"
+                if not _burst_alert_recent(alert_key):
+                    target_alerts.append(alert_text)
+
+            to_delete.append(key)
+
+        else:
+            t_str = str(key)
+            q = opt_quotes.get(t_str)
+            if not q:
+                ws_q = get_token_quotes([t_str], max_age_seconds=None).get(t_str)
+                if ws_q:
+                    q = ws_q
+
+            curr_oi = q.get("oi", 0) if q else 0
+            curr_ltp = float(q.get("last_price", 0) or 0) if q else 0.0
+            curr_vol = q.get("volume", 0) if q else 0
+
+            if curr_oi <= 0:
+                if now >= end_time + timedelta(seconds=15):
+                    to_delete.append(key)
+                continue
+
+            oi_chg = curr_oi - start_oi
+            p_chg = curr_ltp - start_price
+            vol_traded = max(0, curr_vol - start_vol)
+            final_lot_size = lot_size or 1
+            final_lots = int(abs(oi_chg) / final_lot_size) if final_lot_size > 0 else 0
+
+            action = classify_action(symbol, oi_chg, p_chg)
+            is_covering_unwinding = any(x in action for x in ["COVERING", "UNWINDING"])
+
+            u_name = str(name).upper()
+            if u_name == "CRUDEOILM":
+                final_threshold = 100 if is_covering_unwinding else 25
+            elif u_name in {"BANKNIFTY", "HDFCBANK", "ICICIBANK"}:
+                final_threshold = 100
+            else:
+                final_threshold = 500 if is_covering_unwinding else 100
+
+            vol_lots = int(vol_traded / final_lot_size) if final_lot_size > 0 else vol_traded
+            if final_lots >= final_threshold and (vol_lots >= 5 or vol_traded == 0):
+                strength = get_strength_label(final_lots, name)
+                p_icon = "▲" if p_chg >= 0 else "▼"
+                fut_symbol = watch.get("underlying_future_symbol") or ""
+                fut_price = data.get(fut_symbol, {}).get("last_price", 0) if fut_symbol else 0.0
+                if fut_price <= 0:
+                    fut_price = watch.get("start_u_ltp", 0.0)
+                alert_text = (
+                    f"{strength}\n🚨 {action}\nSymbol: {symbol}\n"
+                    f"EXPIRY: {watch.get('expiry_text', 'NA')}\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"LOTS: {final_lots}\nPRICE: {curr_ltp:.2f} ({p_icon})\nFUTURE PRICE: {fut_price:.2f}\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"EXISTING OI: {start_oi:,}\nOI CHANGE  : {oi_chg:+,d}\nNEW OI     : {curr_oi:,}\n"
+                    f"TIME: {now.strftime('%H:%M:%S')}"
+                )
+                alert_key = f"OPT:{name}:{symbol}:{start_oi}:{start_price}"
+                if not _burst_alert_recent(alert_key):
+                    target_alerts.append(alert_text)
+
+            to_delete.append(key)
+
+    for k in to_delete:
+        active_watches.pop(k, None)
+
+
 def calculate_burst_alerts(kite):
     session = get_burst_session()
     track_names = get_active_burst_names()
@@ -1763,10 +1906,13 @@ def calculate_burst_alerts(kite):
     option_threshold = max(get_option_burst_threshold(name) for name in track_names)
     fut_by_name = _map_tracked_futures_by_name(fut_symbols, track_names)
 
+    ws_meta = get_ws_status()
+    ws_alive = ws_meta.get("connected", False) and (time.time() - ws_meta.get("last_tick_time", 0) < 60)
+
     quote_source = "websocket"
-    data = get_symbol_quotes_ws_only(symbols, max_age_seconds=15)
-    missing_symbols = [symbol for symbol in symbols if symbol not in data]
-    if not data or missing_symbols:
+    data = get_symbol_quotes_ws_only(symbols, max_age_seconds=300)
+    # Only fall back to REST if WebSocket is NOT alive AND data is completely empty
+    if not ws_alive and not data:
         data = _get_burst_symbol_quotes_with_fallback(kite, symbols)
         quote_source = "rest_fallback"
 
@@ -1817,11 +1963,7 @@ def calculate_burst_alerts(kite):
         all_opt_tokens.extend(df["instrument_token"].tolist())
     stats["option_tokens"] = len(all_opt_tokens)
 
-    opt_quotes = get_option_quotes_ws_only(all_opt_tokens, max_age_seconds=15)
-    missing_option_tokens = [
-        token for token in all_opt_tokens
-        if str(int(token)) not in opt_quotes
-    ]
+    opt_quotes = get_option_quotes_ws_only(all_opt_tokens, max_age_seconds=300)
     # Only invoke expensive REST fallback if we have NO WebSocket quotes at all (e.g. during initial startup)
     if all_opt_tokens and quote_source == "rest_fallback" and not opt_quotes:
         fallback_opt_quotes = _get_burst_option_quotes_with_fallback(kite, all_opt_tokens)
@@ -1854,7 +1996,11 @@ def calculate_burst_alerts(kite):
             opt_quotes,
             target_alerts,
             stats=stats,
+            fut_symbol=sym,
         )
+
+    # Sweep and resolve all active 1-minute burst watches (ensures 60s completion with zero hang)
+    sweep_active_watches(kite, data, opt_quotes, bn_alerts, stock_alerts)
 
     if stats["future_quotes"] == 0:
         stats["reason"] = "no current future quote"
