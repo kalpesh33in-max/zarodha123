@@ -40,7 +40,7 @@ Core Strategy across 1-Hour (1H), Daily (1D), and Weekly (1W):
    - All 500 Nifty 500 Cash stocks (NSE segment: EQ).
 
 5. Telegram Routing:
-   - Alerts sent to @zarodastock_bot (TELE_TOKEN_STOCKS, TELE_CHAT_ID_STOCKS: 530388484).
+   - Alerts sent to channel -1004326717783 (Ai scanner allert) in place of @zarodastock_bot.
 """
 
 import os
@@ -169,18 +169,61 @@ def _get_current_1h_slot(now):
 
 
 def _send_reversal_alert(message, alert_key):
-    """Dispatches alert to @zarodastock_bot with strict deduplication."""
+    """
+    Dispatches alert to channel -1004326717783 (Ai scanner allert) with strict deduplication.
+    Tries candidate bot tokens (STOCKS, MAIN, BN) to ensure delivery regardless of which bot is administrator.
+    """
     with _state_lock:
         if alert_key in _alerted_keys:
             return
         _alerted_keys.add(alert_key)
 
-    chat_id = getattr(env_config, "TELE_CHAT_ID_STOCKS", env_config.TELE_CHAT_ID)
-    token = getattr(env_config, "TELE_TOKEN_STOCKS", env_config.TELE_TOKEN)
-    try:
-        send_telegram_message(message, chat_id=chat_id, token=token)
-    except Exception as e:
-        print(f"[REVERSAL SCANNER] Telegram send error: {e}")
+    target_chat = getattr(
+        env_config,
+        "TELE_CHAT_ID_REVERSAL",
+        getattr(env_config, "TELE_CHAT_ID_AI_SCANNER", "-1004326717783"),
+    )
+
+    candidate_tokens = []
+    for tok in [
+        getattr(env_config, "TELE_TOKEN_STOCKS", None),
+        getattr(env_config, "TELE_TOKEN", None),
+        getattr(env_config, "TELE_TOKEN_BN", None),
+    ]:
+        if tok and tok not in candidate_tokens:
+            candidate_tokens.append(tok)
+
+    sent = False
+    last_err = None
+    for tok in candidate_tokens:
+        try:
+            res = send_telegram_message(message, chat_id=target_chat, token=tok)
+            if res and res.get("ok"):
+                sent = True
+                print(f"[REVERSAL SCANNER] Alert delivered to {target_chat} (Ai scanner allert)")
+                break
+            elif res and not res.get("ok"):
+                last_err = res.get("description", "Unknown error")
+        except Exception as e:
+            last_err = str(e)
+
+    if not sent:
+        print(
+            f"[REVERSAL SCANNER] ⚠️ Could not deliver alert to channel {target_chat} (Ai scanner allert): {last_err}. "
+            f"Please ensure @zarodastock_bot (or your Telegram bot) is added as Administrator with 'Post Messages' permission in channel {target_chat}."
+        )
+        # Fallback to private chat so setup alert is not missed if channel bot admin setup is pending
+        fallback_chat = getattr(env_config, "TELE_CHAT_ID_STOCKS", env_config.TELE_CHAT_ID)
+        stocks_tok = getattr(env_config, "TELE_TOKEN_STOCKS", env_config.TELE_TOKEN)
+        if fallback_chat and str(fallback_chat) != str(target_chat):
+            try:
+                send_telegram_message(
+                    f"⚠️ [Ai scanner allert channel {target_chat} admin pending]\n\n{message}",
+                    chat_id=fallback_chat,
+                    token=stocks_tok,
+                )
+            except Exception:
+                pass
 
 
 def _evaluate_5_candles(completed, now, min_avg_vol):
@@ -393,6 +436,7 @@ def _run_hourly_historical_evaluation(kite):
                 if pattern:
                     alert_key = f"EXHAUSTION_1H_{current_slot}_{token}_BULLISH"
                     msg = (
+                        f"🏷 *Ai scanner allert* 📢\n"
                         f"⚡ *1H REVERSAL SIGNAL: BOTTOM EXHAUSTION (NIFTY 500)*\n"
                         f"Stock       : *{sym}* (₹{c5:.2f})\n"
                         f"Timeframe   : *1-Hour (1H)*\n"
@@ -436,6 +480,7 @@ def _run_hourly_historical_evaluation(kite):
                 if pattern:
                     alert_key = f"EXHAUSTION_1H_{current_slot}_{token}_BEARISH"
                     msg = (
+                        f"🏷 *Ai scanner allert* 📢\n"
                         f"⚡ *1H REVERSAL SIGNAL: TOP EXHAUSTION (NIFTY 500)*\n"
                         f"Stock       : *{sym}* (₹{c5:.2f})\n"
                         f"Timeframe   : *1-Hour (1H)*\n"
@@ -522,6 +567,7 @@ def _run_daily_weekly_historical_evaluation(kite):
                     if pattern:
                         alert_key = f"EXHAUSTION_1D_{today_str}_{token}_BULLISH"
                         msg = (
+                            f"🏷 *Ai scanner allert* 📢\n"
                             f"⚡ *1D REVERSAL SIGNAL: DAILY BOTTOM EXHAUSTION (NIFTY 500)*\n"
                             f"Stock       : *{sym}* (₹{c5:.2f})\n"
                             f"Timeframe   : *Daily (1D)*\n"
@@ -562,6 +608,7 @@ def _run_daily_weekly_historical_evaluation(kite):
                     if pattern:
                         alert_key = f"EXHAUSTION_1D_{today_str}_{token}_BEARISH"
                         msg = (
+                            f"🏷 *Ai scanner allert* 📢\n"
                             f"⚡ *1D REVERSAL SIGNAL: DAILY TOP EXHAUSTION (NIFTY 500)*\n"
                             f"Stock       : *{sym}* (₹{c5:.2f})\n"
                             f"Timeframe   : *Daily (1D)*\n"
@@ -612,6 +659,7 @@ def _run_daily_weekly_historical_evaluation(kite):
                     if pattern:
                         alert_key = f"EXHAUSTION_1W_{week_str}_{token}_BULLISH"
                         msg = (
+                            f"🏷 *Ai scanner allert* 📢\n"
                             f"⚡ *1W REVERSAL SIGNAL: WEEKLY BOTTOM EXHAUSTION (NIFTY 500)*\n"
                             f"Stock       : *{sym}* (₹{c5:.2f})\n"
                             f"Timeframe   : *Weekly (1W)*\n"
@@ -652,6 +700,7 @@ def _run_daily_weekly_historical_evaluation(kite):
                     if pattern:
                         alert_key = f"EXHAUSTION_1W_{week_str}_{token}_BEARISH"
                         msg = (
+                            f"🏷 *Ai scanner allert* 📢\n"
                             f"⚡ *1W REVERSAL SIGNAL: WEEKLY TOP EXHAUSTION (NIFTY 500)*\n"
                             f"Stock       : *{sym}* (₹{c5:.2f})\n"
                             f"Timeframe   : *Weekly (1W)*\n"
@@ -771,6 +820,7 @@ def _check_live_tick_reversal(timeframe, token, ltp, now):
             setup_text = f"5 {tf_title} Lower Lows + ≥4 Lower Closes Broken"
 
             msg = (
+                f"🏷 *Ai scanner allert* 📢\n"
                 f"🚀 *{timeframe} 5-CANDLE REVERSAL BREAKOUT (NIFTY 500)*\n"
                 f"Stock       : *{sym}* (₹{ltp:.2f})\n"
                 f"Timeframe   : *{tf_title}*\n"
@@ -796,6 +846,7 @@ def _check_live_tick_reversal(timeframe, token, ltp, now):
             setup_text = f"5 {tf_title} Higher Highs + ≥4 Higher Closes Broken"
 
             msg = (
+                f"🏷 *Ai scanner allert* 📢\n"
                 f"🚨 *{timeframe} 5-CANDLE REVERSAL BREAKDOWN (NIFTY 500)*\n"
                 f"Stock       : *{sym}* (₹{ltp:.2f})\n"
                 f"Timeframe   : *{tf_title}*\n"
