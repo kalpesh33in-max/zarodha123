@@ -62,6 +62,60 @@ def _get_active_monthly_future(df, name):
     return futs.iloc[0]
 
 
+def _get_atm_option_details(atm_strike, opt_type, kite=None):
+    """
+    Finds the active nearest-expiry Bank Nifty option for the given ATM strike and type (CE/PE),
+    and retrieves its current market price (LTP).
+    """
+    global _radar_options_df
+    df = _radar_options_df
+    if df is None or df.empty:
+        df = _load_instruments_data()
+        _radar_options_df = df
+
+    if df is None or df.empty:
+        return "", 0.0
+
+    opts = df[
+        (df["name"] == "BANKNIFTY") &
+        (df["instrument_type"] == opt_type) &
+        (df["strike"] == float(atm_strike))
+    ].copy()
+    if opts.empty:
+        return "", 0.0
+
+    if "expiry_dt" not in opts.columns:
+        opts["expiry_dt"] = pd.to_datetime(opts["expiry"], errors="coerce")
+    today_date = datetime.now(IST).date()
+    valid_opts = opts[opts["expiry_dt"].isna() | (opts["expiry_dt"].dt.date >= today_date)].sort_values(by="expiry")
+    if valid_opts.empty:
+        return "", 0.0
+
+    row = valid_opts.iloc[0]
+    sym = str(row["tradingsymbol"])
+    tkn = int(row["instrument_token"])
+    full_sym = f"NFO:{sym}"
+
+    # 1. Try WebSocket quote cache first (instant)
+    from websocket_flow import get_token_quotes, get_symbol_quotes
+    q = get_token_quotes([tkn], max_age_seconds=60).get(tkn)
+    if not q:
+        q = get_symbol_quotes([full_sym], max_age_seconds=60).get(full_sym)
+
+    ltp = float(q.get("last_price", 0.0)) if q else 0.0
+
+    # 2. Fallback to kite_quote if not in WebSocket cache
+    if ltp <= 0 and kite:
+        try:
+            res = kite_quote(kite, [full_sym])
+            if res and full_sym in res:
+                ltp = float(res[full_sym].get("last_price", 0.0))
+        except Exception:
+            pass
+
+    return sym, ltp
+
+
 def _classify_order_flow(dp, doi):
     """Classifies Price & OI delta into institutional action and numeric score (-1.0 to +1.0)."""
     if dp > 0 and doi > 0:
@@ -118,7 +172,7 @@ def _build_scenario_text(score, bn_ltp, bn_chg, bank_summaries, floor_strike, ce
     return msg, scenario_tag
 
 
-def _check_and_send_trade_trigger(composite_score, bn_ltp, bank_scores, bank_summaries, atm_strike, floor_strike, ceil_strike, chat_id, token, now):
+def _check_and_send_trade_trigger(composite_score, bn_ltp, bank_scores, bank_summaries, atm_strike, floor_strike, ceil_strike, chat_id, token, now, kite=None):
     """
     Evaluates institutional alignment across Bank Nifty and ALL Top 5 Banks.
     Mandatory Confirmation:
@@ -164,9 +218,12 @@ def _check_and_send_trade_trigger(composite_score, bn_ltp, bank_scores, bank_sum
             tgt1 = round(bn_ltp + 80)
             tgt2 = max(ceil_strike + 100, round(bn_ltp + 150))
 
+            opt_sym, opt_price = _get_atm_option_details(atm_strike, "CE", kite=kite)
+            price_str = f" (₹{opt_price:.1f} Price)" if opt_price > 0 else ""
+
             trade_alert = (
                 f"🎯 *BANKNIFTY TRADE TRIGGER: BUY CE* 🎯\n"
-                f"Action      : *BUY {atm_strike} CE*\n"
+                f"Action      : *BUY {atm_strike} CE*{price_str}\n"
                 f"Future Ref  : *₹{bn_ltp:.1f}* (Score: *{composite_score:+d}*)\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"Entry Zone  : *₹{bn_ltp - 20:.0f} – ₹{bn_ltp + 20:.0f}*\n"
@@ -179,7 +236,7 @@ def _check_and_send_trade_trigger(composite_score, bn_ltp, bank_scores, bank_sum
                 f"• {b_line2}\n"
                 f"⏰ Time     : {now.strftime('%H:%M:%S')} IST"
             )
-            print(f"[BANKNIFTY RADAR] 🎯 BUY CE TRIGGER SENT for {atm_strike} CE")
+            print(f"[BANKNIFTY RADAR] 🎯 BUY CE TRIGGER SENT for {atm_strike} CE{price_str}")
             send_telegram_message(trade_alert, chat_id=chat_id, token=token)
             return
 
@@ -210,9 +267,12 @@ def _check_and_send_trade_trigger(composite_score, bn_ltp, bank_scores, bank_sum
             tgt1 = round(bn_ltp - 80)
             tgt2 = min(floor_strike - 100, round(bn_ltp - 150))
 
+            opt_sym, opt_price = _get_atm_option_details(atm_strike, "PE", kite=kite)
+            price_str = f" (₹{opt_price:.1f} Price)" if opt_price > 0 else ""
+
             trade_alert = (
                 f"🎯 *BANKNIFTY TRADE TRIGGER: BUY PE* 🎯\n"
-                f"Action      : *BUY {atm_strike} PE*\n"
+                f"Action      : *BUY {atm_strike} PE*{price_str}\n"
                 f"Future Ref  : *₹{bn_ltp:.1f}* (Score: *{composite_score:+d}*)\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"Entry Zone  : *₹{bn_ltp - 20:.0f} – ₹{bn_ltp + 20:.0f}*\n"
@@ -225,7 +285,7 @@ def _check_and_send_trade_trigger(composite_score, bn_ltp, bank_scores, bank_sum
                 f"• {b_line2}\n"
                 f"⏰ Time     : {now.strftime('%H:%M:%S')} IST"
             )
-            print(f"[BANKNIFTY RADAR] 🎯 BUY PE TRIGGER SENT for {atm_strike} PE")
+            print(f"[BANKNIFTY RADAR] 🎯 BUY PE TRIGGER SENT for {atm_strike} PE{price_str}")
             send_telegram_message(trade_alert, chat_id=chat_id, token=token)
             return
 
@@ -360,7 +420,8 @@ def _radar_evaluator_loop(kite):
             # --- 1. Real-Time Trade Trigger (Evaluated Every Minute - Fires Immediately on Criteria Match) ---
             _check_and_send_trade_trigger(
                 composite_score, bn_ltp, bank_scores, bank_summaries,
-                atm_strike, floor_strike, ceil_strike, chat_id, token, now
+                atm_strike, floor_strike, ceil_strike, chat_id, token, now,
+                kite=kite
             )
 
             # --- 2. 15-Minute Scheduled Dashboard Update & Shift Summary ---
@@ -405,7 +466,7 @@ def start_banknifty_radar(kite=None):
     Initializes the Bank Nifty 1-Minute Live Institutional Radar Scanner.
     Subscribes Bank Nifty Future and the Top 5 Banks (80% weight) to the shared WebSocket.
     """
-    global _radar_started, _radar_instruments
+    global _radar_started, _radar_instruments, _radar_options_df
     with _radar_lock:
         if _radar_started:
             return
@@ -413,6 +474,7 @@ def start_banknifty_radar(kite=None):
 
     print("🚀 [BANKNIFTY RADAR] Initializing Bank Nifty Institutional Radar Engine...")
     df = _load_instruments_data()
+    _radar_options_df = df
     if df.empty:
         print("[BANKNIFTY RADAR] instruments.csv missing or empty.")
         return

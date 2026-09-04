@@ -59,6 +59,7 @@ IST = ZoneInfo("Asia/Kolkata")
 MIN_1H_AVG_VOLUME = int(os.getenv("MIN_1H_AVG_VOLUME", "10000"))
 MIN_1D_AVG_VOLUME = int(os.getenv("MIN_1D_AVG_VOLUME", "50000"))
 MIN_1W_AVG_VOLUME = int(os.getenv("MIN_1W_AVG_VOLUME", "250000"))
+MIN_STOCK_PRICE = float(os.getenv("MIN_REVERSAL_STOCK_PRICE", "500.0"))
 
 # Thread safety & State
 _state_lock = threading.Lock()
@@ -239,6 +240,11 @@ def _evaluate_5_candles(completed, now, min_avg_vol):
         return None, None
 
     c1, c2, c3, c4, c5 = completed[-5:]
+    o5, c5_val = float(c5["open"]), float(c5["close"])
+
+    # Price Filter: Strictly ignore stocks below ₹500
+    if c5_val < MIN_STOCK_PRICE:
+        return None, None
 
     total_vol = sum(c.get("volume", 0) for c in (c1, c2, c3, c4, c5))
     avg_vol = total_vol / 5.0
@@ -247,7 +253,6 @@ def _evaluate_5_candles(completed, now, min_avg_vol):
 
     l1, l2, l3, l4, l5 = float(c1["low"]), float(c2["low"]), float(c3["low"]), float(c4["low"]), float(c5["low"])
     h1, h2, h3, h4, h5 = float(c1["high"]), float(c2["high"]), float(c3["high"]), float(c4["high"]), float(c5["high"])
-    o5, c5_val = float(c5["open"]), float(c5["close"])
 
     c1_val = float(c1["close"])
     c2_val = float(c2["close"])
@@ -780,6 +785,9 @@ def _check_live_tick_reversal(timeframe, token, ltp, now):
     Evaluates real-time WebSocket tick against active breakout/breakdown watches for the specified timeframe (1H, 1D, 1W).
     Triggers immediately when 6th candle crosses 5th candle High/Low.
     """
+    if ltp < MIN_STOCK_PRICE:
+        return
+
     with _state_lock:
         watch = _active_breakout_watches.get(timeframe, {}).get(token)
         if not watch or watch.get("alerted", False):
