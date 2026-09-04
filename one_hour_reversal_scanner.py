@@ -1,10 +1,11 @@
 """
-1-Hour 5-Candle Institutional Reversal Scanner (All F&O Futures)
----------------------------------------------------------------
+1-Hour 5-Candle Institutional Reversal Scanner (Nifty 500 Cash Stocks)
+----------------------------------------------------------------------
 Core Logic:
 1. Bullish Reversal:
    - Prior Trend: 5 consecutive 1-Hour completed candles making Lower Lows:
      Low(C1) > Low(C2) > Low(C3) > Low(C4) > Low(C5).
+   - Liquidity Filter: Average 1-Hour volume across the 5 candles >= MIN_1H_AVG_VOLUME (default 10,000).
    - Trigger A (Exhaustion on 5th Candle):
      5th candle is a Doji (body <= 15% range) or Hammer / Pull-up from back (lower wick >= 45% range).
      Alerts immediately upon 5th candle close.
@@ -15,6 +16,7 @@ Core Logic:
 2. Bearish Reversal (Reverse Direction):
    - Prior Trend: 5 consecutive 1-Hour completed candles making Higher Highs:
      High(C1) < High(C2) < High(C3) < High(C4) < High(C5).
+   - Liquidity Filter: Average 1-Hour volume across the 5 candles >= MIN_1H_AVG_VOLUME (default 10,000).
    - Trigger A (Exhaustion on 5th Candle):
      5th candle is a Doji (body <= 15% range) or Shooting Star / Push-down from top (upper wick >= 45% range).
      Alerts immediately upon 5th candle close.
@@ -23,9 +25,9 @@ Core Logic:
      Alerts in real-time via WebSocket.
 
 3. Coverage:
-   - All F&O Future contracts (Index + Stock Futures).
+   - All 500 Nifty 500 Cash stocks (NSE segment: EQ).
 4. Telegram Routing:
-   - Alerts sent to @zarodastock_bot (TELE_TOKEN_STOCKS, TELE_CHAT_ID_STOCKS).
+   - Alerts sent to @zarodastock_bot (TELE_TOKEN_STOCKS, TELE_CHAT_ID_STOCKS: 530388484).
 """
 
 import os
@@ -40,10 +42,11 @@ from telegram_utils import send_telegram_message
 from websocket_flow import register_ws_callbacks, add_shared_tokens
 
 IST = ZoneInfo("Asia/Kolkata")
+MIN_1H_AVG_VOLUME = int(os.getenv("MIN_1H_AVG_VOLUME", "10000"))
 
 # Thread safety & State
 _state_lock = threading.Lock()
-_fut_metadata = {}          # token -> {"name": name, "symbol": symbol, "lot_size": lot_size}
+_stock_metadata = {}          # token -> {"name": name, "symbol": symbol}
 _active_breakout_watches = {} # token -> dict of active watch parameters
 _current_1h_candle = {}     # token -> {"open": float, "high": float, "low": float, "close": float, "slot": str}
 _alerted_keys = set()       # Deduplication set for alert keys
@@ -78,6 +81,36 @@ def _load_instruments_df():
             except Exception:
                 pass
     return pd.DataFrame()
+
+
+def _load_nifty500_symbols():
+    """Loads Nifty 500 stock symbols from local CSV or falls back to official NSE download."""
+    fpaths = [
+        "nifty500_symbols.csv",
+        os.path.join(os.path.dirname(__file__), "nifty500_symbols.csv"),
+    ]
+    for p in fpaths:
+        if os.path.exists(p):
+            try:
+                df_n500 = pd.read_csv(p)
+                if "Symbol" in df_n500.columns:
+                    return set(df_n500["Symbol"].dropna().unique())
+            except Exception:
+                pass
+
+    try:
+        import urllib.request
+        import io
+        url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        data = urllib.request.urlopen(req, timeout=10).read()
+        df_n500 = pd.read_csv(io.BytesIO(data))
+        if "Symbol" in df_n500.columns:
+            return set(df_n500["Symbol"].dropna().unique())
+    except Exception as e:
+        print(f"[1H REVERSAL] Failed to fetch Nifty 500 list from NSE: {e}")
+
+    return set()
 
 
 def _is_market_open(now):
@@ -138,6 +171,7 @@ def _send_reversal_alert(message, alert_key):
 def _evaluate_5_candles_reversal(candles, now, meta):
     """
     Evaluates completed 1-Hour candles for 5 consecutive Lower Lows or Higher Highs.
+    Checks liquidity (avg volume >= MIN_1H_AVG_VOLUME).
     Returns (bullish_setup, bearish_setup).
     """
     if not candles:
@@ -157,6 +191,12 @@ def _evaluate_5_candles_reversal(candles, now, meta):
         return None, None
 
     c1, c2, c3, c4, c5 = completed[-5:]
+
+    # Liquidity check: Ensure average 1H volume across the 5 candles meets threshold
+    total_vol = sum(c.get("volume", 0) for c in (c1, c2, c3, c4, c5))
+    avg_vol = total_vol / 5.0
+    if avg_vol < MIN_1H_AVG_VOLUME:
+        return None, None
 
     l1, l2, l3, l4, l5 = float(c1["low"]), float(c2["low"]), float(c3["low"]), float(c4["low"]), float(c5["low"])
     h1, h2, h3, h4, h5 = float(c1["high"]), float(c2["high"]), float(c3["high"]), float(c4["high"]), float(c5["high"])
@@ -194,6 +234,7 @@ def _evaluate_5_candles_reversal(candles, now, meta):
             "c5_close": c5_val,
             "c5_open": o5,
             "c5_date": c5.get("date"),
+            "avg_vol": avg_vol,
             "exhaustion_pattern": exhaustion_pattern,
             "lows": [l1, l2, l3, l4, l5],
             "highs": [h1, h2, h3, h4, h5],
@@ -214,6 +255,7 @@ def _evaluate_5_candles_reversal(candles, now, meta):
             "c5_close": c5_val,
             "c5_open": o5,
             "c5_date": c5.get("date"),
+            "avg_vol": avg_vol,
             "exhaustion_pattern": exhaustion_pattern,
             "lows": [l1, l2, l3, l4, l5],
             "highs": [h1, h2, h3, h4, h5],
@@ -224,7 +266,7 @@ def _evaluate_5_candles_reversal(candles, now, meta):
 
 def _run_hourly_historical_evaluation(kite):
     """
-    Runs after each completed 1-Hour candle to scan all F&O Futures.
+    Runs after each completed 1-Hour candle to scan all Nifty 500 Cash stocks.
     Identifies 5-candle setups, sends exhaustion alerts if C5 is Doji/Hammer,
     and registers active breakout watches for the 6th candle.
     """
@@ -236,10 +278,10 @@ def _run_hourly_historical_evaluation(kite):
     from_time = now - timedelta(days=6)
     to_time = now
 
-    print(f"[1H REVERSAL] Scanning 1-Hour candles for {len(_fut_metadata)} F&O Futures ({current_slot})...")
+    print(f"[1H REVERSAL] Scanning 1-Hour candles for {len(_stock_metadata)} Nifty 500 stocks ({current_slot})...")
 
     with _state_lock:
-        tokens_to_scan = list(_fut_metadata.items())
+        tokens_to_scan = list(_stock_metadata.items())
 
     new_watches_count = 0
 
@@ -256,20 +298,22 @@ def _run_hourly_historical_evaluation(kite):
                 h5 = bullish_setup["c5_high"]
                 l5 = bullish_setup["c5_low"]
                 c5 = bullish_setup["c5_close"]
+                avg_vol = bullish_setup["avg_vol"]
                 pattern = bullish_setup["exhaustion_pattern"]
 
-                # Trigger A: 5th Candle Exhaustion Alert
+                # Trigger A: 5th Candle Exhaustion Alert (Bottom)
                 if pattern:
                     alert_key = f"EXHAUSTION_{current_slot}_{token}_BULLISH"
                     msg = (
-                        f"⚡ *1H REVERSAL SIGNAL: BOTTOM EXHAUSTION*\n"
-                        f"Future: *{sym}* (₹{c5:.2f})\n"
-                        f"Setup: *5 Consecutive 1H Lower Lows*\n"
-                        f"Pattern: *{pattern}* (5th Candle)\n"
+                        f"⚡ *1H REVERSAL SIGNAL: BOTTOM EXHAUSTION (NIFTY 500)*\n"
+                        f"Stock       : *{sym}* (₹{c5:.2f})\n"
+                        f"Setup       : *5 Consecutive 1H Lower Lows*\n"
+                        f"Pattern     : *{pattern}* (5th Candle)\n"
                         f"━━━━━━━━━━━━━━━━━━━\n"
                         f"5th 1H High : *₹{h5:.2f}*\n"
                         f"5th 1H Low  : *₹{l5:.2f}*\n"
                         f"Close Price : *₹{c5:.2f}*\n"
+                        f"Avg 1H Vol  : *{int(avg_vol):,}*\n"
                         f"Plan        : *Watch For Breakout Above ₹{h5:.2f}*\n"
                         f"⏰ Time     : {now.strftime('%H:%M:%S')} IST"
                     )
@@ -282,6 +326,7 @@ def _run_hourly_historical_evaluation(kite):
                         "c5_high": h5,
                         "c5_low": l5,
                         "c5_close": c5,
+                        "avg_vol": avg_vol,
                         "symbol": sym,
                         "name": meta["name"],
                         "slot": current_slot,
@@ -294,20 +339,22 @@ def _run_hourly_historical_evaluation(kite):
                 h5 = bearish_setup["c5_high"]
                 l5 = bearish_setup["c5_low"]
                 c5 = bearish_setup["c5_close"]
+                avg_vol = bearish_setup["avg_vol"]
                 pattern = bearish_setup["exhaustion_pattern"]
 
                 # Trigger A: 5th Candle Exhaustion Alert (Top)
                 if pattern:
                     alert_key = f"EXHAUSTION_{current_slot}_{token}_BEARISH"
                     msg = (
-                        f"⚡ *1H REVERSAL SIGNAL: TOP EXHAUSTION*\n"
-                        f"Future: *{sym}* (₹{c5:.2f})\n"
-                        f"Setup: *5 Consecutive 1H Higher Highs*\n"
-                        f"Pattern: *{pattern}* (5th Candle)\n"
+                        f"⚡ *1H REVERSAL SIGNAL: TOP EXHAUSTION (NIFTY 500)*\n"
+                        f"Stock       : *{sym}* (₹{c5:.2f})\n"
+                        f"Setup       : *5 Consecutive 1H Higher Highs*\n"
+                        f"Pattern     : *{pattern}* (5th Candle)\n"
                         f"━━━━━━━━━━━━━━━━━━━\n"
                         f"5th 1H High : *₹{h5:.2f}*\n"
                         f"5th 1H Low  : *₹{l5:.2f}*\n"
                         f"Close Price : *₹{c5:.2f}*\n"
+                        f"Avg 1H Vol  : *{int(avg_vol):,}*\n"
                         f"Plan        : *Watch For Breakdown Below ₹{l5:.2f}*\n"
                         f"⏰ Time     : {now.strftime('%H:%M:%S')} IST"
                     )
@@ -320,6 +367,7 @@ def _run_hourly_historical_evaluation(kite):
                         "c5_high": h5,
                         "c5_low": l5,
                         "c5_close": c5,
+                        "avg_vol": avg_vol,
                         "symbol": sym,
                         "name": meta["name"],
                         "slot": current_slot,
@@ -327,10 +375,10 @@ def _run_hourly_historical_evaluation(kite):
                     }
                 new_watches_count += 1
 
-            # Micro-throttle to stay well under Kite limits
-            time.sleep(0.08)
+            # Micro-throttle to respect Kite REST API limits smoothly
+            time.sleep(0.06)
 
-        except Exception as e:
+        except Exception:
             continue
 
     print(f"[1H REVERSAL] Completed hourly scan. Active Breakout Watches: {new_watches_count}")
@@ -388,6 +436,7 @@ def _check_live_tick_reversal(token, ltp, now):
         c5_low = watch["c5_low"]
         sym = watch["symbol"]
         slot = watch["slot"]
+        avg_vol = watch.get("avg_vol", 0.0)
 
     # 1. Bullish Breakout: 6th candle is Green (ltp > c6_open) and crosses above 5th High
     if direction == "BULLISH":
@@ -397,14 +446,15 @@ def _check_live_tick_reversal(token, ltp, now):
 
             alert_key = f"BREAKOUT_{slot}_{token}_BULLISH"
             msg = (
-                f"🚀 *1H 5-CANDLE REVERSAL BREAKOUT*\n"
-                f"Future: *{sym}* (₹{ltp:.2f})\n"
-                f"Setup: *5 Consecutive Lower Lows Broken*\n"
+                f"🚀 *1H 5-CANDLE REVERSAL BREAKOUT (NIFTY 500)*\n"
+                f"Stock       : *{sym}* (₹{ltp:.2f})\n"
+                f"Setup       : *5 Consecutive Lower Lows Broken*\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
                 f"5th 1H High : *₹{c5_high:.2f}* (Crossed Above ▲)\n"
                 f"Current LTP : *₹{ltp:.2f}* (Green 1H Candle)\n"
                 f"Pattern SL  : *₹{c5_low:.2f}* (5th Low)\n"
-                f"Action      : *BUY / LONG FUTURE*\n"
+                f"Avg 1H Vol  : *{int(avg_vol):,}*\n"
+                f"Action      : *BUY / LONG (NIFTY 500 CASH)*\n"
                 f"⏰ Time     : {now.strftime('%H:%M:%S')} IST"
             )
             print(f"[1H REVERSAL BREAKOUT] Triggered {sym} BULLISH at ₹{ltp:.2f}")
@@ -418,14 +468,15 @@ def _check_live_tick_reversal(token, ltp, now):
 
             alert_key = f"BREAKDOWN_{slot}_{token}_BEARISH"
             msg = (
-                f"🚨 *1H 5-CANDLE REVERSAL BREAKDOWN*\n"
-                f"Future: *{sym}* (₹{ltp:.2f})\n"
-                f"Setup: *5 Consecutive Higher Highs Broken*\n"
+                f"🚨 *1H 5-CANDLE REVERSAL BREAKDOWN (NIFTY 500)*\n"
+                f"Stock       : *{sym}* (₹{ltp:.2f})\n"
+                f"Setup       : *5 Consecutive Higher Highs Broken*\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
                 f"5th 1H Low  : *₹{c5_low:.2f}* (Crossed Below ▼)\n"
                 f"Current LTP : *₹{ltp:.2f}* (Red 1H Candle)\n"
                 f"Pattern SL  : *₹{c5_high:.2f}* (5th High)\n"
-                f"Action      : *SELL / SHORT FUTURE*\n"
+                f"Avg 1H Vol  : *{int(avg_vol):,}*\n"
+                f"Action      : *SELL / SHORT (NIFTY 500 CASH)*\n"
                 f"⏰ Time     : {now.strftime('%H:%M:%S')} IST"
             )
             print(f"[1H REVERSAL BREAKDOWN] Triggered {sym} BEARISH at ₹{ltp:.2f}")
@@ -433,14 +484,14 @@ def _check_live_tick_reversal(token, ltp, now):
 
 
 def start_one_hour_reversal_scanner(kite=None):
-    """Initializes the 1-Hour 5-Candle Reversal Scanner for all F&O Futures."""
+    """Initializes the 1-Hour 5-Candle Reversal Scanner for all 500 Nifty 500 Cash stocks."""
     global _scanner_started
     with _state_lock:
         if _scanner_started:
             return
         _scanner_started = True
 
-    print("🚀 [1H REVERSAL] Initializing 1-Hour 5-Candle Reversal Engine (All F&O Futures)...")
+    print("🚀 [1H REVERSAL] Initializing 1-Hour 5-Candle Reversal Engine (Nifty 500 Cash Stocks)...")
     from kiteconnect import KiteConnect
 
     token = _get_access_token()
@@ -456,26 +507,33 @@ def start_one_hour_reversal_scanner(kite=None):
         print("[1H REVERSAL] instruments.csv missing or empty. Scanner cannot start.")
         return
 
-    # Filter all near-month F&O Futures
-    futs = df[(df["segment"] == "NFO-FUT") & (df["name"].notna())].copy()
-    if futs.empty:
-        print("[1H REVERSAL] No NFO-FUT instruments found.")
+    n500_symbols = _load_nifty500_symbols()
+    if not n500_symbols:
+        print("[1H REVERSAL] Nifty 500 symbols list empty or could not be loaded.")
+        return
+
+    # Filter all Nifty 500 Cash stocks on NSE
+    eq_stocks = df[
+        (df["segment"] == "NSE") &
+        (df["instrument_type"] == "EQ") &
+        (df["tradingsymbol"].isin(n500_symbols))
+    ].copy()
+
+    if eq_stocks.empty:
+        print("[1H REVERSAL] No matching Nifty 500 Cash instruments found in instruments.csv.")
         return
 
     target_tokens = []
     with _state_lock:
-        for name, rows in futs.groupby("name"):
-            rows_sorted = rows.sort_values(by="expiry")
-            near_fut = rows_sorted.iloc[0]
-            tkn = int(near_fut["instrument_token"])
+        for _, row in eq_stocks.iterrows():
+            tkn = int(row["instrument_token"])
             target_tokens.append(tkn)
-            _fut_metadata[tkn] = {
-                "name": name,
-                "symbol": near_fut["tradingsymbol"],
-                "lot_size": int(near_fut.get("lot_size", 1)),
+            _stock_metadata[tkn] = {
+                "name": str(row.get("name", row["tradingsymbol"])),
+                "symbol": row["tradingsymbol"],
             }
 
-    print(f"[1H REVERSAL] Subscribed to {len(target_tokens)} Near-Month Futures across all F&O.")
+    print(f"[1H REVERSAL] Subscribed to {len(target_tokens)} Nifty 500 Cash Stocks on NSE.")
 
     # WebSocket tick callback for 1-Hour live candle tracking and instant breakout triggers
     def on_ticks(ws, ticks):
@@ -485,7 +543,7 @@ def start_one_hour_reversal_scanner(kite=None):
         for tick in ticks:
             tkn = tick.get("instrument_token")
             ltp = tick.get("last_price")
-            if not tkn or not ltp or tkn not in _fut_metadata:
+            if not tkn or not ltp or tkn not in _stock_metadata:
                 continue
 
             with _state_lock:
@@ -523,7 +581,7 @@ def start_one_hour_reversal_scanner(kite=None):
 
 
 if __name__ == "__main__":
-    print("Testing 1-Hour 5-Candle Reversal Scanner standalone...")
+    print("Testing 1-Hour 5-Candle Reversal Scanner (Nifty 500) standalone...")
     from kiteconnect import KiteConnect
     tok = _get_access_token()
     k = None
