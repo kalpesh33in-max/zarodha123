@@ -202,6 +202,21 @@ def _evaluate_5_candles_reversal(candles, now, meta):
     h1, h2, h3, h4, h5 = float(c1["high"]), float(c2["high"]), float(c3["high"]), float(c4["high"]), float(c5["high"])
     o5, c5_val = float(c5["open"]), float(c5["close"])
 
+    c1_val = float(c1["close"])
+    c2_val = float(c2["close"])
+    c3_val = float(c3["close"])
+    c4_val = float(c4["close"])
+
+    # Check closes: minimum 4 candles must make lower close for bullish (or higher close for bearish)
+    is_4_lower_closes = (
+        (c1_val > c2_val > c3_val > c4_val) or
+        (c2_val > c3_val > c4_val > c5_val)
+    )
+    is_4_higher_closes = (
+        (c1_val < c2_val < c3_val < c4_val) or
+        (c2_val < c3_val < c4_val < c5_val)
+    )
+
     r5 = h5 - l5
     if r5 <= 0:
         return None, None
@@ -219,8 +234,8 @@ def _evaluate_5_candles_reversal(candles, now, meta):
     bullish_setup = None
     bearish_setup = None
 
-    # Check 5 Consecutive Lower Lows
-    if l1 > l2 > l3 > l4 > l5:
+    # Check 5 Consecutive Lower Lows AND minimum 4 candles Lower Close
+    if (l1 > l2 > l3 > l4 > l5) and is_4_lower_closes:
         exhaustion_pattern = None
         if is_doji5:
             exhaustion_pattern = "Doji (Exhaustion at Low)"
@@ -240,8 +255,8 @@ def _evaluate_5_candles_reversal(candles, now, meta):
             "highs": [h1, h2, h3, h4, h5],
         }
 
-    # Check 5 Consecutive Higher Highs
-    elif h1 < h2 < h3 < h4 < h5:
+    # Check 5 Consecutive Higher Highs AND minimum 4 candles Higher Close
+    elif (h1 < h2 < h3 < h4 < h5) and is_4_higher_closes:
         exhaustion_pattern = None
         if is_doji5:
             exhaustion_pattern = "Doji (Exhaustion at High)"
@@ -307,7 +322,7 @@ def _run_hourly_historical_evaluation(kite):
                     msg = (
                         f"⚡ *1H REVERSAL SIGNAL: BOTTOM EXHAUSTION (NIFTY 500)*\n"
                         f"Stock       : *{sym}* (₹{c5:.2f})\n"
-                        f"Setup       : *5 Consecutive 1H Lower Lows*\n"
+                        f"Setup       : *5 Lower Lows + ≥4 Lower Closes*\n"
                         f"Pattern     : *{pattern}* (5th Candle)\n"
                         f"━━━━━━━━━━━━━━━━━━━\n"
                         f"5th 1H High : *₹{h5:.2f}*\n"
@@ -348,7 +363,7 @@ def _run_hourly_historical_evaluation(kite):
                     msg = (
                         f"⚡ *1H REVERSAL SIGNAL: TOP EXHAUSTION (NIFTY 500)*\n"
                         f"Stock       : *{sym}* (₹{c5:.2f})\n"
-                        f"Setup       : *5 Consecutive 1H Higher Highs*\n"
+                        f"Setup       : *5 Higher Highs + ≥4 Higher Closes*\n"
                         f"Pattern     : *{pattern}* (5th Candle)\n"
                         f"━━━━━━━━━━━━━━━━━━━\n"
                         f"5th 1H High : *₹{h5:.2f}*\n"
@@ -448,7 +463,7 @@ def _check_live_tick_reversal(token, ltp, now):
             msg = (
                 f"🚀 *1H 5-CANDLE REVERSAL BREAKOUT (NIFTY 500)*\n"
                 f"Stock       : *{sym}* (₹{ltp:.2f})\n"
-                f"Setup       : *5 Consecutive Lower Lows Broken*\n"
+                f"Setup       : *5 Lower Lows + ≥4 Lower Closes Broken*\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
                 f"5th 1H High : *₹{c5_high:.2f}* (Crossed Above ▲)\n"
                 f"Current LTP : *₹{ltp:.2f}* (Green 1H Candle)\n"
@@ -470,7 +485,7 @@ def _check_live_tick_reversal(token, ltp, now):
             msg = (
                 f"🚨 *1H 5-CANDLE REVERSAL BREAKDOWN (NIFTY 500)*\n"
                 f"Stock       : *{sym}* (₹{ltp:.2f})\n"
-                f"Setup       : *5 Consecutive Higher Highs Broken*\n"
+                f"Setup       : *5 Higher Highs + ≥4 Higher Closes Broken*\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
                 f"5th 1H Low  : *₹{c5_low:.2f}* (Crossed Below ▼)\n"
                 f"Current LTP : *₹{ltp:.2f}* (Red 1H Candle)\n"
