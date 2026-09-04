@@ -3974,7 +3974,7 @@ def start_unified_scanners(kite=None):
         from one_hour_reversal_scanner import start_one_hour_reversal_scanner
         start_one_hour_reversal_scanner(kite)
     except Exception as e:
-        print(f"Failed to start 1-Hour Reversal Scanner: {e}")
+        print(f"Failed to start Multi-Timeframe (1H, 1D, 1W) Reversal Scanner: {e}")
     print("✅ All Consolidated Alert Engines Active on Single Shared WebSocket.")
 
 
