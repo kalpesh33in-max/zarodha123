@@ -31,7 +31,7 @@ ALL_TRACKED_NAMES = sorted(set(PATTERN_INDICES + PATTERN_COMMODITIES + PATTERN_S
 
 # Configuration
 MIN_SCORE_THRESHOLD = int(os.getenv("PATTERN_MIN_SCORE", "65"))
-ALERT_COOLDOWN_SECONDS = int(os.getenv("PATTERN_ALERT_COOLDOWN", "600"))
+ALERT_COOLDOWN_SECONDS = int(os.getenv("PATTERN_ALERT_COOLDOWN", "900"))
 
 # State
 _state_lock = threading.Lock()
@@ -621,7 +621,7 @@ def _dispatch_pattern_alert(kite, name, match_data, df_opts):
             opt_detail += f" (OI: {opt_oi})"
 
     msg = (
-        f"{dir_icon} *{name}* (₹{match_data['price']:.2f}) — *{action_verb}*\n"
+        f"{dir_icon} *{name}* [5M] (₹{match_data['price']:.2f}) — *{action_verb}*\n"
         f"Pattern: *{pattern_name}* (Score: *{score}/100*)\n"
         f"Level: {match_data['level_label']} | RVOL: *{match_data['rvol']:.1f}x*\n"
         f"Option: {opt_detail}\n"
@@ -647,7 +647,7 @@ def _process_completed_candle(kite, token, closed_candle):
         hist.append(closed_candle)
         if len(hist) > 60:
             hist.pop(0)
-        if len(hist) < 8:
+        if len(hist) < 6:
             return
         eval_candles = list(hist)
         name = meta["name"]
@@ -662,10 +662,10 @@ def _process_completed_candle(kite, token, closed_candle):
 
 def _rest_historical_polling_loop(kite):
     """
-    Every 60s during trading sessions, polls 1-minute historical candles directly via Kite REST API.
+    Every 60s during trading sessions, polls 5-minute historical candles directly via Kite REST API.
     Acts as an infallible fallback if WebSocket is ever disconnected.
     """
-    print("[PATTERN SCANNER] Starting 1-Minute Historical REST Fallback Engine...")
+    print("[PATTERN SCANNER] Starting 5-Minute Historical REST Fallback Engine...")
     today_date = datetime.now(IST).date()
     from_time = datetime.combine(today_date, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
 
@@ -687,16 +687,16 @@ def _rest_historical_polling_loop(kite):
 
             for token, meta in tokens_to_poll:
                 try:
-                    # If live WebSocket ticks are actively updating this token, we don't need to hammer REST
+                    # If live WebSocket ticks are actively updating this token within 5.5 minutes, skip REST
                     hist = _candle_history.get(token, [])
-                    if hist and (now - hist[-1].get("time", now)).total_seconds() < 90:
+                    if hist and (now - hist[-1].get("time", now)).total_seconds() < 330:
                         continue
 
-                    candles = kite_historical_data(kite, token, from_time, now, "minute")
-                    if not candles or len(candles) < 8:
+                    candles = kite_historical_data(kite, token, from_time, now, "5minute")
+                    if not candles or len(candles) < 6:
                         continue
 
-                    # Filter out partial current minute candle
+                    # Filter out partial current 5-minute candle
                     completed = candles[:-1] if len(candles) > 1 else candles
                     norm_candles = []
                     for c in completed[-30:]:
@@ -728,11 +728,50 @@ def _rest_historical_polling_loop(kite):
         time.sleep(45)
 
 
+def _bootstrap_morning_history(kite):
+    """
+    On startup, pre-populates today's completed 5-minute candles up to current time
+    so pattern detection works immediately without waiting.
+    """
+    now = datetime.now(IST)
+    today_date = now.date()
+    from_time = datetime.combine(today_date, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
+    if now.time() < datetime.strptime("09:25", "%H:%M").time():
+        return
+    print("[PATTERN SCANNER] Pre-loading 5-minute morning candle history...")
+    with _state_lock:
+        tokens_to_poll = list(_token_meta.items())
+    loaded = 0
+    for token, meta in tokens_to_poll:
+        try:
+            candles = kite_historical_data(kite, token, from_time, now, "5minute")
+            if candles and len(candles) >= 2:
+                completed = candles[:-1] if len(candles) > 1 else candles
+                norm_candles = []
+                for c in completed[-30:]:
+                    norm_candles.append({
+                        "open": float(c["open"]),
+                        "high": float(c["high"]),
+                        "low": float(c["low"]),
+                        "close": float(c["close"]),
+                        "volume": float(c["volume"]),
+                        "time": c["date"]
+                    })
+                if norm_candles:
+                    with _state_lock:
+                        _candle_history[token] = norm_candles
+                    loaded += 1
+        except Exception:
+            pass
+        time.sleep(0.1)
+    print(f"✅ [PATTERN SCANNER] Preloaded 5-minute candle history for {loaded} assets.")
+
+
 # --- Master Scanner Initializer ---
 
 def start_pattern_volume_scanner(kite=None):
     """
-    Initializes the 10-Pattern Price Action & Volume Breakout Scoring Scanner.
+    Initializes the 10-Pattern Price Action & Volume Breakout Scoring Scanner (5-Minute Timeframe).
     Registers hooks with single shared WebSocket feed and starts REST fallback loop.
     """
     global _scanner_started, _token_meta, _symbol_to_token, _options_cache
@@ -742,7 +781,7 @@ def start_pattern_volume_scanner(kite=None):
             return
         _scanner_started = True
 
-    print("🚀 [PATTERN SCANNER] Initializing 10-Pattern Price Action & Volume Engine...")
+    print("🚀 [PATTERN SCANNER] Initializing 10-Pattern 5-Minute Price Action & Volume Engine...")
     import env_config
     from kiteconnect import KiteConnect
 
@@ -817,10 +856,11 @@ def start_pattern_volume_scanner(kite=None):
             closest_exp = opts["expiry"].min()
             _options_cache[name] = opts[opts["expiry"] == closest_exp].copy()
 
-    # WebSocket tick callback
+    # WebSocket tick callback (5-Minute Candlestick Aggregator)
     def on_ticks(ws, ticks):
         now = datetime.now(IST)
-        minute_str = now.strftime("%Y-%m-%d %H:%M")
+        slot_min = (now.minute // 5) * 5
+        candle_slot = f"{now.strftime('%Y-%m-%d %H:')}{slot_min:02d}"
 
         with _state_lock:
             for tick in ticks:
@@ -832,21 +872,21 @@ def start_pattern_volume_scanner(kite=None):
                 vol = tick.get("volume_traded") or tick.get("volume", 0)
 
                 if tkn not in _current_candle_minute:
-                    _current_candle_minute[tkn] = minute_str
+                    _current_candle_minute[tkn] = candle_slot
                     _current_candle_state[tkn] = {
                         "open": ltp, "high": ltp, "low": ltp, "close": ltp,
                         "start_vol": vol, "current_vol": vol
                     }
 
-                # Minute rolled over
-                if _current_candle_minute[tkn] != minute_str:
+                # 5-Minute Candle rolled over
+                if _current_candle_minute[tkn] != candle_slot:
                     c = _current_candle_state[tkn]
                     candle_vol = max(0, c["current_vol"] - c["start_vol"])
                     closed_candle = {
                         "open": c["open"], "high": c["high"], "low": c["low"], "close": c["close"],
                         "volume": candle_vol, "time": now
                     }
-                    _current_candle_minute[tkn] = minute_str
+                    _current_candle_minute[tkn] = candle_slot
                     _current_candle_state[tkn] = {
                         "open": ltp, "high": ltp, "low": ltp, "close": ltp,
                         "start_vol": vol, "current_vol": vol
@@ -869,8 +909,9 @@ def start_pattern_volume_scanner(kite=None):
     register_ws_callbacks(on_connect, on_ticks)
     add_shared_tokens(target_tokens)
 
-    # Start the REST historical fallback loop
+    # Preload morning 5-min history and start the REST fallback loop
     if kite:
+        threading.Thread(target=_bootstrap_morning_history, args=(kite,), daemon=True).start()
         threading.Thread(target=_rest_historical_polling_loop, args=(kite,), daemon=True).start()
 
-    print(f"✅ [PATTERN SCANNER] Tracking {len(target_tokens)} assets across 10 Price Action & Volume patterns.")
+    print(f"✅ [PATTERN SCANNER] Tracking {len(target_tokens)} assets across 10 Price Action & Volume patterns (5-Min Candles).")
