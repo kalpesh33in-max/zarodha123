@@ -2371,6 +2371,7 @@ NR_WATCHLIST = [
     "TVSMOTOR", "UNITDSPR", "ULTRACEMCO", "UNOMINDA", "VOLTAS"
 ]
 
+NR_MAX_COMPRESSION_PCT = float(os.getenv("NR_MAX_COMPRESSION_PCT", "0.60"))
 _nr_tracked_candidates = {}
 _nr_alerted_assets = {}
 _nr_state_lock = threading.Lock()
@@ -2447,7 +2448,7 @@ def _identify_nr_candidates(kite, df):
     now = datetime.now(IST)
     today_date = now.date()
 
-    print(f"[NR-1H] Scanning 1-Hour Future Candles (09:15 - 10:15) across {len(NR_WATCHLIST)} symbols (< 1.0% Compression)...")
+    print(f"[NR-1H] Scanning 1-Hour Future Candles (09:15 - 10:15) across {len(NR_WATCHLIST)} symbols (< {NR_MAX_COMPRESSION_PCT:.2f}% Compression)...")
     from_time = datetime.combine(today_date, datetime.strptime("09:15", "%H:%M").time(), tzinfo=IST)
     to_time = datetime.combine(today_date, datetime.strptime("10:15", "%H:%M").time(), tzinfo=IST)
 
@@ -2477,8 +2478,8 @@ def _identify_nr_candidates(kite, df):
             # 1H Future Range % Formula: ((High - Low) / Low) * 100
             range_pct = ((h_1h - l_1h) / l_1h) * 100.0
 
-            # STRICT 1.0% Compression Threshold
-            if range_pct < 1.0:
+            # Compression Threshold (< NR_MAX_COMPRESSION_PCT)
+            if range_pct < NR_MAX_COMPRESSION_PCT:
                 opts = df[(df["name"] == name) & (df["instrument_type"].isin(["CE", "PE"]))]
                 target_monthly_exp = None
                 df_opts_monthly = pd.DataFrame()
@@ -2499,7 +2500,7 @@ def _identify_nr_candidates(kite, df):
                     "opts_df": df_opts_monthly,
                     "alerted": False
                 }
-                print(f"  [NR-1H FUTURE COMPRESSED] {name}: 1H High={h_1h:.2f}, Low={l_1h:.2f}, Range={range_pct:.2f}% (< 1.0%)")
+                print(f"  [NR-1H FUTURE COMPRESSED] {name}: 1H High={h_1h:.2f}, Low={l_1h:.2f}, Range={range_pct:.2f}% (< {NR_MAX_COMPRESSION_PCT:.2f}%)")
         except Exception:
             continue
 
@@ -2508,7 +2509,7 @@ def _identify_nr_candidates(kite, df):
         _nr_alerted_assets.clear()
         _nr_candidates_identified_date = today_date
 
-    print(f"[NR-1H] Registered {len(new_candidates)} compressed Future candidates (< 1.0% Range).")
+    print(f"[NR-1H] Registered {len(new_candidates)} compressed Future candidates (< {NR_MAX_COMPRESSION_PCT:.2f}% Range).")
 
 
 def _scan_nr_15m_breakouts(kite):
@@ -2804,6 +2805,28 @@ def start_expiry_gamma_scanner(kite=None):
                 market_end = datetime.strptime("15:30", "%H:%M").time()
                 close_time = datetime.combine(now.date(), market_end, tzinfo=IST)
                 minutes_left = (close_time - now).total_seconds() / 60.0
+
+                # REST fallback if WebSocket quotes are missing or stale
+                if _gamma_spot_price <= 0 or not _gamma_option_quotes:
+                    try:
+                        spot_q = kite_client.quote([spot_symbol]).get(spot_symbol, {})
+                        if spot_q and spot_q.get("last_price"):
+                            _gamma_spot_price = float(spot_q["last_price"])
+                        if token_to_strike_info:
+                            syms = [f"{exchange}:{info['symbol']}" for info in token_to_strike_info.values()]
+                            opt_q = kite_client.quote(syms)
+                            for tkn, info in token_to_strike_info.items():
+                                sym_key = f"{exchange}:{info['symbol']}"
+                                if sym_key in opt_q:
+                                    oq = opt_q[sym_key]
+                                    _gamma_option_quotes[tkn] = {
+                                        "ltp": float(oq.get("last_price", 0.0)),
+                                        "oi": oq.get("oi", 0),
+                                        "iv": 15.0,
+                                        "volume": oq.get("volume", 0)
+                                    }
+                    except Exception as e:
+                        print(f"[GAMMA REST FALLBACK] Error: {e}")
 
                 if minutes_left <= 0 or _gamma_spot_price <= 0 or not _gamma_option_quotes:
                     time.sleep(10)
@@ -3731,6 +3754,11 @@ def start_unified_scanners(kite=None):
     start_rvol_2candle_breakout_scanner(kite)
     start_fo_institutional_breakout_scanner(kite)
     start_3candle_price_volume_divergence_scanner(kite)
+    try:
+        from pattern_volume_scanner import start_pattern_volume_scanner
+        start_pattern_volume_scanner(kite)
+    except Exception as e:
+        print(f"Failed to start Pattern Volume Scanner: {e}")
     print("✅ All Consolidated Alert Engines Active on Single Shared WebSocket.")
 
 

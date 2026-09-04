@@ -64,15 +64,20 @@ def validate_and_start_scanner(source):
                     flow_engine = FlowEngine(kite)
                     flow_engine.start()
 
+                ws_needs_reconnect = bool(flow_engine and getattr(flow_engine, "_auth_failed", False))
+                if ws_needs_reconnect or source == "Manual Login":
+                    print(f"[{source}] Token refreshed. Auto-reloading Gunicorn worker to recreate fresh WebSocket...")
+                    def _auto_reload_worker():
+                        time.sleep(1.5)
+                        os._exit(0)
+                    threading.Thread(target=_auto_reload_worker, daemon=True).start()
+
                 message = (
                     f"Kite Scanner session refreshed from {source}. "
-                    "Scanner is already running with the latest Kite access token."
+                    "Scanner is active with the latest Kite access token."
                 )
-                if flow_engine and getattr(flow_engine, "_auth_failed", False):
-                    message += (
-                        " WebSocket auth failed earlier; REST fallback will use the refreshed token. "
-                        "Restart the Railway service after login to recreate the WebSocket connection."
-                    )
+                if ws_needs_reconnect:
+                    message += " Auto-reloading worker process now to recreate fresh WebSocket connection."
                 send_service_status(message)
                 return True
 
@@ -194,7 +199,11 @@ def login():
         with open(TOKEN_FILE, "w") as f:
             f.write(token)
         if validate_and_start_scanner("Manual Login"):
-            return "<h1>Success!</h1><p>Login successful and scanner is running.</p>"
+            return (
+                "<h1>Login Successful!</h1>"
+                "<p>Access token saved. Scanner worker is auto-reloading cleanly to connect to KiteTicker WebSocket.</p>"
+                "<p>All scanners (Spot Volume, RVOL, All-F&O Institutional, Hero-Zero, Burst) are starting!</p>"
+            )
         return "<h1>Error</h1><p>Login succeeded, but scanner validation/startup failed. Check logs.</p>"
     except Exception as e:
         return f"<h1>Error</h1><p>{str(e)}</p>"
