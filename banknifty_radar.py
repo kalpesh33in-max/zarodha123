@@ -39,6 +39,8 @@ _radar_pinned_msg_id = None
 _radar_last_scenario = None
 _radar_last_date = None
 _radar_started = False
+_radar_last_trade_time = 0.0
+_radar_last_trade_dir = None
 
 
 def _load_instruments_data():
@@ -114,6 +116,122 @@ def _build_scenario_text(score, bn_ltp, bn_chg, bank_summaries, floor_strike, ce
         f"4️⃣ *PLAN*: {plan}"
     )
     return msg, scenario_tag
+
+
+def _check_and_send_trade_trigger(composite_score, bn_ltp, bank_scores, bank_summaries, atm_strike, floor_strike, ceil_strike, chat_id, token, now):
+    """
+    Evaluates institutional alignment across Bank Nifty and ALL Top 5 Banks.
+    Mandatory Confirmation:
+    - HDFCBANK (29%) & ICICIBANK (23.5%): Primary direction drivers.
+    - SBIN (10%), AXISBANK (9.2%), KOTAKBANK (8.8%): Secondary drivers (28% combined).
+      Must not actively conflict/dump against the trade direction!
+    """
+    global _radar_last_trade_time, _radar_last_trade_dir
+    curr_time = time.time()
+
+    hdfc_score = bank_scores.get("HDFCBANK", 0.0)
+    icici_score = bank_scores.get("ICICIBANK", 0.0)
+    sbin_score = bank_scores.get("SBIN", 0.0)
+    axis_score = bank_scores.get("AXISBANK", 0.0)
+    kotak_score = bank_scores.get("KOTAKBANK", 0.0)
+
+    sec_scores = [sbin_score, axis_score, kotak_score]
+
+    # --- 1. BULLISH CALL TRADE (BUY CE) ---
+    # 1. Score >= +30
+    # 2. HDFC and ICICI non-negative (>= 0.0), at least one actively positive (>= 0.5)
+    # 3. Mandatory Secondary Banks (SBIN, AXIS, KOTAK):
+    #    - NONE can be aggressively Short (-1.0)
+    #    - At least 2 of the 3 must be non-negative (>= 0.0)
+    is_ce_triggered = (
+        composite_score >= 30 and
+        hdfc_score >= 0.0 and icici_score >= 0.0 and
+        (hdfc_score >= 0.5 or icici_score >= 0.5) and
+        all(s > -1.0 for s in sec_scores) and
+        sum(1 for s in sec_scores if s >= 0.0) >= 2
+    )
+
+    if is_ce_triggered:
+        if _radar_last_trade_dir != "CE" or (curr_time - _radar_last_trade_time > 900):
+            _radar_last_trade_time = curr_time
+            _radar_last_trade_dir = "CE"
+
+            b_items = list(bank_summaries.items())
+            b_line1 = " | ".join(f"{name.replace('BANK','')}: {info['action']}" for name, info in b_items[:3])
+            b_line2 = " | ".join(f"{name.replace('BANK','')}: {info['action']}" for name, info in b_items[3:])
+
+            sl_level = max(floor_strike, round(bn_ltp - 60))
+            tgt1 = round(bn_ltp + 80)
+            tgt2 = max(ceil_strike + 100, round(bn_ltp + 150))
+
+            trade_alert = (
+                f"🎯 *BANKNIFTY TRADE TRIGGER: BUY CE* 🎯\n"
+                f"Action      : *BUY {atm_strike} CE*\n"
+                f"Future Ref  : *₹{bn_ltp:.1f}* (Score: *{composite_score:+d}*)\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Entry Zone  : *₹{bn_ltp - 20:.0f} – ₹{bn_ltp + 20:.0f}*\n"
+                f"Stop Loss   : *₹{sl_level}* (Future SL -60 pts)\n"
+                f"Target 1    : *₹{tgt1}* (+80 pts)\n"
+                f"Target 2    : *₹{tgt2}* (+150 pts)\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🏦 *TOP 5 BANKS CONFIRMED (80% Wt)*:\n"
+                f"• {b_line1}\n"
+                f"• {b_line2}\n"
+                f"⏰ Time     : {now.strftime('%H:%M:%S')} IST"
+            )
+            print(f"[BANKNIFTY RADAR] 🎯 BUY CE TRIGGER SENT for {atm_strike} CE")
+            send_telegram_message(trade_alert, chat_id=chat_id, token=token)
+            return
+
+    # --- 2. BEARISH PUT TRADE (BUY PE) ---
+    # 1. Score <= -30
+    # 2. HDFC and ICICI non-positive (<= 0.0), at least one actively negative (<= -0.5)
+    # 3. Mandatory Secondary Banks (SBIN, AXIS, KOTAK):
+    #    - NONE can be aggressively Long (+1.0)
+    #    - At least 2 of the 3 must be non-positive (<= 0.0)
+    is_pe_triggered = (
+        composite_score <= -30 and
+        hdfc_score <= 0.0 and icici_score <= 0.0 and
+        (hdfc_score <= -0.5 or icici_score <= -0.5) and
+        all(s < 1.0 for s in sec_scores) and
+        sum(1 for s in sec_scores if s <= 0.0) >= 2
+    )
+
+    if is_pe_triggered:
+        if _radar_last_trade_dir != "PE" or (curr_time - _radar_last_trade_time > 900):
+            _radar_last_trade_time = curr_time
+            _radar_last_trade_dir = "PE"
+
+            b_items = list(bank_summaries.items())
+            b_line1 = " | ".join(f"{name.replace('BANK','')}: {info['action']}" for name, info in b_items[:3])
+            b_line2 = " | ".join(f"{name.replace('BANK','')}: {info['action']}" for name, info in b_items[3:])
+
+            sl_level = min(ceil_strike, round(bn_ltp + 60))
+            tgt1 = round(bn_ltp - 80)
+            tgt2 = min(floor_strike - 100, round(bn_ltp - 150))
+
+            trade_alert = (
+                f"🎯 *BANKNIFTY TRADE TRIGGER: BUY PE* 🎯\n"
+                f"Action      : *BUY {atm_strike} PE*\n"
+                f"Future Ref  : *₹{bn_ltp:.1f}* (Score: *{composite_score:+d}*)\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Entry Zone  : *₹{bn_ltp - 20:.0f} – ₹{bn_ltp + 20:.0f}*\n"
+                f"Stop Loss   : *₹{sl_level}* (Future SL +60 pts)\n"
+                f"Target 1    : *₹{tgt1}* (-80 pts)\n"
+                f"Target 2    : *₹{tgt2}* (-150 pts)\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🏦 *TOP 5 BANKS CONFIRMED (80% Wt)*:\n"
+                f"• {b_line1}\n"
+                f"• {b_line2}\n"
+                f"⏰ Time     : {now.strftime('%H:%M:%S')} IST"
+            )
+            print(f"[BANKNIFTY RADAR] 🎯 BUY PE TRIGGER SENT for {atm_strike} PE")
+            send_telegram_message(trade_alert, chat_id=chat_id, token=token)
+            return
+
+    # Reset trade direction lock if market moves back into neutral zone (-10 to +10)
+    if -10 <= composite_score <= 10:
+        _radar_last_trade_dir = None
 
 
 def _radar_evaluator_loop(kite):
@@ -258,6 +376,12 @@ def _radar_evaluator_loop(kite):
                 send_telegram_message(shift_alert, chat_id=chat_id, token=token)
 
             _radar_last_scenario = scenario_tag
+
+            # 3. High-Probability Automatic Trade Trigger with Mandatory Top 5 Banks Confirmation
+            _check_and_send_trade_trigger(
+                composite_score, bn_ltp, bank_scores, bank_summaries,
+                atm_strike, floor_strike, ceil_strike, chat_id, token, now
+            )
 
         except Exception as e:
             print(f"[BANKNIFTY RADAR] Error: {e}")
