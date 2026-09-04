@@ -577,61 +577,86 @@ def _get_recommended_option(kite, name, ref_price, direction, df_opts):
 
 # --- Alert Formatting & Dispatch ---
 
-def _dispatch_pattern_alert(kite, name, match_data, df_opts):
-    score = match_data["score"]
-    if score < MIN_SCORE_THRESHOLD:
+def _dispatch_pattern_alerts(kite, name, matches, df_opts):
+    """
+    Merges multiple pattern detections for the same asset on the same candle into
+    a single consolidated alert, combining pattern names and breakout levels.
+    """
+    if not matches:
         return
 
-    direction = match_data["direction"]
-    pattern_name = match_data["pattern_name"]
-    alert_key = f"{name}_{pattern_name}_{direction}"
+    valid_matches = [m for m in matches if m.get("score", 0) >= MIN_SCORE_THRESHOLD]
+    if not valid_matches:
+        return
+
+    # Group by direction (BULLISH or BEARISH)
+    by_direction = {}
+    for m in valid_matches:
+        by_direction.setdefault(m["direction"], []).append(m)
+
     now = datetime.now(IST)
     now_ts = now.timestamp()
 
-    with _state_lock:
-        last_time = _last_alert_times.get(alert_key, 0.0)
-        if now_ts - last_time < ALERT_COOLDOWN_SECONDS:
-            return
-        _last_alert_times[alert_key] = now_ts
+    for direction, group in by_direction.items():
+        alert_key = f"{name}_{direction}"
+        with _state_lock:
+            last_time = _last_alert_times.get(alert_key, 0.0)
+            if now_ts - last_time < ALERT_COOLDOWN_SECONDS:
+                continue
+            _last_alert_times[alert_key] = now_ts
 
-    # Quality Badge
-    if score >= 90:
-        badge = "🔥 HIGH CONVICTION SETUP"
-    elif score >= 75:
-        badge = "🚀 STRONG SETUP"
-    else:
-        badge = "✅ GOOD SETUP"
+        # Merge pattern names with " + "
+        pattern_names = " + ".join(dict.fromkeys(m["pattern_name"] for m in group))
 
-    dir_icon = "🟢" if direction == "BULLISH" else "🔴"
+        # Merge level labels with " | "
+        level_labels = " | ".join(dict.fromkeys(m["level_label"] for m in group))
 
-    action_verb, opt_symbol, opt_ltp, opt_oi = _get_recommended_option(
-        kite, name, match_data["price"], direction, df_opts
-    )
+        max_score = max(m["score"] for m in group)
+        max_rvol = max(m["rvol"] for m in group)
+        ref_price = group[-1]["price"]
 
-    # Clean short option string
-    opt_detail = f"*{opt_symbol}*"
-    if opt_ltp > 0:
-        opt_detail += f" @ *₹{opt_ltp:.2f}*"
-    if opt_oi > 0:
-        if opt_oi >= 1_000_000:
-            opt_detail += f" (OI: {opt_oi/1_000_000:.2f}M)"
-        elif opt_oi >= 1_000:
-            opt_detail += f" (OI: {opt_oi/1_000:.1f}K)"
+        # Quality Badge based on max score
+        if max_score >= 90:
+            badge = "🔥 HIGH CONVICTION SETUP"
+        elif max_score >= 75:
+            badge = "🚀 STRONG SETUP"
         else:
-            opt_detail += f" (OI: {opt_oi})"
+            badge = "✅ GOOD SETUP"
 
-    msg = (
-        f"{dir_icon} *{name}* [5M] (₹{match_data['price']:.2f}) — *{action_verb}*\n"
-        f"Pattern: *{pattern_name}* (Score: *{score}/100*)\n"
-        f"Level: {match_data['level_label']} | RVOL: *{match_data['rvol']:.1f}x*\n"
-        f"Option: {opt_detail}\n"
-        f"⏰ {now.strftime('%H:%M:%S')} IST"
-    )
+        dir_icon = "🟢" if direction == "BULLISH" else "🔴"
 
-    chat_id = env_config.TELE_CHAT_ID_STOCKS or env_config.TELE_CHAT_ID
-    token = env_config.TELE_TOKEN_STOCKS or env_config.TELE_TOKEN
-    print(f"[PATTERN SCANNER] Triggered {badge} for {name} ({pattern_name}, Score={score})")
-    send_telegram_message(msg, chat_id=chat_id, token=token)
+        action_verb, opt_symbol, opt_ltp, opt_oi = _get_recommended_option(
+            kite, name, ref_price, direction, df_opts
+        )
+
+        opt_detail = f"*{opt_symbol}*"
+        if opt_ltp > 0:
+            opt_detail += f" @ *₹{opt_ltp:.2f}*"
+        if opt_oi > 0:
+            if opt_oi >= 1_000_000:
+                opt_detail += f" (OI: {opt_oi/1_000_000:.2f}M)"
+            elif opt_oi >= 1_000:
+                opt_detail += f" (OI: {opt_oi/1_000:.1f}K)"
+            else:
+                opt_detail += f" (OI: {opt_oi})"
+
+        msg = (
+            f"{dir_icon} *{name}* [5M] (₹{ref_price:.2f}) — *{action_verb}*\n"
+            f"Pattern: *{pattern_names}* (Score: *{max_score}/100*)\n"
+            f"Level: {level_labels} | RVOL: *{max_rvol:.1f}x*\n"
+            f"Option: {opt_detail}\n"
+            f"⏰ {now.strftime('%H:%M:%S')} IST"
+        )
+
+        chat_id = env_config.TELE_CHAT_ID_STOCKS or env_config.TELE_CHAT_ID
+        token = env_config.TELE_TOKEN_STOCKS or env_config.TELE_TOKEN
+        print(f"[PATTERN SCANNER] Triggered {badge} for {name} ({pattern_names}, Score={max_score})")
+        send_telegram_message(msg, chat_id=chat_id, token=token)
+
+
+def _dispatch_pattern_alert(kite, name, match_data, df_opts):
+    """Backward-compatible wrapper for single match dispatch."""
+    _dispatch_pattern_alerts(kite, name, [match_data], df_opts)
 
 
 # --- Candle Processing Engine ---
@@ -654,8 +679,7 @@ def _process_completed_candle(kite, token, closed_candle):
         df_opts = _options_cache.get(name)
 
     matches = detect_patterns(eval_candles)
-    for m in matches:
-        _dispatch_pattern_alert(kite, name, m, df_opts)
+    _dispatch_pattern_alerts(kite, name, matches, df_opts)
 
 
 # --- REST Fallback Historical Candle Loader ---
@@ -716,8 +740,7 @@ def _rest_historical_polling_loop(kite):
                             df_opts = _options_cache.get(name)
 
                         matches = detect_patterns(norm_candles)
-                        for m in matches:
-                            _dispatch_pattern_alert(kite, name, m, df_opts)
+                        _dispatch_pattern_alerts(kite, name, matches, df_opts)
                 except Exception:
                     pass
                 time.sleep(0.3)

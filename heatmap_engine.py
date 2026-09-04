@@ -3698,6 +3698,7 @@ def start_3candle_price_volume_divergence_scanner(kite=None):
                                             (opts_active["instrument_type"] == "PE") & (opts_active["strike"].isin(pe_strikes))
                                         ]
 
+                                        matched_options = []
                                         for _, opt_row in target_opts.iterrows():
                                             opt_tkn = int(opt_row["instrument_token"])
                                             opt_sym = opt_row["tradingsymbol"]
@@ -3716,11 +3717,65 @@ def start_3candle_price_volume_divergence_scanner(kite=None):
                                             oc1, oc2, oc3 = opt_candles[-4], opt_candles[-3], opt_candles[-2]
                                             res_opt = _analyze_3candle_price_vol_divergence(oc1, oc2, oc3)
                                             if res_opt:
+                                                matched_options.append({
+                                                    "row": opt_row,
+                                                    "token": opt_tkn,
+                                                    "symbol": opt_sym,
+                                                    "type": opt_type,
+                                                    "strike": opt_strike,
+                                                    "strike_label": strike_label,
+                                                    "res_opt": res_opt,
+                                                    "candle_close": res_opt["close"]
+                                                })
+
+                                        if matched_options:
+                                            # Fetch quotes for all matching options to compare Open Interest (OI)
+                                            symbols_to_quote = [
+                                                f"{item['row'].get('exchange', 'NFO')}:{item['symbol']}"
+                                                for item in matched_options
+                                            ]
+                                            quotes = {}
+                                            if kite:
+                                                try:
+                                                    quotes = kite_quote(kite, symbols_to_quote)
+                                                except Exception as q_err:
+                                                    print(f"[3C OPTION QUOTE ERROR] {q_err}")
+                                                    quotes = {}
+
+                                            # Group by option type (CE / PE) so if multiple strikes triggered (e.g. ATM, 1 ITM, 2 ITM),
+                                            # we select ONLY the single option with the highest OI out of them
+                                            by_type = {}
+                                            for item in matched_options:
+                                                sym_key = f"{item['row'].get('exchange', 'NFO')}:{item['symbol']}"
+                                                q = quotes.get(sym_key, {})
+                                                oi = q.get("oi", 0)
+                                                ltp = float(q.get("last_price", 0.0))
+                                                if oi <= 0:
+                                                    ws_q = get_token_quotes([item["token"]]).get(str(item["token"]), {})
+                                                    oi = ws_q.get("oi", 0)
+                                                    if ltp <= 0:
+                                                        ltp = float(ws_q.get("last_price", 0.0))
+
+                                                item["oi"] = oi
+                                                item["ltp"] = ltp if ltp > 0 else item["candle_close"]
+                                                by_type.setdefault(item["type"], []).append(item)
+
+                                            for opt_type, items in by_type.items():
+                                                # Pick the one with the highest OI (tie-breaker: closest to ATM)
+                                                best_opt = max(
+                                                    items,
+                                                    key=lambda x: (
+                                                        x["oi"],
+                                                        -abs(x["strike"] - atm_strike)
+                                                    )
+                                                )
+                                                res_opt = best_opt["res_opt"]
                                                 action_verb = f"BUY {opt_type}" if "EXPANSION" in res_opt["type"] or "REVERSAL" in res_opt["type"] else "WATCH / EXIT"
+                                                oi_text = f" (OI: {best_opt['oi']:,})" if best_opt["oi"] > 0 else ""
                                                 msg = (
                                                     f"📊 *1H 3C OPTION: {res_opt['sentiment']}*\n"
-                                                    f"Option: *{opt_sym} {strike_label}*\n"
-                                                    f"LTP: *₹{res_opt['close']:.2f}*\n"
+                                                    f"Option: *{best_opt['symbol']} {best_opt['strike_label']}*{oi_text}\n"
+                                                    f"LTP: *₹{best_opt['ltp']:.2f}*\n"
                                                     f"Pattern: {res_opt['condition']}\n"
                                                     f"━━━━━━━━━━━━━━━━━━━\n"
                                                     f"Action: *{action_verb}*\n"
