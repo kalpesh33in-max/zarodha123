@@ -105,7 +105,7 @@ def _build_scenario_text(score, bn_ltp, bn_chg, bank_summaries, floor_strike, ce
     b_part2 = " | ".join(f"{name.replace('BANK','')}({info['ltp']:.1f}): {info['action']}" for name, info in b_items[3:])
 
     msg = (
-        f"⚡ *BANKNIFTY 1-MIN RADAR* ⚡\n"
+        f"⚡ *BANKNIFTY 15-MIN RADAR* ⚡\n"
         f"⏰ {now.strftime('%H:%M')} IST | Fut: *{bn_ltp:.1f}* ({p_sign}{bn_chg:.1f} pts)\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"1️⃣ *SCENARIO*: {scenario_tag} (*{score:+d}/100*)\n"
@@ -241,6 +241,7 @@ def _radar_evaluator_loop(kite):
     chat_id = env_config.TELE_CHAT_ID
     token = env_config.TELE_TOKEN
     last_eval_minute = None
+    last_15m_slot = None
 
     while True:
         try:
@@ -348,40 +349,44 @@ def _radar_evaluator_loop(kite):
                     floor_strike, ceil_strike, hdfc_ltp, now
                 )
 
-            # --- Telegram Delivery ---
-            # 1. Update/Edit the Pinned Live Message
-            edited = False
-            if _radar_pinned_msg_id:
-                res = edit_telegram_message(_radar_pinned_msg_id, msg_text, chat_id=chat_id, token=token)
-                if res and res.get("ok"):
-                    edited = True
-                elif res and "message is not modified" in str(res.get("description", "")).lower():
-                    edited = True
-
-            if not edited:
-                send_res = send_telegram_message(msg_text, chat_id=chat_id, token=token)
-                if send_res and send_res.get("ok"):
-                    new_id = send_res.get("result", {}).get("message_id")
-                    if new_id:
-                        _radar_pinned_msg_id = new_id
-                        pin_telegram_message(new_id, chat_id=chat_id, token=token, disable_notification=True)
-
-            # 2. Standalone Alert on Scenario Shift (e.g. from Rangebound to Strong Bullish)
-            if _radar_last_scenario is not None and _radar_last_scenario != scenario_tag:
-                shift_alert = (
-                    f"🚨 *BANKNIFTY SCENARIO SHIFT* 🚨\n"
-                    f"New State: *{scenario_tag}* (Score: *{composite_score:+d}*)\n"
-                    f"LTP: *₹{bn_ltp:.1f}* | Support: *{floor_strike}* | Resistance: *{ceil_strike}*"
-                )
-                send_telegram_message(shift_alert, chat_id=chat_id, token=token)
-
-            _radar_last_scenario = scenario_tag
-
-            # 3. High-Probability Automatic Trade Trigger with Mandatory Top 5 Banks Confirmation
+            # --- 1. Real-Time Trade Trigger (Evaluated Every Minute - Fires Immediately on Criteria Match) ---
             _check_and_send_trade_trigger(
                 composite_score, bn_ltp, bank_scores, bank_summaries,
                 atm_strike, floor_strike, ceil_strike, chat_id, token, now
             )
+
+            # --- 2. 15-Minute Scheduled Dashboard Update & Shift Summary ---
+            slot_15m = f"{now.strftime('%Y-%m-%d %H:')}{(now.minute // 15) * 15:02d}"
+            if slot_15m != last_15m_slot:
+                last_15m_slot = slot_15m
+
+                # Update/Edit the Pinned Live Message
+                edited = False
+                if _radar_pinned_msg_id:
+                    res = edit_telegram_message(_radar_pinned_msg_id, msg_text, chat_id=chat_id, token=token)
+                    if res and res.get("ok"):
+                        edited = True
+                    elif res and "message is not modified" in str(res.get("description", "")).lower():
+                        edited = True
+
+                if not edited:
+                    send_res = send_telegram_message(msg_text, chat_id=chat_id, token=token)
+                    if send_res and send_res.get("ok"):
+                        new_id = send_res.get("result", {}).get("message_id")
+                        if new_id:
+                            _radar_pinned_msg_id = new_id
+                            pin_telegram_message(new_id, chat_id=chat_id, token=token, disable_notification=True)
+
+                # Standalone Alert on Scenario Shift at 15-Minute mark
+                if _radar_last_scenario is not None and _radar_last_scenario != scenario_tag:
+                    shift_alert = (
+                        f"🚨 *BANKNIFTY SCENARIO SHIFT* 🚨\n"
+                        f"New State: *{scenario_tag}* (Score: *{composite_score:+d}*)\n"
+                        f"LTP: *₹{bn_ltp:.1f}* | Support: *{floor_strike}* | Resistance: *{ceil_strike}*"
+                    )
+                    send_telegram_message(shift_alert, chat_id=chat_id, token=token)
+
+                _radar_last_scenario = scenario_tag
 
         except Exception as e:
             print(f"[BANKNIFTY RADAR] Error: {e}")
