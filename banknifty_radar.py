@@ -238,8 +238,16 @@ def _radar_evaluator_loop(kite):
     global _radar_pinned_msg_id, _radar_last_scenario, _radar_last_date
     print("[BANKNIFTY RADAR] Evaluator loop started (09:15 to 15:30 IST)...")
 
-    chat_id = env_config.TELE_CHAT_ID
-    token = env_config.TELE_TOKEN
+    # Route specifically to @zarodastock_bot private chat (strictly avoiding Channel Ai scanner allert)
+    chat_id = getattr(env_config, "TELE_CHAT_ID_RADAR", getattr(env_config, "TELE_CHAT_ID_STOCKS", env_config.TELE_CHAT_ID))
+    token = getattr(env_config, "TELE_TOKEN_RADAR", getattr(env_config, "TELE_TOKEN_STOCKS", env_config.TELE_TOKEN))
+
+    # Guard: Strictly prevent Bank Nifty radar from ever posting into Channel Ai scanner allert (-1004326717783)
+    channel_ai_scanner = getattr(env_config, "TELE_CHAT_ID_AI_SCANNER", "-1004326717783")
+    channel_reversal = getattr(env_config, "TELE_CHAT_ID_REVERSAL", "-1004326717783")
+    if str(chat_id) in (str(channel_ai_scanner), str(channel_reversal)):
+        chat_id = getattr(env_config, "TELE_CHAT_ID_STOCKS", env_config.TELE_CHAT_ID)
+
     last_eval_minute = None
     last_15m_slot = None
 
