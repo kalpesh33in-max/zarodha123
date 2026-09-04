@@ -120,8 +120,8 @@ def _radar_evaluator_loop(kite):
     global _radar_pinned_msg_id, _radar_last_scenario, _radar_last_date
     print("[BANKNIFTY RADAR] Evaluator loop started (09:15 to 15:30 IST)...")
 
-    chat_id = env_config.TELE_CHAT_ID_BN
-    token = env_config.TELE_TOKEN_BN
+    chat_id = env_config.TELE_CHAT_ID
+    token = env_config.TELE_TOKEN
     last_eval_minute = None
 
     while True:

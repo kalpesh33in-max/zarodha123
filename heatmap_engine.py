@@ -2601,7 +2601,9 @@ def _scan_nr_15m_breakouts(kite):
             )
             print(f"[NR-1H FUTURE] Triggered {name} {direction} -> {action_verb} {opt_symbol}")
             import env_config
-            send_telegram_message(msg, chat_id=env_config.TELE_CHAT_ID, token=env_config.TELE_TOKEN)
+            target_chat = getattr(env_config, "TELE_CHAT_ID_STOCKS", env_config.TELE_CHAT_ID)
+            target_token = getattr(env_config, "TELE_TOKEN_STOCKS", env_config.TELE_TOKEN)
+            send_telegram_message(msg, chat_id=target_chat, token=target_token)
 
 def start_nr_option_breakout_scanner(kite=None):
     """Initializes 1-Hour Narrow Range (NR-1H) option compression scanner."""
