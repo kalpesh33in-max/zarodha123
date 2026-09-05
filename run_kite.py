@@ -243,6 +243,44 @@ def live_market_data():
         }
     })
 
+@app.route("/logs")
+def live_logs_view():
+    import subprocess
+    try:
+        res = subprocess.run(["journalctl", "-u", "zarodha", "-n", "150", "--no-pager"], capture_output=True, text=True)
+        logs = res.stdout or res.stderr
+    except Exception as e:
+        logs = f"Error reading logs: {e}"
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Zarodha Live System Logs</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="refresh" content="10">
+    <style>
+        body {{ background: #0b0f19; color: #94a3b8; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; padding: 15px; margin: 0; }}
+        .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; padding-bottom: 12px; margin-bottom: 15px; }}
+        h1 {{ font-size: 16px; color: #38bdf8; margin: 0; }}
+        .badge {{ background: #064e3b; color: #34d399; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; }}
+        pre {{ background: #020617; border: 1px solid #1e293b; border-radius: 8px; padding: 12px; font-size: 11px; line-height: 1.5; overflow-x: auto; color: #f1f5f9; white-space: pre-wrap; word-break: break-all; }}
+        .btn {{ background: #2563eb; color: #fff; text-decoration: none; padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: bold; }}
+        .btn:hover {{ background: #1d4ed8; }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>📜 Zarodha Live System Logs (AWS Mumbai)</h1>
+            <span style="font-size: 11px; color: #64748b;">Auto-refreshes every 10 seconds • 24/7 systemd service</span>
+        </div>
+        <div>
+            <a href="/dashboard" class="btn">← Back to Dashboard</a>
+        </div>
+    </div>
+    <pre>{logs}</pre>
+</body>
+</html>"""
+
 @app.route("/login")
 def login():
     ensure_background_services_started("HTTP /login")
