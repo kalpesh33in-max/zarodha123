@@ -1,18 +1,20 @@
 import os
 
 # Auto-load .env or .env.example
-for env_file in [".env", ".env.example"]:
-    if os.path.exists(env_file):
-        try:
-            with open(env_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    k, v = line.split("=", 1)
-                    os.environ.setdefault(k.strip(), v.strip())
-        except Exception:
-            pass
+_base_dir = os.path.dirname(os.path.abspath(__file__))
+for _fname in [".env", ".env.example"]:
+    for _path in [_fname, os.path.join(_base_dir, _fname)]:
+        if os.path.exists(_path):
+            try:
+                with open(_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        k, v = line.split("=", 1)
+                        os.environ.setdefault(k.strip(), v.strip())
+            except Exception:
+                pass
 
 # Zerodha Credentials (Matching your Railway names)
 API_KEY = os.getenv("KITE_API_KEY", "YOUR_API_KEY")

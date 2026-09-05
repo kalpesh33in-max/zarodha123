@@ -73,6 +73,9 @@
                     <a href="/logs" target="_blank" class="px-2.5 py-1 bg-sky-950/80 hover:bg-sky-900 text-sky-300 text-xs font-bold rounded border border-sky-800/80 transition" title="View Real-Time Server Logs">
                         📜 Logs
                     </a>
+                    <button onclick="triggerAutoLogin()" class="px-2.5 py-1 bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 text-xs font-bold rounded border border-emerald-800/80 transition" title="1-Click Auto-Login Zerodha with TOTP">
+                        ⚡ Auto-Login
+                    </button>
                 </div>
             </div>
 
@@ -1450,6 +1453,29 @@
                 .catch(err => {
                     const badge = document.getElementById('liveStatusBadge');
                     if (badge) badge.textContent = "Offline / Local Archive Mode";
+                });
+        }
+
+        function triggerAutoLogin() {
+            const badge = document.getElementById('liveStatusBadge');
+            if (badge) {
+                badge.innerHTML = `<span class="text-amber-400 font-bold animate-pulse">⏳ Authenticating Zerodha...</span>`;
+                badge.className = "text-[11px] font-mono px-2.5 py-1 rounded-md bg-amber-950/60 text-amber-300 border border-amber-800/50";
+            }
+            fetch('/api/autologin')
+                .then(r => r.json())
+                .then(d => {
+                    if (d.status === 'success') {
+                        alert('🟢 Auto-Login Successful!\nToken refreshed & Telegram notification sent.');
+                        pollLiveData();
+                    } else {
+                        alert('⚠️ Auto-Login Failed: ' + (d.message || 'Check logs'));
+                        pollLiveData();
+                    }
+                })
+                .catch(err => {
+                    alert('Network error triggering auto-login: ' + err);
+                    pollLiveData();
                 });
         }
 

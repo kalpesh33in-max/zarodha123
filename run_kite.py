@@ -52,12 +52,39 @@ def validate_and_start_scanner(source):
     with scanner_lock:
         token = load_saved_token()
         if not token:
-            print(f"[{source}] No access token found. Cannot start scanner.")
-            return False
+            print(f"[{source}] No access token found. Attempting Auto-Login...")
+            try:
+                from auto_login import perform_auto_login
+                ok, res = perform_auto_login(notify_telegram=True)
+                if ok:
+                    token = res
+                else:
+                    print(f"[{source}] Auto-Login failed: {res}")
+                    return False
+            except Exception as ale:
+                print(f"[{source}] Auto-Login error: {ale}")
+                return False
 
         try:
             kite.set_access_token(token)
             kite.profile() # Validation call
+        except Exception as e:
+            print(f"[{source}] Token validation failed ({e}). Attempting fresh Auto-Login...")
+            try:
+                from auto_login import perform_auto_login
+                ok, res = perform_auto_login(notify_telegram=True)
+                if ok:
+                    token = res
+                    kite.set_access_token(token)
+                    kite.profile()
+                else:
+                    print(f"[{source}] Auto-Login fallback failed: {res}")
+                    return False
+            except Exception as ale:
+                print(f"[{source}] Auto-Login error: {ale}")
+                return False
+
+        try:
             if scanner_thread and scanner_thread.is_alive():
                 print(f"[{source}] Token validated. Scanner already running; refreshed Kite session.")
                 if flow_engine is None:
@@ -131,17 +158,30 @@ def run_scheduler_loop():
         update_instruments()
         
     last_instrument_update_date = None
+    last_autologin_date = None
     update_time = datetime.strptime("08:30", "%H:%M").time()
+    autologin_time = datetime.strptime("08:45", "%H:%M").time()
 
     while True:
         now = datetime.now(IST)
-        if (
-            now.weekday() <= 4
-            and now.time() >= update_time
-            and last_instrument_update_date != now.date()
-        ):
-            morning_task()
-            last_instrument_update_date = now.date()
+        if now.weekday() <= 4:
+            # 1. Update instruments at 08:30 AM
+            if now.time() >= update_time and last_instrument_update_date != now.date():
+                morning_task()
+                last_instrument_update_date = now.date()
+
+            # 2. Automated Morning Login at 08:45 AM
+            if now.time() >= autologin_time and last_autologin_date != now.date():
+                print(f"[Scheduler] Executing Morning Auto-Login at {now.strftime('%H:%M')} IST...")
+                try:
+                    from auto_login import perform_auto_login
+                    ok, res = perform_auto_login(notify_telegram=True)
+                    if ok:
+                        validate_and_start_scanner("Morning Auto-Login Scheduler")
+                except Exception as ex:
+                    print(f"[Scheduler] Morning Auto-Login error: {ex}")
+                last_autologin_date = now.date()
+
         time.sleep(10)
 
 # --- Gunicorn Hooks / App Initialization ---
@@ -157,15 +197,13 @@ def start_background_services(source):
     sched_thread = threading.Thread(target=run_scheduler_loop, daemon=True)
     sched_thread.start()
 
-    if AUTO_START_SCANNER and load_saved_token():
+    if AUTO_START_SCANNER:
         boot_thread = threading.Thread(
             target=validate_and_start_scanner,
             args=(source,),
             daemon=True
         )
         boot_thread.start()
-    elif AUTO_START_SCANNER:
-        print(f"[{source}] Scanner auto-start skipped: login required.")
 
 
 def ensure_background_services_started(source):
@@ -280,6 +318,23 @@ def live_logs_view():
     <pre>{logs}</pre>
 </body>
 </html>"""
+
+@app.route("/api/autologin")
+def trigger_autologin():
+    try:
+        from auto_login import perform_auto_login
+        ok, res = perform_auto_login(notify_telegram=True)
+        if ok:
+            started = validate_and_start_scanner("API On-Demand Auto-Login")
+            return jsonify({
+                "status": "success",
+                "message": "Auto-login completed successfully. Token refreshed.",
+                "scanner_started": started,
+                "server_time": datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')
+            })
+        return jsonify({"status": "error", "message": res}), 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/login")
 def login():
