@@ -52,6 +52,27 @@
 
         <!-- HEADER & MULTI-DAY LIVE WINDOW FILTER -->
         <header class="card p-3 sm:p-5 border-blue-900/40 bg-gradient-to-r from-slate-900 via-slate-900 to-blue-950">
+            <!-- Mode Switcher Bar: Live Stream vs Backtest Archive -->
+            <div class="flex flex-wrap items-center justify-between gap-2.5 bg-slate-950 p-2 rounded-xl border border-slate-800 mb-4">
+                <div class="flex items-center gap-2">
+                    <button id="btnModeLive" onclick="setDashboardMode('live')" class="flex items-center gap-1.5 px-3 py-1.5 text-xs font-black rounded-lg transition bg-slate-800 text-slate-300 hover:text-white border border-slate-700">
+                        <span class="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span>
+                        🔴 LIVE STREAM
+                    </button>
+                    <button id="btnModeBacktest" onclick="setDashboardMode('backtest')" class="flex items-center gap-1.5 px-3 py-1.5 text-xs font-black rounded-lg transition bg-blue-600 text-white shadow ring-2 ring-blue-500/50">
+                        <span>📚</span> BACKTEST ARCHIVE (7 DAYS)
+                    </button>
+                </div>
+                <div class="flex items-center gap-2">
+                    <span id="liveStatusBadge" class="text-[11px] font-mono px-2.5 py-1 rounded-md bg-slate-900 text-slate-400 border border-slate-800">
+                        ⚪ Market Opens Monday 09:15 AM
+                    </span>
+                    <button id="btnRefreshLive" onclick="pollLiveData()" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded border border-slate-700 transition" title="Manual Refresh">
+                        🔄 Refresh
+                    </button>
+                </div>
+            </div>
+
             <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
                 <div>
                     <div class="flex flex-wrap items-center gap-2">
@@ -62,12 +83,12 @@
                         <span class="px-2 py-0.5 text-[10px] sm:text-[11px] bg-blue-500/20 text-blue-400 font-bold rounded border border-blue-500/30">Mobile &amp; PC Ready</span>
                     </div>
                     <p class="text-xs text-slate-400 mt-1">
-                        1-Click Multi-Day Selection • Offline Backtest • Deep ITM Synthetic Bets vs Hedges
+                        Live Market Streaming • 1-Click Multi-Day Selection • Deep ITM Synthetic Bets vs Hedges
                     </p>
                 </div>
 
                 <!-- 1-Click Preset Duration Buttons -->
-                <div class="flex flex-wrap items-center gap-1.5">
+                <div id="quickSelectBar" class="flex flex-wrap items-center gap-1.5">
                     <span class="text-[10px] uppercase font-bold text-slate-400 mr-1">Quick Select:</span>
                     <button onclick="setQuickDateRange('27-08-2026', '27-08-2026')" class="px-2 py-0.5 text-[10px] sm:text-[11px] bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold rounded border border-slate-700 transition">27-Aug</button>
                     <button onclick="setQuickDateRange('28-08-2026', '28-08-2026')" class="px-2 py-0.5 text-[10px] sm:text-[11px] bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold rounded border border-slate-700 transition">28-Aug</button>
@@ -83,7 +104,7 @@
             </div>
 
             <!-- Custom Filter Controls Bar -->
-            <div class="mt-4 pt-3 border-t border-slate-800/80 flex flex-wrap items-center gap-2.5 text-xs">
+            <div id="customFilterBar" class="mt-4 pt-3 border-t border-slate-800/80 flex flex-wrap items-center gap-2.5 text-xs">
                 <div>
                     <label class="text-[10px] text-slate-400 block font-bold uppercase">Underlying</label>
                     <select id="selSymbol" onchange="onSymbolChange()" class="bg-slate-900 border border-slate-700 text-xs text-white rounded px-2 py-1.5 font-semibold">
@@ -1357,9 +1378,83 @@
             });
         }
 
+        let currentMode = 'backtest';
+        let livePollTimer = null;
+
+        function setDashboardMode(mode) {
+            currentMode = mode;
+            const btnL = document.getElementById('btnModeLive');
+            const btnB = document.getElementById('btnModeBacktest');
+            const quickBar = document.getElementById('quickSelectBar');
+            const filterBar = document.getElementById('customFilterBar');
+
+            if (mode === 'live') {
+                btnL.className = 'flex items-center gap-1.5 px-3 py-1.5 text-xs font-black rounded-lg transition bg-rose-600 text-white shadow ring-2 ring-rose-500/50';
+                btnB.className = 'flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition bg-slate-800 text-slate-400 hover:text-white border border-slate-700';
+                if (quickBar) quickBar.style.display = 'none';
+                if (filterBar) filterBar.style.opacity = '0.5';
+
+                pollLiveData();
+                if (!livePollTimer) {
+                    livePollTimer = setInterval(pollLiveData, 10000);
+                }
+            } else {
+                btnB.className = 'flex items-center gap-1.5 px-3 py-1.5 text-xs font-black rounded-lg transition bg-blue-600 text-white shadow ring-2 ring-blue-500/50';
+                btnL.className = 'flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition bg-slate-800 text-slate-400 hover:text-white border border-slate-700';
+                if (quickBar) quickBar.style.display = 'flex';
+                if (filterBar) filterBar.style.opacity = '1';
+
+                if (livePollTimer) {
+                    clearInterval(livePollTimer);
+                    livePollTimer = null;
+                }
+                updateDashboard();
+            }
+        }
+
+        function pollLiveData() {
+            fetch('/api/live')
+                .then(res => res.json())
+                .then(data => {
+                    const badge = document.getElementById('liveStatusBadge');
+                    if (data.is_market_open) {
+                        badge.innerHTML = `<span class="text-emerald-400 font-bold">🟢 LIVE MARKET STREAMING</span> (${data.server_time.substring(11)})`;
+                        badge.className = "text-[11px] font-mono px-2.5 py-1 rounded-md bg-emerald-950/60 text-emerald-300 border border-emerald-800/50";
+                        
+                        if (data.banknifty && data.banknifty.ltp > 0) {
+                            document.getElementById('valBNFPrice').textContent = `₹${data.banknifty.ltp.toFixed(2)}`;
+                            const sign = data.banknifty.change >= 0 ? '+' : '';
+                            document.getElementById('valBNFChange').textContent = `${sign}${data.banknifty.change.toFixed(2)}% Live`;
+                            document.getElementById('valBNFChange').className = `text-[11px] font-mono ${data.banknifty.change >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+                        }
+                        if (data.hdfc && data.hdfc.ltp > 0) {
+                            document.getElementById('valHDFCPrice').textContent = `₹${data.hdfc.ltp.toFixed(2)}`;
+                            const sign = data.hdfc.change >= 0 ? '+' : '';
+                            document.getElementById('valHDFCChange').textContent = `${sign}${data.hdfc.change.toFixed(2)}% Live`;
+                            document.getElementById('valHDFCChange').className = `text-[11px] font-mono ${data.hdfc.change >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+                        }
+                        if (data.icici && data.icici.ltp > 0) {
+                            document.getElementById('valICICIPrice').textContent = `₹${data.icici.ltp.toFixed(2)}`;
+                            const sign = data.icici.change >= 0 ? '+' : '';
+                            document.getElementById('valICICIChange').textContent = `${sign}${data.icici.change.toFixed(2)}% Live`;
+                            document.getElementById('valICICIChange').className = `text-[11px] font-mono ${data.icici.change >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+                        }
+                    } else {
+                        badge.innerHTML = `⚪ Market Closed (Opens Mon 09:15 AM)`;
+                        badge.className = "text-[11px] font-mono px-2.5 py-1 rounded-md bg-slate-900 text-slate-400 border border-slate-800";
+                    }
+                })
+                .catch(err => {
+                    const badge = document.getElementById('liveStatusBadge');
+                    if (badge) badge.textContent = "Offline / Local Archive Mode";
+                });
+        }
+
         window.addEventListener('DOMContentLoaded', () => {
             populateDropdowns();
             updateDashboard();
+            // Automatically check live status on boot
+            pollLiveData();
         });
     </script>
 </body>

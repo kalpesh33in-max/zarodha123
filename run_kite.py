@@ -197,6 +197,52 @@ def status_view():
         "server_time": datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')
     })
 
+@app.route("/api/live")
+def live_market_data():
+    now_ist = datetime.now(IST)
+    is_weekday = now_ist.weekday() < 5
+    market_open = datetime.strptime("09:15:00", "%H:%M:%S").time()
+    market_close = datetime.strptime("15:30:00", "%H:%M:%S").time()
+    is_live = is_weekday and (market_open <= now_ist.time() <= market_close)
+
+    try:
+        from websocket_flow import get_symbol_quotes, get_ws_status
+        ws_status = get_ws_status()
+        quotes = get_symbol_quotes([
+            "NFO:BANKNIFTY26SEPFUT",
+            "NFO:HDFCBANK26SEPFUT",
+            "NFO:ICICIBANK26SEPFUT"
+        ], max_age_seconds=120)
+    except Exception:
+        ws_status = {"connected": False}
+        quotes = {}
+
+    bnf = quotes.get("NFO:BANKNIFTY26SEPFUT", {})
+    hdfc = quotes.get("NFO:HDFCBANK26SEPFUT", {})
+    icici = quotes.get("NFO:ICICIBANK26SEPFUT", {})
+
+    return jsonify({
+        "server_time": now_ist.strftime("%Y-%m-%d %H:%M:%S"),
+        "is_market_open": is_live,
+        "ws_connected": ws_status.get("connected", False),
+        "banknifty": {
+            "ltp": bnf.get("last_price", 0.0),
+            "oi": bnf.get("oi", 0),
+            "volume": bnf.get("volume", 0),
+            "change": bnf.get("change", 0.0)
+        },
+        "hdfc": {
+            "ltp": hdfc.get("last_price", 0.0),
+            "oi": hdfc.get("oi", 0),
+            "change": hdfc.get("change", 0.0)
+        },
+        "icici": {
+            "ltp": icici.get("last_price", 0.0),
+            "oi": icici.get("oi", 0),
+            "change": icici.get("change", 0.0)
+        }
+    })
+
 @app.route("/login")
 def login():
     ensure_background_services_started("HTTP /login")
