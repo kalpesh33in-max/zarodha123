@@ -2,7 +2,7 @@ import threading
 import os
 import time
 import requests
-from flask import Flask, request
+from flask import Flask, request, send_file, jsonify
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -179,11 +179,23 @@ if AUTO_START_BACKGROUND:
 # --- Flask Routes ---
 
 @app.route("/")
+@app.route("/dashboard")
 def home():
     ensure_background_services_started("HTTP /")
-    # This route is now purely for health checks and basic status
+    dashboard_file = os.path.join(app.root_path, "templates", "dashboard.html")
+    if os.path.exists(dashboard_file):
+        return send_file(dashboard_file, mimetype="text/html")
     status = "RUNNING" if (scanner_thread and scanner_thread.is_alive()) else "STOPPED"
     return f"<h3>Kite Scanner Status: {status}</h3><p>Server Time: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')}</p>"
+
+@app.route("/status")
+def status_view():
+    status = "RUNNING" if (scanner_thread and scanner_thread.is_alive()) else "STOPPED"
+    return jsonify({
+        "scanner_status": status,
+        "scanner_alive": bool(scanner_thread and scanner_thread.is_alive()),
+        "server_time": datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')
+    })
 
 @app.route("/login")
 def login():

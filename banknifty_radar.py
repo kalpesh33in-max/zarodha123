@@ -221,6 +221,9 @@ def _check_and_send_trade_trigger(composite_score, bn_ltp, bank_scores, bank_sum
             opt_sym, opt_price = _get_atm_option_details(atm_strike, "CE", kite=kite)
             price_str = f" (₹{opt_price:.1f} Price)" if opt_price > 0 else ""
 
+            dash_url = os.getenv("DASHBOARD_URL") or os.getenv("RAILWAY_STATIC_URL") or ""
+            dash_line = f"\n📊 *Dashboard*: https://{dash_url.replace('https://', '')}" if dash_url else ""
+
             trade_alert = (
                 f"🎯 *BANKNIFTY TRADE TRIGGER: BUY CE* 🎯\n"
                 f"Action      : *BUY {atm_strike} CE*{price_str}\n"
@@ -235,6 +238,7 @@ def _check_and_send_trade_trigger(composite_score, bn_ltp, bank_scores, bank_sum
                 f"• {b_line1}\n"
                 f"• {b_line2}\n"
                 f"⏰ Time     : {now.strftime('%H:%M:%S')} IST"
+                f"{dash_line}"
             )
             print(f"[BANKNIFTY RADAR] 🎯 BUY CE TRIGGER SENT for {atm_strike} CE{price_str}")
             send_telegram_message(trade_alert, chat_id=chat_id, token=token)
@@ -270,6 +274,9 @@ def _check_and_send_trade_trigger(composite_score, bn_ltp, bank_scores, bank_sum
             opt_sym, opt_price = _get_atm_option_details(atm_strike, "PE", kite=kite)
             price_str = f" (₹{opt_price:.1f} Price)" if opt_price > 0 else ""
 
+            dash_url = os.getenv("DASHBOARD_URL") or os.getenv("RAILWAY_STATIC_URL") or ""
+            dash_line = f"\n📊 *Dashboard*: https://{dash_url.replace('https://', '')}" if dash_url else ""
+
             trade_alert = (
                 f"🎯 *BANKNIFTY TRADE TRIGGER: BUY PE* 🎯\n"
                 f"Action      : *BUY {atm_strike} PE*{price_str}\n"
@@ -284,6 +291,7 @@ def _check_and_send_trade_trigger(composite_score, bn_ltp, bank_scores, bank_sum
                 f"• {b_line1}\n"
                 f"• {b_line2}\n"
                 f"⏰ Time     : {now.strftime('%H:%M:%S')} IST"
+                f"{dash_line}"
             )
             print(f"[BANKNIFTY RADAR] 🎯 BUY PE TRIGGER SENT for {atm_strike} PE{price_str}")
             send_telegram_message(trade_alert, chat_id=chat_id, token=token)

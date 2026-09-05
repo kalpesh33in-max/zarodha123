@@ -1,5 +1,11 @@
 import os
+import sys
 import time
+
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+except Exception:
+    pass
 import math
 import threading
 import requests
