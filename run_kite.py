@@ -247,17 +247,13 @@ def live_market_data():
         from websocket_flow import get_symbol_quotes, get_ws_status
         ws_status = get_ws_status()
         quotes = get_symbol_quotes([
-            "NFO:BANKNIFTY26SEPFUT",
-            "NFO:HDFCBANK26SEPFUT",
-            "NFO:ICICIBANK26SEPFUT"
+            "NFO:BANKNIFTY26SEPFUT"
         ], max_age_seconds=120)
     except Exception:
         ws_status = {"connected": False}
         quotes = {}
 
     bnf = quotes.get("NFO:BANKNIFTY26SEPFUT", {})
-    hdfc = quotes.get("NFO:HDFCBANK26SEPFUT", {})
-    icici = quotes.get("NFO:ICICIBANK26SEPFUT", {})
 
     return jsonify({
         "server_time": now_ist.strftime("%Y-%m-%d %H:%M:%S"),
@@ -268,16 +264,6 @@ def live_market_data():
             "oi": bnf.get("oi", 0),
             "volume": bnf.get("volume", 0),
             "change": bnf.get("change", 0.0)
-        },
-        "hdfc": {
-            "ltp": hdfc.get("last_price", 0.0),
-            "oi": hdfc.get("oi", 0),
-            "change": hdfc.get("change", 0.0)
-        },
-        "icici": {
-            "ltp": icici.get("last_price", 0.0),
-            "oi": icici.get("oi", 0),
-            "change": icici.get("change", 0.0)
         }
     })
 
