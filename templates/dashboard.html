@@ -292,6 +292,119 @@
             </div>
         </div>
 
+        <!-- ATM & +-1 STRIKE OPTION BEHAVIOR RADAR (EXTRA EDGE) -->
+        <div class="card p-3 sm:p-5 border-emerald-900/40 bg-gradient-to-br from-slate-950 via-slate-900 to-emerald-950/20 shadow-2xl space-y-3 sm:space-y-4">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-emerald-900/30 pb-2.5">
+                <div>
+                    <div class="flex items-center gap-2">
+                        <span class="text-lg sm:text-xl">🎯</span>
+                        <h2 class="text-xs sm:text-sm md:text-base font-black text-white tracking-wide uppercase">
+                            ATM &amp; ±1 Strike Core Option Flow Radar
+                        </h2>
+                        <span class="px-2 py-0.5 text-[10px] bg-emerald-500/20 text-emerald-300 font-bold rounded border border-emerald-500/30">
+                            Extra Edge Execution Filter
+                        </span>
+                    </div>
+                    <p class="text-[11px] text-slate-400">
+                        Live tracks the 3 epicenter strikes (ATM - 100, ATM, ATM + 100). Verifies Call vs Put buyer dominance and option premium expansion.
+                    </p>
+                </div>
+                <div class="flex items-center gap-2">
+                    <span id="badgeAtmClusterBias" class="badge-neutral px-3 py-1 rounded text-xs font-black uppercase">
+                        Evaluating Cluster...
+                    </span>
+                </div>
+            </div>
+
+            <!-- 3 Core Strikes Interactive Grid -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <!-- Strike 1: ATM - 100 (ITM Call / OTM Put) -->
+                <div id="cardAtmMinus" class="bg-slate-900/90 p-3 rounded-xl border border-slate-800 space-y-2">
+                    <div class="flex items-center justify-between border-b border-slate-800/80 pb-1.5">
+                        <span class="text-xs font-black text-slate-300" id="lblAtmMinusStrike">ATM - 100</span>
+                        <span id="badgeAtmMinusSentiment" class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">Neutral</span>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 text-xs">
+                        <div class="p-2 rounded bg-slate-950/60 border border-slate-800">
+                            <div class="text-[10px] text-rose-400 font-bold flex justify-between">
+                                <span>📞 CALL (CE)</span>
+                                <span id="valAtmMinusCePrice" class="font-mono text-white">₹0.0</span>
+                            </div>
+                            <div class="text-[11px] font-mono mt-1 text-slate-300" id="valAtmMinusCeFlow">B: 0 | W: 0</div>
+                        </div>
+                        <div class="p-2 rounded bg-slate-950/60 border border-slate-800">
+                            <div class="text-[10px] text-emerald-400 font-bold flex justify-between">
+                                <span>📉 PUT (PE)</span>
+                                <span id="valAtmMinusPePrice" class="font-mono text-white">₹0.0</span>
+                            </div>
+                            <div class="text-[11px] font-mono mt-1 text-slate-300" id="valAtmMinusPeFlow">B: 0 | W: 0</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Strike 2: ATM (Spot Center) -->
+                <div id="cardAtmSpot" class="bg-slate-900/90 p-3 rounded-xl border border-blue-600/40 shadow-md space-y-2 ring-1 ring-blue-500/20">
+                    <div class="flex items-center justify-between border-b border-slate-800/80 pb-1.5">
+                        <span class="text-xs font-black text-blue-300 flex items-center gap-1" id="lblAtmSpotStrike">
+                            <span>⭐</span> ATM SPOT
+                        </span>
+                        <span id="badgeAtmSpotSentiment" class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">Neutral</span>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 text-xs">
+                        <div class="p-2 rounded bg-slate-950/60 border border-slate-800">
+                            <div class="text-[10px] text-rose-400 font-bold flex justify-between">
+                                <span>📞 CALL (CE)</span>
+                                <span id="valAtmSpotCePrice" class="font-mono text-white">₹0.0</span>
+                            </div>
+                            <div class="text-[11px] font-mono mt-1 text-slate-300" id="valAtmSpotCeFlow">B: 0 | W: 0</div>
+                        </div>
+                        <div class="p-2 rounded bg-slate-950/60 border border-slate-800">
+                            <div class="text-[10px] text-emerald-400 font-bold flex justify-between">
+                                <span>📉 PUT (PE)</span>
+                                <span id="valAtmSpotPePrice" class="font-mono text-white">₹0.0</span>
+                            </div>
+                            <div class="text-[11px] font-mono mt-1 text-slate-300" id="valAtmSpotPeFlow">B: 0 | W: 0</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Strike 3: ATM + 100 (OTM Call / ITM Put) -->
+                <div id="cardAtmPlus" class="bg-slate-900/90 p-3 rounded-xl border border-slate-800 space-y-2">
+                    <div class="flex items-center justify-between border-b border-slate-800/80 pb-1.5">
+                        <span class="text-xs font-black text-slate-300" id="lblAtmPlusStrike">ATM + 100</span>
+                        <span id="badgeAtmPlusSentiment" class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">Neutral</span>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 text-xs">
+                        <div class="p-2 rounded bg-slate-950/60 border border-slate-800">
+                            <div class="text-[10px] text-rose-400 font-bold flex justify-between">
+                                <span>📞 CALL (CE)</span>
+                                <span id="valAtmPlusCePrice" class="font-mono text-white">₹0.0</span>
+                            </div>
+                            <div class="text-[11px] font-mono mt-1 text-slate-300" id="valAtmPlusCeFlow">B: 0 | W: 0</div>
+                        </div>
+                        <div class="p-2 rounded bg-slate-950/60 border border-slate-800">
+                            <div class="text-[10px] text-emerald-400 font-bold flex justify-between">
+                                <span>📉 PUT (PE)</span>
+                                <span id="valAtmPlusPePrice" class="font-mono text-white">₹0.0</span>
+                            </div>
+                            <div class="text-[11px] font-mono mt-1 text-slate-300" id="valAtmPlusPeFlow">B: 0 | W: 0</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ATM Cluster Decision Banner -->
+            <div id="boxAtmClusterSummary" class="p-2.5 sm:p-3 rounded-lg bg-slate-950/70 border border-slate-800 text-xs text-slate-300 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div id="txtAtmClusterInsight">
+                    Evaluating ATM &amp; ±1 option buyer vs writer volume...
+                </div>
+                <div class="flex items-center gap-2 font-mono text-[11px]">
+                    <span class="text-slate-400">Cluster Flow:</span>
+                    <span id="valAtmClusterRatio" class="font-bold text-white">50% Bull / 50% Bear</span>
+                </div>
+            </div>
+        </div>
+
         <!-- SMART MONEY DEEP ITM / FAR OTM FLOW RADAR -->
         <div class="card p-3 sm:p-5 border-purple-900/50 bg-gradient-to-br from-slate-950 via-slate-900 to-purple-950/30 space-y-3 sm:space-y-4">
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-purple-900/30 pb-2.5">
@@ -976,17 +1089,140 @@
                 }
             }
 
-            // Institutional Direction Confluence (Price vs VWAP + OI Wall Clearance + Time Trap)
+            // Calculate ATM & +-1 Strike Option Cluster (The Extra Edge Engine)
+            const atmStrike = Math.round(engBNF.endPrice / 100) * 100;
+            const sMinus = String(atmStrike - 100);
+            const sAtm = String(atmStrike);
+            const sPlus = String(atmStrike + 100);
+
+            const getStkData = (sKey) => {
+                const row = strikeWindowChanges[sKey] || { ce_b:0, ce_w:0, pe_b:0, pe_w:0, ce_price:0, pe_price:0 };
+                return row;
+            };
+
+            const dMinus = getStkData(sMinus);
+            const dAtm = getStkData(sAtm);
+            const dPlus = getStkData(sPlus);
+
+            // Populate Strike 1 (ATM - 100)
+            const elLblMinus = document.getElementById('lblAtmMinusStrike');
+            if (elLblMinus) elLblMinus.textContent = `${sMinus} (ATM - 100)`;
+            const elMinusCeP = document.getElementById('valAtmMinusCePrice');
+            if (elMinusCeP) elMinusCeP.textContent = `₹${(dMinus.ce_price || 0).toFixed(1)}`;
+            const elMinusPeP = document.getElementById('valAtmMinusPePrice');
+            if (elMinusPeP) elMinusPeP.textContent = `₹${(dMinus.pe_price || 0).toFixed(1)}`;
+            const elMinusCeFlow = document.getElementById('valAtmMinusCeFlow');
+            if (elMinusCeFlow) elMinusCeFlow.textContent = `B:${dMinus.ce_b.toLocaleString()} | W:${dMinus.ce_w.toLocaleString()}`;
+            const elMinusPeFlow = document.getElementById('valAtmMinusPeFlow');
+            if (elMinusPeFlow) elMinusPeFlow.textContent = `B:${dMinus.pe_b.toLocaleString()} | W:${dMinus.pe_w.toLocaleString()}`;
+            const elMinusSent = document.getElementById('badgeAtmMinusSentiment');
+            if (elMinusSent) {
+                const mBull = dMinus.ce_b + dMinus.pe_w;
+                const mBear = dMinus.pe_b + dMinus.ce_w;
+                elMinusSent.textContent = mBull > mBear ? 'Bullish Lead' : mBear > mBull ? 'Bearish Lead' : 'Balanced';
+                elMinusSent.className = `text-[10px] font-bold px-1.5 py-0.5 rounded ${mBull > mBear ? 'badge-bullish' : mBear > mBull ? 'badge-bearish' : 'bg-slate-800 text-slate-400'}`;
+            }
+
+            // Populate Strike 2 (ATM Spot)
+            const elLblAtm = document.getElementById('lblAtmSpotStrike');
+            if (elLblAtm) elLblAtm.innerHTML = `<span>⭐</span> ${sAtm} (ATM SPOT)`;
+            const elAtmCeP = document.getElementById('valAtmSpotCePrice');
+            if (elAtmCeP) elAtmCeP.textContent = `₹${(dAtm.ce_price || 0).toFixed(1)}`;
+            const elAtmPeP = document.getElementById('valAtmSpotPePrice');
+            if (elAtmPeP) elAtmPeP.textContent = `₹${(dAtm.pe_price || 0).toFixed(1)}`;
+            const elAtmCeFlow = document.getElementById('valAtmSpotCeFlow');
+            if (elAtmCeFlow) elAtmCeFlow.textContent = `B:${dAtm.ce_b.toLocaleString()} | W:${dAtm.ce_w.toLocaleString()}`;
+            const elAtmPeFlow = document.getElementById('valAtmSpotPeFlow');
+            if (elAtmPeFlow) elAtmPeFlow.textContent = `B:${dAtm.pe_b.toLocaleString()} | W:${dAtm.pe_w.toLocaleString()}`;
+            const elAtmSent = document.getElementById('badgeAtmSpotSentiment');
+            if (elAtmSent) {
+                const aBull = dAtm.ce_b + dAtm.pe_w;
+                const aBear = dAtm.pe_b + dAtm.ce_w;
+                elAtmSent.textContent = aBull > aBear ? 'Call Buyers Dominant' : aBear > aBull ? 'Call Writers Dominant' : 'Balanced';
+                elAtmSent.className = `text-[10px] font-bold px-1.5 py-0.5 rounded ${aBull > aBear ? 'badge-bullish' : aBear > aBull ? 'badge-bearish' : 'bg-slate-800 text-slate-400'}`;
+            }
+
+            // Populate Strike 3 (ATM + 100)
+            const elLblPlus = document.getElementById('lblAtmPlusStrike');
+            if (elLblPlus) elLblPlus.textContent = `${sPlus} (ATM + 100)`;
+            const elPlusCeP = document.getElementById('valAtmPlusCePrice');
+            if (elPlusCeP) elPlusCeP.textContent = `₹${(dPlus.ce_price || 0).toFixed(1)}`;
+            const elPlusPeP = document.getElementById('valAtmPlusPePrice');
+            if (elPlusPeP) elPlusPeP.textContent = `₹${(dPlus.pe_price || 0).toFixed(1)}`;
+            const elPlusCeFlow = document.getElementById('valAtmPlusCeFlow');
+            if (elPlusCeFlow) elPlusCeFlow.textContent = `B:${dPlus.ce_b.toLocaleString()} | W:${dPlus.ce_w.toLocaleString()}`;
+            const elPlusPeFlow = document.getElementById('valAtmPlusPeFlow');
+            if (elPlusPeFlow) elPlusPeFlow.textContent = `B:${dPlus.pe_b.toLocaleString()} | W:${dPlus.pe_w.toLocaleString()}`;
+            const elPlusSent = document.getElementById('badgeAtmPlusSentiment');
+            if (elPlusSent) {
+                const pBull = dPlus.ce_b + dPlus.pe_w;
+                const pBear = dPlus.pe_b + dPlus.ce_w;
+                elPlusSent.textContent = pBull > pBear ? 'Bullish Flow' : pBear > pBull ? 'Bearish Flow' : 'Balanced';
+                elPlusSent.className = `text-[10px] font-bold px-1.5 py-0.5 rounded ${pBull > pBear ? 'badge-bullish' : pBear > pBull ? 'badge-bearish' : 'bg-slate-800 text-slate-400'}`;
+            }
+
+            // Total ATM Cluster Flow (3 strikes combined)
+            const totAtmCeB = dMinus.ce_b + dAtm.ce_b + dPlus.ce_b;
+            const totAtmCeW = dMinus.ce_w + dAtm.ce_w + dPlus.ce_w;
+            const totAtmPeB = dMinus.pe_b + dAtm.pe_b + dPlus.pe_b;
+            const totAtmPeW = dMinus.pe_w + dAtm.pe_w + dPlus.pe_w;
+
+            const totAtmBull = totAtmCeB + totAtmPeW; // Calls bought + Puts sold
+            const totAtmBear = totAtmPeB + totAtmCeW; // Puts bought + Calls sold
+            const clusterTotal = totAtmBull + totAtmBear + 1;
+            const bullPct = Math.round((totAtmBull / clusterTotal) * 100);
+            const bearPct = 100 - bullPct;
+
+            const elClusterRatio = document.getElementById('valAtmClusterRatio');
+            if (elClusterRatio) {
+                elClusterRatio.textContent = `${bullPct}% Bull / ${bearPct}% Bear`;
+                elClusterRatio.className = `font-bold font-mono ${bullPct > 55 ? 'text-emerald-400' : bearPct > 55 ? 'text-rose-400' : 'text-slate-300'}`;
+            }
+
+            const elClusterBiasBadge = document.getElementById('badgeAtmClusterBias');
+            const elClusterInsight = document.getElementById('txtAtmClusterInsight');
+            const isAtmBullDominant = totAtmBull > totAtmBear * 1.15;
+            const isAtmBearDominant = totAtmBear > totAtmBull * 1.15;
+
+            if (isAtmBullDominant) {
+                if (elClusterBiasBadge) {
+                    elClusterBiasBadge.textContent = "🟢 CALL BUYERS & PUT WRITERS IN CONTROL";
+                    elClusterBiasBadge.className = "badge-bullish px-3 py-1 rounded text-xs font-black uppercase";
+                }
+                if (elClusterInsight) {
+                    elClusterInsight.innerHTML = `ATM cluster shows <b>${totAtmBull.toLocaleString()} Bull lots</b> vs ${totAtmBear.toLocaleString()} Bear lots. Call buyers are aggressively bidding premiums. <b>PE Buying is STRICTLY BLOCKED</b>.`;
+                }
+            } else if (isAtmBearDominant) {
+                if (elClusterBiasBadge) {
+                    elClusterBiasBadge.textContent = "🔴 CALL WRITERS & PUT BUYERS IN CONTROL";
+                    elClusterBiasBadge.className = "badge-bearish px-3 py-1 rounded text-xs font-black uppercase";
+                }
+                if (elClusterInsight) {
+                    elClusterInsight.innerHTML = `ATM cluster shows <b>${totAtmBear.toLocaleString()} Bear lots</b> vs ${totAtmBull.toLocaleString()} Bull lots. Heavy Call writing capping upside. <b>CE Buying is STRICTLY BLOCKED</b>.`;
+                }
+            } else {
+                if (elClusterBiasBadge) {
+                    elClusterBiasBadge.textContent = "⚪ TWO-SIDED CHOP / BALANCED FLOW";
+                    elClusterBiasBadge.className = "badge-neutral px-3 py-1 rounded text-xs font-black uppercase";
+                }
+                if (elClusterInsight) {
+                    elClusterInsight.innerHTML = `ATM cluster is evenly balanced (${bullPct}% vs ${bearPct}%). Neither bulls nor bears have decisive control. High risk of premium decay.`;
+                }
+            }
+
+            // Institutional Direction Confluence (Price vs VWAP + OI Wall Clearance + ATM Cluster + Time Trap)
             const isAboveVWAP = vwapDiff > 10;
             const isBelowVWAP = vwapDiff < -10;
-            const isBullishOI = engBNF.netOIBias > 15000 || pcr > 1.1;
-            const isBearishOI = engBNF.netOIBias < -15000 || pcr < 0.9;
-            const hasCallWallClearance = distToCallWall >= 55;
-            const hasPutWallClearance = distToPutWall >= 55;
+            const isBullishOI = engBNF.netOIBias > 10000 || pcr > 1.08;
+            const isBearishOI = engBNF.netOIBias < -10000 || pcr < 0.92;
+            const hasCallWallClearance = distToCallWall >= 50;
+            const hasPutWallClearance = distToPutWall >= 50;
 
-            const isBullish = isAboveVWAP && isBullishOI && hasCallWallClearance && !isThetaTrap;
-            const isBearish = isBelowVWAP && isBearishOI && hasPutWallClearance && !isThetaTrap;
-            const atmStrike = Math.round(engBNF.endPrice / 100) * 100;
+            // Strict Confluence Gate:
+            // BUY CE requires: Price > VWAP + Bullish OI + Call Wall Clearance + ATM Bull Dominance (AND NOT in Theta Trap)
+            const isBullish = isAboveVWAP && isBullishOI && hasCallWallClearance && isAtmBullDominant && !isThetaTrap;
+            // BUY PE requires: Price < VWAP + Bearish OI + Put Wall Clearance + ATM Bear Dominance (AND NOT in Theta Trap)
+            const isBearish = isBelowVWAP && isBearishOI && hasPutWallClearance && isAtmBearDominant && !isThetaTrap;
 
             const elClearance = document.getElementById('valWallClearance');
             if (elClearance) {
