@@ -805,6 +805,58 @@
                 elVwap.className = `font-bold font-mono ${vwapDiff >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
             }
 
+            // 3. STRIKE DATA FOR FAR ITM RADAR & LADDER
+            const lastDay = RAW_DATA[focusSym][selectedDates[selectedDates.length - 1]];
+            const strikeList = lastDay.strikes;
+            const strikeWindowChanges = {};
+            strikeList.forEach(s => {
+                strikeWindowChanges[s] = {
+                    ce_chg: 0, pe_chg: 0,
+                    ce_b: 0, ce_w: 0, ce_sc: 0, ce_unw: 0,
+                    pe_b: 0, pe_w: 0, pe_sc: 0, pe_unw: 0,
+                    ce_price: 0, pe_price: 0,
+                    ce_peak_time: '', ce_peak_lots: 0,
+                    pe_peak_time: '', pe_peak_lots: 0
+                };
+            });
+
+            combinedTimeline.forEach(t => {
+                if (t.stk) {
+                    strikeList.forEach(s => {
+                        if (t.stk[s]) {
+                            const row = t.stk[s];
+                            strikeWindowChanges[s].ce_chg += row[0];
+                            strikeWindowChanges[s].pe_chg += row[1];
+                            strikeWindowChanges[s].ce_b += row[2];
+                            strikeWindowChanges[s].ce_w += row[3];
+                            strikeWindowChanges[s].ce_sc += row[4];
+                            strikeWindowChanges[s].ce_unw += row[5];
+                            strikeWindowChanges[s].pe_b += row[6];
+                            strikeWindowChanges[s].pe_w += row[7];
+                            strikeWindowChanges[s].pe_sc += row[8];
+                            strikeWindowChanges[s].pe_unw += row[9];
+
+                            const cp = row[10] || 0;
+                            const pp = row[11] || 0;
+                            if (cp > 0) strikeWindowChanges[s].ce_price = cp;
+                            if (pp > 0) strikeWindowChanges[s].pe_price = pp;
+
+                            const ceLotsNow = row[2] + row[3] + row[4] + row[5];
+                            if (ceLotsNow > strikeWindowChanges[s].ce_peak_lots) {
+                                strikeWindowChanges[s].ce_peak_lots = ceLotsNow;
+                                strikeWindowChanges[s].ce_peak_time = isSingleDay ? t.time : `${t.date.substring(0,5)} ${t.time}`;
+                            }
+
+                            const peLotsNow = row[6] + row[7] + row[8] + row[9];
+                            if (peLotsNow > strikeWindowChanges[s].pe_peak_lots) {
+                                strikeWindowChanges[s].pe_peak_lots = peLotsNow;
+                                strikeWindowChanges[s].pe_peak_time = isSingleDay ? t.time : `${t.date.substring(0,5)} ${t.time}`;
+                            }
+                        }
+                    });
+                }
+            });
+
             // Compute Strike OI Walls (Ceiling and Floor)
             let maxCeStrike = '58000', maxCeOi = -Infinity;
             let maxPeStrike = '57500', maxPeOi = -Infinity;
@@ -1108,58 +1160,7 @@
                 peDomBadge.className = "px-2 py-0.5 text-[10px] font-extrabold rounded bg-slate-700 text-slate-300";
             }
 
-            // 3. STRIKE DATA FOR FAR ITM RADAR & LADDER
-            const lastDay = RAW_DATA[focusSym][selectedDates[selectedDates.length - 1]];
-            const strikeList = lastDay.strikes;
-            const strikeWindowChanges = {};
-            strikeList.forEach(s => {
-                strikeWindowChanges[s] = {
-                    ce_chg: 0, pe_chg: 0,
-                    ce_b: 0, ce_w: 0, ce_sc: 0, ce_unw: 0,
-                    pe_b: 0, pe_w: 0, pe_sc: 0, pe_unw: 0,
-                    ce_price: 0, pe_price: 0,
-                    ce_peak_time: '', ce_peak_lots: 0,
-                    pe_peak_time: '', pe_peak_lots: 0
-                };
-            });
-
-            combinedTimeline.forEach(t => {
-                if (t.stk) {
-                    strikeList.forEach(s => {
-                        if (t.stk[s]) {
-                            const row = t.stk[s];
-                            strikeWindowChanges[s].ce_chg += row[0];
-                            strikeWindowChanges[s].pe_chg += row[1];
-                            strikeWindowChanges[s].ce_b += row[2];
-                            strikeWindowChanges[s].ce_w += row[3];
-                            strikeWindowChanges[s].ce_sc += row[4];
-                            strikeWindowChanges[s].ce_unw += row[5];
-                            strikeWindowChanges[s].pe_b += row[6];
-                            strikeWindowChanges[s].pe_w += row[7];
-                            strikeWindowChanges[s].pe_sc += row[8];
-                            strikeWindowChanges[s].pe_unw += row[9];
-
-                            const cp = row[10] || 0;
-                            const pp = row[11] || 0;
-                            if (cp > 0) strikeWindowChanges[s].ce_price = cp;
-                            if (pp > 0) strikeWindowChanges[s].pe_price = pp;
-
-                            const ceLotsNow = row[2] + row[3] + row[4] + row[5];
-                            if (ceLotsNow > strikeWindowChanges[s].ce_peak_lots) {
-                                strikeWindowChanges[s].ce_peak_lots = ceLotsNow;
-                                strikeWindowChanges[s].ce_peak_time = isSingleDay ? t.time : `${t.date.substring(0,5)} ${t.time}`;
-                            }
-
-                            const peLotsNow = row[6] + row[7] + row[8] + row[9];
-                            if (peLotsNow > strikeWindowChanges[s].pe_peak_lots) {
-                                strikeWindowChanges[s].pe_peak_lots = peLotsNow;
-                                strikeWindowChanges[s].pe_peak_time = isSingleDay ? t.time : `${t.date.substring(0,5)} ${t.time}`;
-                            }
-                        }
-                    });
-                }
-            });
-
+            // 3. FAR ITM RADAR & LADDER (using pre-computed strikeWindowChanges)
             let farDistThreshold = 250; // BankNifty Deep Strikes (300+ pts)
 
             let farItmCeBuyLots = 0, farItmCeWriteLots = 0, farItmCeSCLots = 0, farItmCeUnwLots = 0;
