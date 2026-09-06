@@ -195,6 +195,10 @@
                             <span id="valBNFRange" class="font-bold font-mono text-slate-200">L: 0 | H: 0</span>
                         </div>
                         <div class="flex justify-between">
+                            <span class="text-slate-400">⚡ Dynamic VWAP:</span>
+                            <span id="valBNFVWAP" class="font-bold font-mono text-amber-300">₹0.00 (+0)</span>
+                        </div>
+                        <div class="flex justify-between">
                             <span class="text-slate-400">Momentum State:</span>
                             <span id="valBNFVelocity" class="font-bold font-mono text-blue-400">0 pts swing</span>
                         </div>
@@ -215,12 +219,16 @@
                     </div>
                     <div class="mt-4 pt-2.5 border-t border-slate-800 text-[11px] text-slate-300 space-y-1.5">
                         <div class="flex justify-between">
-                            <span class="text-slate-400">Total CE vs PE Flow:</span>
-                            <span id="valBNFOIBreakdown" class="font-bold font-mono">0C / 0P</span>
+                            <span class="text-slate-400">🧱 Call Wall (Resist):</span>
+                            <span id="valBNFCallWall" class="font-bold font-mono text-rose-400">--</span>
                         </div>
                         <div class="flex justify-between">
-                            <span class="text-slate-400">OI Bias State:</span>
-                            <span id="valBNFOIBias" class="font-bold font-mono text-emerald-400">Balanced</span>
+                            <span class="text-slate-400">🛡️ Put Wall (Floor):</span>
+                            <span id="valBNFPutWall" class="font-bold font-mono text-emerald-400">--</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-slate-400">Flow Breakdown:</span>
+                            <span id="valBNFOIBreakdown" class="font-bold font-mono">0C / 0P</span>
                         </div>
                     </div>
                 </div>
@@ -258,7 +266,11 @@
                             </span>
                             <span id="badgeBNFConfidence" class="px-2 py-0.5 rounded text-[10px] font-black uppercase bg-slate-800 text-slate-300">CONFIDENCE: --</span>
                         </div>
-                        <div class="mt-2 text-xl sm:text-2xl font-black font-mono text-emerald-400 tracking-tight" id="valRecommendedTrade">NO TRADE</div>
+                        <div class="mt-1.5 flex items-center justify-between">
+                            <span id="badgeTimeRegime" class="px-2 py-0.5 rounded text-[9px] font-black uppercase bg-blue-950 text-blue-300 border border-blue-700/50">PRIME WINDOW</span>
+                            <span id="valWallClearance" class="text-[10px] font-mono text-slate-400 font-bold">Clearance: --</span>
+                        </div>
+                        <div class="mt-1 text-xl sm:text-2xl font-black font-mono text-emerald-400 tracking-tight" id="valRecommendedTrade">NO TRADE</div>
                         <div class="text-xs font-mono text-slate-400 mt-0.5" id="valTradeAction">Wait for Confluence</div>
                     </div>
                     <div class="mt-4 pt-2.5 border-t border-slate-800 text-[11px] text-slate-300 space-y-1.5">
@@ -771,13 +783,78 @@
             if (!engBNF) return;
 
             let highPrice = -Infinity, lowPrice = Infinity;
+            let cumVol = 0, cumPriceVol = 0;
             combinedTimeline.forEach(t => {
                 if (t.price > highPrice) highPrice = t.price;
                 if (t.price < lowPrice) lowPrice = t.price;
+                const v = t.tot_lots > 0 ? t.tot_lots : 100;
+                cumVol += v;
+                cumPriceVol += (t.price * v);
             });
             if (highPrice === -Infinity) highPrice = engBNF.endPrice;
             if (lowPrice === Infinity) lowPrice = engBNF.endPrice;
             const dayRangePts = Math.round(highPrice - lowPrice);
+
+            // Dynamic VWAP calculation
+            const vwap = cumVol > 0 ? (cumPriceVol / cumVol) : engBNF.endPrice;
+            const vwapDiff = engBNF.endPrice - vwap;
+            const vwapSign = vwapDiff >= 0 ? '+' : '';
+            const elVwap = document.getElementById('valBNFVWAP');
+            if (elVwap) {
+                elVwap.textContent = `₹${vwap.toFixed(1)} (${vwapSign}${vwapDiff.toFixed(1)})`;
+                elVwap.className = `font-bold font-mono ${vwapDiff >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+            }
+
+            // Compute Strike OI Walls (Ceiling and Floor)
+            let maxCeStrike = '58000', maxCeOi = -Infinity;
+            let maxPeStrike = '57500', maxPeOi = -Infinity;
+            if (lastDay && lastDay.base_oi && strikeList) {
+                strikeList.forEach(s => {
+                    const baseCe = (lastDay.base_oi[s]) ? lastDay.base_oi[s].ce : 0;
+                    const basePe = (lastDay.base_oi[s]) ? lastDay.base_oi[s].pe : 0;
+                    const wCe = strikeWindowChanges[s] ? strikeWindowChanges[s].ce_chg : 0;
+                    const wPe = strikeWindowChanges[s] ? strikeWindowChanges[s].pe_chg : 0;
+                    const totCe = baseCe + wCe;
+                    const totPe = basePe + wPe;
+                    if (totCe > maxCeOi) { maxCeOi = totCe; maxCeStrike = s; }
+                    if (totPe > maxPeOi) { maxPeOi = totPe; maxPeStrike = s; }
+                });
+            }
+            const callWallP = parseFloat(maxCeStrike) || (engBNF.endPrice + 200);
+            const putWallP = parseFloat(maxPeStrike) || (engBNF.endPrice - 200);
+            const distToCallWall = Math.round(callWallP - engBNF.endPrice);
+            const distToPutWall = Math.round(engBNF.endPrice - putWallP);
+
+            const elCallWall = document.getElementById('valBNFCallWall');
+            if (elCallWall) elCallWall.textContent = `${maxCeStrike} CE (${distToCallWall >= 0 ? '+' : ''}${distToCallWall} pts)`;
+            const elPutWall = document.getElementById('valBNFPutWall');
+            if (elPutWall) elPutWall.textContent = `${maxPeStrike} PE (${distToPutWall >= 0 ? '+' : ''}${distToPutWall} pts)`;
+
+            // Time-of-Day Trap Filter
+            const curTime = combinedTimeline[combinedTimeline.length - 1].time;
+            let isThetaTrap = false;
+            let timeBadgeText = '🟢 PRIME MOMENTUM (09:15-10:45)';
+            let timeBadgeClass = 'px-2 py-0.5 rounded text-[9px] font-black uppercase bg-emerald-950 text-emerald-300 border border-emerald-700/50';
+
+            if (curTime >= '11:30' && curTime <= '13:15') {
+                isThetaTrap = true;
+                timeBadgeText = '⚠️ THETA TRAP (11:30-13:15)';
+                timeBadgeClass = 'px-2 py-0.5 rounded text-[9px] font-black uppercase bg-rose-950 text-rose-300 border border-rose-700/50 animate-pulse';
+            } else if (curTime > '10:45' && curTime < '11:30') {
+                timeBadgeText = '🟡 MID-DAY (10:45-11:30)';
+                timeBadgeClass = 'px-2 py-0.5 rounded text-[9px] font-black uppercase bg-amber-950 text-amber-300 border border-amber-700/50';
+            } else if (curTime > '13:15' && curTime < '15:15') {
+                timeBadgeText = '🔥 AFTERNOON BURST (13:15-15:15)';
+                timeBadgeClass = 'px-2 py-0.5 rounded text-[9px] font-black uppercase bg-purple-950 text-purple-300 border border-purple-700/50';
+            } else if (curTime >= '15:15') {
+                timeBadgeText = '⚪ SQUARE-OFF (15:15+)';
+                timeBadgeClass = 'px-2 py-0.5 rounded text-[9px] font-black uppercase bg-slate-800 text-slate-400 border border-slate-700';
+            }
+            const elTimeBadge = document.getElementById('badgeTimeRegime');
+            if (elTimeBadge) {
+                elTimeBadge.textContent = timeBadgeText;
+                elTimeBadge.className = timeBadgeClass;
+            }
 
             // Card 1: Price & Momentum
             const chgPts = engBNF.chgPts;
@@ -847,10 +924,24 @@
                 }
             }
 
-            // Direction Confluence
-            const isBullish = engBNF.bias === 'BULLISH' || (chgPts > 40 && pcr > 1.05);
-            const isBearish = engBNF.bias === 'BEARISH' || (chgPts < -40 && pcr < 0.95);
+            // Institutional Direction Confluence (Price vs VWAP + OI Wall Clearance + Time Trap)
+            const isAboveVWAP = vwapDiff > 10;
+            const isBelowVWAP = vwapDiff < -10;
+            const isBullishOI = engBNF.netOIBias > 15000 || pcr > 1.1;
+            const isBearishOI = engBNF.netOIBias < -15000 || pcr < 0.9;
+            const hasCallWallClearance = distToCallWall >= 55;
+            const hasPutWallClearance = distToPutWall >= 55;
+
+            const isBullish = isAboveVWAP && isBullishOI && hasCallWallClearance && !isThetaTrap;
+            const isBearish = isBelowVWAP && isBearishOI && hasPutWallClearance && !isThetaTrap;
             const atmStrike = Math.round(engBNF.endPrice / 100) * 100;
+
+            const elClearance = document.getElementById('valWallClearance');
+            if (elClearance) {
+                if (isAboveVWAP) elClearance.textContent = `Clearance: ${distToCallWall} pts to Res`;
+                else if (isBelowVWAP) elClearance.textContent = `Clearance: ${distToPutWall} pts to Supp`;
+                else elClearance.textContent = `At VWAP (Fair Value)`;
+            }
 
             const masterBadge = document.getElementById('badgeMasterVerdict');
             const expBox = document.getElementById('boxMasterExplanation');
