@@ -246,4 +246,26 @@ class InstitutionalSignalEngine:
                         send_signal_telegram(sl_msg)
                         st["exit_sent"] = True
 
+                # 3. Session End Square-off
+                elif cur_t >= sess["end"]:
+                    tr["outcome"] = "SESSION_END"
+                    if not st["exit_sent"]:
+                        pnl_sign = "+" if cur_pnl >= 0 else ""
+                        opt_res = f"{pnl_sign}{cur_pnl * 0.5:.1f} pts" if sym == "BANKNIFTY" else f"{pnl_sign}{cur_pnl:.1f} pts"
+                        end_msg = (
+                            f"🏁 *SESSION CLOSED — POSITION SQUARED OFF* 🏁\n"
+                            f"🏷 {tag}\n\n"
+                            f"Instrument  : *{sym}*\n"
+                            f"Session     : *{sess['name']}*\n"
+                            f"Trade       : *BUY {tr['strike']}*\n"
+                            f"Exit Price  : *₹{cur_p:.1f}* (Market Close)\n"
+                            f"Result      : *{pnl_sign}{cur_pnl:.1f} PTS FUTURE ({opt_res} OPTION)*\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"⚖️ Status    : *Session Closed at {cur_t} IST*\n"
+                            f"🔒 Action    : *Mandatory Intraday Square-off. Capital Preserved.*\n"
+                            f"⏰ Time      : *{cur_t} IST*"
+                        )
+                        send_signal_telegram(end_msg)
+                        st["exit_sent"] = True
+
 signal_engine = InstitutionalSignalEngine()
