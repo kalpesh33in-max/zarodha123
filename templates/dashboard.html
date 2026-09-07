@@ -615,6 +615,9 @@
         let priceChart = null;
         let ladderChart = null;
         let ladderMode = 'change';
+        let currentInstrument = 'BANKNIFTY';
+        let currentMode = 'backtest';
+        let livePollTimer = null;
 
         function openFarItmModal() {
             document.getElementById('modalFarItm').classList.remove('hidden');
@@ -639,8 +642,6 @@
             }
             updateDashboard();
         }
-
-        let currentInstrument = 'BANKNIFTY';
 
         function parseDateString(dStr) {
             if (!dStr) return new Date(0);
@@ -685,6 +686,7 @@
             renderQuickSelectBar();
             populateDropdowns();
             updateDashboard();
+            pollLiveData();
         }
 
         function renderQuickSelectBar() {
@@ -722,15 +724,16 @@
 
             const firstDate = allDates[0];
             const lastDate = allDates[allDates.length - 1];
-            const allBtnLabel = sym === 'CRUDEOILM' ? `🚀 All ${allDates.length} Days` : `🚀 All ${allDates.length} Days`;
-            html += `<button onclick="setQuickDateRange('${firstDate}', '${lastDate}')" class="px-2.5 py-0.5 text-[10px] sm:text-[11px] bg-blue-600 hover:bg-blue-500 text-white font-extrabold rounded shadow transition">${allBtnLabel}</button>`;
+            html += `<button onclick="setQuickDateRange('${firstDate}', '${lastDate}')" class="px-2.5 py-0.5 text-[10px] sm:text-[11px] bg-blue-600 hover:bg-blue-500 text-white font-extrabold rounded shadow transition">🚀 All ${allDates.length} Days</button>`;
 
             bar.innerHTML = html;
         }
 
         function setQuickDateRange(fromDt, toDt) {
-            document.getElementById('selDateFrom').value = fromDt;
-            document.getElementById('selDateTo').value = toDt;
+            const selFrom = document.getElementById('selDateFrom');
+            const selTo = document.getElementById('selDateTo');
+            if (selFrom) selFrom.value = fromDt;
+            if (selTo) selTo.value = toDt;
             updateDashboard();
         }
 
@@ -742,39 +745,45 @@
             const selEnd = document.getElementById('selEnd');
 
             const allDates = Object.keys(RAW_DATA[sym] || {}).sort((a, b) => parseDateString(a) - parseDateString(b));
-            selFrom.innerHTML = '';
-            selTo.innerHTML = '';
+            if (selFrom) selFrom.innerHTML = '';
+            if (selTo) selTo.innerHTML = '';
 
             allDates.forEach(d => {
-                const opt1 = document.createElement('option');
-                opt1.value = d; opt1.textContent = d;
-                selFrom.appendChild(opt1);
-
-                const opt2 = document.createElement('option');
-                opt2.value = d; opt2.textContent = d;
-                selTo.appendChild(opt2);
+                if (selFrom) {
+                    const opt1 = document.createElement('option');
+                    opt1.value = d; opt1.textContent = d;
+                    selFrom.appendChild(opt1);
+                }
+                if (selTo) {
+                    const opt2 = document.createElement('option');
+                    opt2.value = d; opt2.textContent = d;
+                    selTo.appendChild(opt2);
+                }
             });
 
-            const defaultDate = allDates[allDates.length - 1] || '04-09-2026';
-            selFrom.value = defaultDate;
-            selTo.value = defaultDate;
+            const defaultDate = allDates[allDates.length - 1] || (sym === 'CRUDEOILM' ? '07-09-2026' : '04-09-2026');
+            if (selFrom) selFrom.value = defaultDate;
+            if (selTo) selTo.value = defaultDate;
 
             // Populate sample time slots
-            selStart.innerHTML = '';
-            selEnd.innerHTML = '';
+            if (selStart) selStart.innerHTML = '';
+            if (selEnd) selEnd.innerHTML = '';
             const sampleDay = RAW_DATA[sym] && RAW_DATA[sym][defaultDate];
             if (sampleDay && sampleDay.timeline && sampleDay.timeline.length > 0) {
                 sampleDay.timeline.forEach(t => {
-                    const o1 = document.createElement('option');
-                    o1.value = t.time; o1.textContent = t.time;
-                    selStart.appendChild(o1);
-
-                    const o2 = document.createElement('option');
-                    o2.value = t.time; o2.textContent = t.time;
-                    selEnd.appendChild(o2);
+                    if (selStart) {
+                        const o1 = document.createElement('option');
+                        o1.value = t.time; o1.textContent = t.time;
+                        selStart.appendChild(o1);
+                    }
+                    if (selEnd) {
+                        const o2 = document.createElement('option');
+                        o2.value = t.time; o2.textContent = t.time;
+                        selEnd.appendChild(o2);
+                    }
                 });
-                selStart.value = sampleDay.timeline[0].time;
-                selEnd.value = sampleDay.timeline[sampleDay.timeline.length - 1].time;
+                if (selStart) selStart.value = sampleDay.timeline[0].time;
+                if (selEnd) selEnd.value = sampleDay.timeline[sampleDay.timeline.length - 1].time;
             }
         }
 
@@ -788,9 +797,10 @@
             datesList.forEach(dt => {
                 const dayData = RAW_DATA[sym] && RAW_DATA[sym][dt];
                 if (!dayData) return;
-                let tList = dayData.timeline;
-                if (isSingleDay) {
-                    tList = tList.filter(t => t.time >= startTime && t.time <= endTime);
+                let tList = dayData.timeline || [];
+                if (isSingleDay && startTime && endTime && startTime <= endTime) {
+                    const filtered = tList.filter(t => t.time >= startTime && t.time <= endTime);
+                    if (filtered.length > 0) tList = filtered;
                 }
                 tList.forEach(t => allTimeline.push(t));
             });
@@ -841,7 +851,6 @@
             };
         }
 
-                // Helper: Compute Rolling Micro Flow for 5m, 10m, 15m (Fully Automatic)
         function getRollingWindowFlow(timeline, strikes, endIdx, mins) {
             const startIdx = Math.max(0, endIdx - mins + 1);
             const sub = timeline.slice(startIdx, endIdx + 1);
@@ -855,18 +864,20 @@
             let ce_b = 0, ce_w = 0, ce_sc = 0, ce_unw = 0;
             let pe_b = 0, pe_w = 0, pe_sc = 0, pe_unw = 0;
 
+            const distThresh = currentInstrument === 'CRUDEOILM' ? 100 : 250;
+
             sub.forEach(t => {
                 if (t.stk) {
                     strikes.forEach(s => {
                         const sNum = parseFloat(s);
                         const dist = sNum - avgP;
-                        if (dist <= -250 && t.stk[s]) {
+                        if (dist <= -distThresh && t.stk[s]) {
                             ce_b += t.stk[s][2];
                             ce_w += t.stk[s][3];
                             ce_sc += t.stk[s][4];
                             ce_unw += t.stk[s][5];
                         }
-                        if (dist >= 250 && t.stk[s]) {
+                        if (dist >= distThresh && t.stk[s]) {
                             pe_b += t.stk[s][6];
                             pe_w += t.stk[s][7];
                             pe_sc += t.stk[s][8];
@@ -880,47 +891,66 @@
             const bear = ce_w + ce_unw + pe_b;
             const netLots = bull - bear;
 
-            const thresh = mins === 5 ? 350 : (mins === 10 ? 700 : 1000);
+            const thresh = currentInstrument === 'CRUDEOILM' 
+                ? (mins === 5 ? 50 : (mins === 10 ? 100 : 150))
+                : (mins === 5 ? 350 : (mins === 10 ? 700 : 1000));
+            const pThresh = currentInstrument === 'CRUDEOILM' ? 2 : 3;
+
             let sig = 'NEUTRAL';
-            if (netLots > thresh && pChg > 3) sig = 'BULL';
-            else if (netLots < -thresh && pChg < -3) sig = 'BEAR';
+            if (netLots > thresh && pChg > pThresh) sig = 'BULL';
+            else if (netLots < -thresh && pChg < -pThresh) sig = 'BEAR';
 
             return { netLots, pChg, sig, bull, bear };
         }
 
-function updateDashboard() {
-            const focusSym = document.getElementById('selSymbol').value;
-            const fromDate = document.getElementById('selDateFrom').value;
-            const toDate = document.getElementById('selDateTo').value;
+        function updateDashboard() {
+            let focusSym = currentInstrument || 'BANKNIFTY';
+            const selSymEl = document.getElementById('selSymbol');
+            if (selSymEl) selSymEl.value = focusSym;
+
+            const allDates = Object.keys(RAW_DATA[focusSym] || {}).sort((a, b) => parseDateString(a) - parseDateString(b));
+            if (allDates.length === 0) return;
+
+            let fromDate = document.getElementById('selDateFrom').value;
+            let toDate = document.getElementById('selDateTo').value;
+
+            // Automatic validation & fallback to latest date of current instrument
+            if (!allDates.includes(fromDate) || !allDates.includes(toDate)) {
+                const latestD = allDates[allDates.length - 1];
+                fromDate = latestD;
+                toDate = latestD;
+                document.getElementById('selDateFrom').value = latestD;
+                document.getElementById('selDateTo').value = latestD;
+            }
+
             const startTime = document.getElementById('selStart').value;
             const endTime = document.getElementById('selEnd').value;
 
-            focusSym = currentInstrument;
             const fromDObj = parseDateString(fromDate);
             const toDObj = parseDateString(toDate);
-            const allDates = Object.keys(RAW_DATA[focusSym] || {}).sort((a, b) => parseDateString(a) - parseDateString(b));
-            const selectedDates = allDates.filter(d => {
+            let selectedDates = allDates.filter(d => {
                 const curD = parseDateString(d);
                 return curD >= fromDObj && curD <= toDObj;
             });
 
-            if (selectedDates.length === 0) return;
+            if (selectedDates.length === 0) {
+                selectedDates = [allDates[allDates.length - 1]];
+            }
 
             const isSingleDay = selectedDates.length === 1;
-            document.getElementById('rangeDaysBadge').textContent = isSingleDay ? '1 Day View' : `${selectedDates.length} Days View (${fromDate.substring(0,5)} to ${toDate.substring(0,5)})`;
+            document.getElementById('rangeDaysBadge').textContent = isSingleDay ? `${selectedDates[0]} (1 Day)` : `${selectedDates.length} Days View (${fromDate.substring(0,5)} to ${toDate.substring(0,5)})`;
 
-            // Show or hide time dropdowns if multi-day
             document.getElementById('wrapStartTime').style.opacity = isSingleDay ? '1' : '0.5';
             document.getElementById('wrapEndTime').style.opacity = isSingleDay ? '1' : '0.5';
 
-            // Gather combined timeline records
             const combinedTimeline = [];
             selectedDates.forEach(dt => {
                 const dayData = RAW_DATA[focusSym] && RAW_DATA[focusSym][dt];
                 if (!dayData) return;
-                let dayRecords = dayData.timeline;
-                if (isSingleDay && startTime && endTime) {
-                    dayRecords = dayRecords.filter(t => t.time >= startTime && t.time <= endTime);
+                let dayRecords = dayData.timeline || [];
+                if (isSingleDay && startTime && endTime && startTime <= endTime) {
+                    const filtered = dayRecords.filter(t => t.time >= startTime && t.time <= endTime);
+                    if (filtered.length > 0) dayRecords = filtered;
                 }
                 dayRecords.forEach(r => {
                     combinedTimeline.push({
@@ -933,7 +963,6 @@ function updateDashboard() {
 
             if (combinedTimeline.length === 0) return;
 
-            // 1. CALCULATE 100% BANKNIFTY METRICS FOR SELECTED DATES
             const engBNF = calculateEngineMetrics(focusSym, selectedDates, startTime, endTime, isSingleDay);
             if (!engBNF) return;
 
@@ -952,7 +981,7 @@ function updateDashboard() {
             document.getElementById('valBNFChange').textContent = `${sign}${engBNF.chgPts.toFixed(2)} pts (${sign}${engBNF.chgPct.toFixed(2)}%)`;
             document.getElementById('valBNFChange').className = `text-xs font-mono font-bold mt-0.5 ${engBNF.chgPts >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
             document.getElementById('valBNFRange').textContent = `L: ₹${lowPrice.toFixed(0)} | H: ₹${highPrice.toFixed(0)} (${dayRangePts} pts)`;
-            document.getElementById('valBNFVelocity').textContent = `${dayRangePts > 300 ? 'High Volatility' : dayRangePts > 150 ? 'Active Trend' : 'Rangebound'} (${dayRangePts} pts)`;
+            document.getElementById('valBNFVelocity').textContent = `${dayRangePts > (focusSym==='CRUDEOILM'?60:300) ? 'High Volatility' : dayRangePts > (focusSym==='CRUDEOILM'?30:150) ? 'Active Trend' : 'Rangebound'} (${dayRangePts} pts)`;
 
             const bBadge = document.getElementById('badgeBNF');
             bBadge.textContent = engBNF.bias;
@@ -979,20 +1008,14 @@ function updateDashboard() {
             document.getElementById('valBNFOIBias').className = `font-bold font-mono ${engBNF.netOIBias >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
             document.getElementById('valBNFOIBreakdown').textContent = `${totCallLots.toLocaleString()}C / ${totPutLots.toLocaleString()}P`;
 
-            // 2. ORDER FLOW BREAKDOWN
+            // 2. Order Flow Breakdown
             let tot_ce_b = 0, tot_ce_w = 0, tot_ce_sc = 0, tot_ce_unw = 0;
             let tot_pe_b = 0, tot_pe_w = 0, tot_pe_sc = 0, tot_pe_unw = 0;
             let sumP = 0;
 
             combinedTimeline.forEach(t => {
-                tot_ce_b += t.ce_b;
-                tot_ce_w += t.ce_w;
-                tot_ce_sc += t.ce_sc;
-                tot_ce_unw += t.ce_unw;
-                tot_pe_b += t.pe_b;
-                tot_pe_w += t.pe_w;
-                tot_pe_sc += t.pe_sc;
-                tot_pe_unw += t.pe_unw;
+                tot_ce_b += t.ce_b; tot_ce_w += t.ce_w; tot_ce_sc += t.ce_sc; tot_ce_unw += t.ce_unw;
+                tot_pe_b += t.pe_b; tot_pe_w += t.pe_w; tot_pe_sc += t.pe_sc; tot_pe_unw += t.pe_unw;
                 sumP += t.price;
             });
 
@@ -1065,9 +1088,9 @@ function updateDashboard() {
                 peDomBadge.className = "px-2 py-0.5 text-[10px] font-extrabold rounded bg-slate-700 text-slate-300";
             }
 
-            // 3. STRIKE DATA FOR FAR ITM RADAR & LADDER
-            const lastDay = RAW_DATA[focusSym][selectedDates[selectedDates.length - 1]];
-            const strikeList = lastDay.strikes;
+            // 3. Strike Data for Far ITM Radar & Ladder
+            const lastDay = RAW_DATA[focusSym][selectedDates[selectedDates.length - 1]] || {};
+            const strikeList = lastDay.strikes || [];
             const strikeWindowChanges = {};
             strikeList.forEach(s => {
                 strikeWindowChanges[s] = {
@@ -1117,10 +1140,7 @@ function updateDashboard() {
                 }
             });
 
-            let farDistThreshold = 250;
-            if (focusSym === 'HDFCBANK') farDistThreshold = 15;
-            if (focusSym === 'ICICIBANK') farDistThreshold = 20;
-            if (focusSym === 'CRUDEOILM') farDistThreshold = 100;
+            let farDistThreshold = (focusSym === 'CRUDEOILM') ? 100 : 250;
 
             let farItmCeBuyLots = 0, farItmCeWriteLots = 0, farItmCeSCLots = 0, farItmCeUnwLots = 0;
             let farItmCeOiSum = 0;
@@ -1135,7 +1155,6 @@ function updateDashboard() {
                 const cChg = strikeWindowChanges[s].ce_chg;
                 const pChg = strikeWindowChanges[s].pe_chg;
 
-                // Far ITM Calls: Strike <= avgP - farDistThreshold
                 if (dist <= -farDistThreshold) {
                     farItmCeBuyLots += strikeWindowChanges[s].ce_b;
                     farItmCeWriteLots += strikeWindowChanges[s].ce_w;
@@ -1159,15 +1178,9 @@ function updateDashboard() {
                         hedgeClass = 'bg-amber-500/20 text-amber-400 border border-amber-500/30';
                         hedgeReason = 'Institutions cashing out synthetic longs / closing calls';
                     } else if (bLots > wLots * 1.25) {
-                        if (intrinsic > 300) {
-                            hedgeTag = '🎯 Naked Speculation (Synthetic Long)';
-                            hedgeClass = 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-bold';
-                            hedgeReason = `High Delta (${(intrinsic / (optP || 1)).toFixed(2)}). Heavy capital paying intrinsic to mimic futures with capped risk. NOT a hedge!`;
-                        } else {
-                            hedgeTag = '🟢 Bullish Call Accumulation';
-                            hedgeClass = 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30';
-                            hedgeReason = 'Aggressive directional call buying';
-                        }
+                        hedgeTag = '🎯 Naked Speculation (Synthetic Long)';
+                        hedgeClass = 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-bold';
+                        hedgeReason = `High Delta (${(intrinsic / (optP || 1)).toFixed(2)}). Heavy capital paying intrinsic to mimic futures with capped risk. NOT a hedge!`;
                     } else if (wLots > bLots * 1.25) {
                         hedgeTag = '🧱 Institutional Resistance Capping';
                         hedgeClass = 'bg-rose-500/20 text-rose-400 border border-rose-500/30';
@@ -1190,7 +1203,6 @@ function updateDashboard() {
                     });
                 }
 
-                // Far ITM Puts: Strike >= avgP + farDistThreshold
                 if (dist >= farDistThreshold) {
                     farItmPeBuyLots += strikeWindowChanges[s].pe_b;
                     farItmPeWriteLots += strikeWindowChanges[s].pe_w;
@@ -1218,15 +1230,9 @@ function updateDashboard() {
                         hedgeClass = 'bg-rose-500/20 text-rose-400 border border-rose-500/30 font-bold';
                         hedgeReason = 'Selling deep ITM puts carries huge downside risk. Only done when 100% convinced market cannot fall!';
                     } else if (bLots > wLots * 1.25) {
-                        if (intrinsic > 300) {
-                            hedgeTag = '🩸 Downside Speculation (Synthetic Short)';
-                            hedgeClass = 'bg-purple-500/20 text-purple-400 border border-purple-500/30 font-bold';
-                            hedgeReason = 'Buying high-delta puts to attack downside. Precedes severe waterfall cascade!';
-                        } else {
-                            hedgeTag = '🛡️ Portfolio Downside Hedge';
-                            hedgeClass = 'bg-blue-500/20 text-blue-400 border border-blue-500/30';
-                            hedgeReason = 'Protective put buying against portfolio long equity';
-                        }
+                        hedgeTag = '🩸 Downside Speculation (Synthetic Short)';
+                        hedgeClass = 'bg-purple-500/20 text-purple-400 border border-purple-500/30 font-bold';
+                        hedgeReason = 'Buying high-delta puts to attack downside. Precedes severe waterfall cascade!';
                     } else {
                         hedgeTag = '⚖️ Collar / Spread Leg';
                         hedgeClass = 'bg-slate-700 text-slate-300 border border-slate-600';
@@ -1260,7 +1266,6 @@ function updateDashboard() {
 
             const badgeFarItm = document.getElementById('badgeFarItmBias');
             const txtFarItmExp = document.getElementById('txtFarItmExplanation');
-
             const masterBadge = document.getElementById('badgeMasterVerdict');
             const expBox = document.getElementById('boxMasterExplanation');
             const elRecTrade = document.getElementById('valRecommendedTrade');
@@ -1268,49 +1273,45 @@ function updateDashboard() {
             const elConfBadge = document.getElementById('badgeBNFConfidence');
             const elRecStrike = document.getElementById('valBNFStrikeRec');
             const elKeyLevel = document.getElementById('valBNFKeyLevel');
-            const atmStrike = Math.round(engBNF.endPrice / 100) * 100;
+
+            const strikeStep = focusSym === 'CRUDEOILM' ? 50 : 100;
+            const atmStrike = Math.round(engBNF.endPrice / strikeStep) * strikeStep;
 
             const netFarLots = (farItmCeBuyLots + farItmCeSCLots + farItmPeWriteLots) - (farItmPeBuyLots + farItmPeSCLots + farItmCeWriteLots + farItmCeUnwLots);
             const elDeepITM = document.getElementById('valBNFDeepITM');
             if (elDeepITM) elDeepITM.textContent = `${netFarLots >= 0 ? '+' : ''}${netFarLots.toLocaleString()} lots`;
             const elWhaleBadge = document.getElementById('badgeBNFWhale');
 
-            // --- FULLY AUTOMATIC 3-TIER MULTI-SPEED ROLLING ENGINE ---
+            // 3-Tier Multi-Speed Rolling Engine
             const currentCandleIdx = combinedTimeline.length - 1;
             const currentT = combinedTimeline[currentCandleIdx];
             const curTime = currentT ? currentT.time : '09:15';
 
-            // --- 1. BYPASS 09:15 TO 09:20 OPENING SPIKE NOISE ---
             const filterCutoff = focusSym === 'CRUDEOILM' ? '09:05' : '09:20';
             if (curTime < filterCutoff) {
-                badgeFarItm.textContent = "⚪ OPENING FILTER (09:15-09:20)";
+                badgeFarItm.textContent = `⚪ OPENING FILTER (${focusSym==='CRUDEOILM'?'09:00-09:05':'09:15-09:20'})`;
                 badgeFarItm.className = "badge-neutral px-2.5 py-1 rounded text-xs font-black uppercase";
                 if (elWhaleBadge) { elWhaleBadge.textContent = "Stabilizing"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-neutral"; }
-                txtFarItmExp.innerHTML = `Bypassing 09:15-09:20 opening spike volatility. Market stabilizes at 09:20 AM.`;
+                txtFarItmExp.innerHTML = `Bypassing opening spike volatility. High-conviction tracking activates automatically after opening 5-minute settlement.`;
 
-                masterBadge.textContent = "⚪ OPENING STABILIZATION / STAND ASIDE (09:15-09:20)";
+                masterBadge.textContent = "⚪ OPENING STABILIZATION / STAND ASIDE";
                 masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-neutral shadow-md";
                 if (elRecTrade) { elRecTrade.textContent = 'NO TRADE / WAIT'; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-slate-300 tracking-tight'; }
-                if (elTradeAction) elTradeAction.textContent = 'Stand Aside: Opening 5-Minute Noise Filter';
+                if (elTradeAction) elTradeAction.textContent = 'Stand Aside: Opening Noise Filter';
                 if (elConfBadge) { elConfBadge.textContent = 'OPENING FILTER'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-slate-800 text-amber-300 border border-slate-700'; }
-                if (elRecStrike) elRecStrike.textContent = 'Activates at 09:20 AM';
+                if (elRecStrike) elRecStrike.textContent = `Activates at ${filterCutoff} AM`;
                 if (elKeyLevel) elKeyLevel.textContent = 'Initial Balance Establishing';
 
-                expBox.innerHTML = `
-                    <div class="flex items-center gap-2 text-amber-400 font-bold mb-1">
-                        <span>🛡️ OPENING SPIKE FILTER ACTIVE (09:15 - 09:20):</span>
-                    </div>
-                    <div>Market is in the initial 5-minute settlement and stop-hunt phase. Algorithm skips this fast noise to prevent false signals. <b>High-conviction tracking activates automatically at 09:20 AM.</b></div>
-                `;
+                expBox.innerHTML = `<div>Market is in the initial 5-minute settlement phase. <b>Disciplined tracking activates automatically at ${filterCutoff}.</b></div>`;
 
                 renderFarItmModalTable(farItmRowsForModal);
                 renderPriceChart(combinedTimeline, isSingleDay);
-                renderLadderChart(strikeWindowChanges, focusSym);
-                renderChronologicalTable(combinedTimeline);
+                renderLadderChart(strikeList, strikeWindowChanges, lastDay.base_oi, avgP);
+                renderChronologicalTable(combinedTimeline, isSingleDay);
                 return;
             }
 
-            // --- 2. PRECOMPUTE DISCIPLINED SESSION SWING TRADES (MAX 1 TRADE PER SESSION) ---
+            // Disciplined Session Swing Engine
             function getDisciplinedTrades(tl, skList, sym) {
                 let sessions = [
                     { name: 'MORNING SWING #1', start: '09:20', end: '11:30' },
@@ -1318,7 +1319,7 @@ function updateDashboard() {
                 ];
                 let distThresh = 250;
                 let nearThresh = 200;
-                let strikeStep = 100;
+                let sStep = 100;
                 let netLotsThresh = 2200;
                 let pChgThresh = 35;
                 let slPts = 75;
@@ -1331,12 +1332,13 @@ function updateDashboard() {
                     ];
                     distThresh = 100;
                     nearThresh = 50;
-                    strikeStep = 50;
+                    sStep = 50;
                     netLotsThresh = 250;
                     pChgThresh = 10;
                     slPts = 20;
                     tgtPts = 35;
                 }
+
                 const res = {};
                 sessions.forEach(sess => {
                     const sub = tl.filter(t => t.time >= sess.start && t.time <= sess.end);
@@ -1353,7 +1355,7 @@ function updateDashboard() {
                         const sliceT = sub.slice(0, i + 1);
                         if (sliceT.length < 3) continue;
 
-                        const avgP = sliceT.reduce((acc, x) => acc + x.price, 0) / sliceT.length;
+                        const sliceAvg = sliceT.reduce((acc, x) => acc + x.price, 0) / sliceT.length;
                         let bull = 0, bear = 0;
                         let nearCeW = 0, nearPeW = 0;
 
@@ -1361,16 +1363,16 @@ function updateDashboard() {
                             if (pt.stk) {
                                 skList.forEach(s => {
                                     const sNum = parseFloat(s);
-                                    const dist = sNum - avgP;
-                                    if (dist <= -250 && pt.stk[s]) {
+                                    const dist = sNum - sliceAvg;
+                                    if (dist <= -distThresh && pt.stk[s]) {
                                         bull += pt.stk[s][2] + pt.stk[s][4];
                                         bear += pt.stk[s][3] + pt.stk[s][5];
                                     }
-                                    if (dist >= 250 && pt.stk[s]) {
+                                    if (dist >= distThresh && pt.stk[s]) {
                                         bull += pt.stk[s][7] + pt.stk[s][8];
                                         bear += pt.stk[s][6] + pt.stk[s][9];
                                     }
-                                    if (Math.abs(dist) <= 200 && pt.stk[s]) {
+                                    if (Math.abs(dist) <= nearThresh && pt.stk[s]) {
                                         nearCeW += pt.stk[s][3];
                                         nearPeW += pt.stk[s][7];
                                     }
@@ -1381,49 +1383,45 @@ function updateDashboard() {
                         const netLots = bull - bear;
                         const pChg = t.price - p0;
 
-                        const isCall = (netLots >= 2200) && (pChg >= 35) && (nearPeW >= nearCeW * 0.85);
-                        const isPut = (netLots <= -2200) && (pChg <= -35) && (nearCeW >= nearPeW * 0.85);
+                        const isCall = (netLots >= netLotsThresh) && (pChg >= pChgThresh) && (nearPeW >= nearCeW * 0.85);
+                        const isPut = (netLots <= -netLotsThresh) && (pChg <= -pChgThresh) && (nearCeW >= nearPeW * 0.85);
 
                         if (isCall) {
                             cStreak++;
                             pStreak = 0;
                             if (cStreak === 3 && !trade) {
-                                const atm = Math.round(t.price / 100) * 100;
+                                const strikePrice = Math.round(t.price / sStep) * sStep;
                                 trade = {
                                     dir: 'CALL',
-                                    strike: `${atm} CE`,
+                                    strike: `${strikePrice} CE`,
                                     entryTime: t.time,
                                     entryPrice: t.price,
-                                    sl: t.price - 75,
-                                    tgt: t.price + 120,
+                                    sl: t.price - slPts,
+                                    tgt: t.price + tgtPts,
                                     exitTime: null,
                                     exitPrice: null,
                                     outcome: 'RUNNING',
                                     pnl: 0,
-                                    flow: netLots,
-                                    nearPeW: nearPeW,
-                                    nearCeW: nearCeW
+                                    flow: netLots
                                 };
                             }
                         } else if (isPut) {
                             pStreak++;
                             cStreak = 0;
                             if (pStreak === 3 && !trade) {
-                                const atm = Math.round(t.price / 100) * 100;
+                                const strikePrice = Math.round(t.price / sStep) * sStep;
                                 trade = {
                                     dir: 'PUT',
-                                    strike: `${atm} PE`,
+                                    strike: `${strikePrice} PE`,
                                     entryTime: t.time,
                                     entryPrice: t.price,
-                                    sl: t.price + 75,
-                                    tgt: t.price - 120,
+                                    sl: t.price + slPts,
+                                    tgt: t.price - tgtPts,
                                     exitTime: null,
                                     exitPrice: null,
                                     outcome: 'RUNNING',
                                     pnl: 0,
-                                    flow: netLots,
-                                    nearPeW: nearPeW,
-                                    nearCeW: nearCeW
+                                    flow: netLots
                                 };
                             }
                         } else {
@@ -1433,12 +1431,12 @@ function updateDashboard() {
 
                         if (trade && trade.outcome === 'RUNNING') {
                             const curPnl = trade.dir === 'CALL' ? (t.price - trade.entryPrice) : (trade.entryPrice - t.price);
-                            if (curPnl >= 120) {
+                            if (curPnl >= tgtPts) {
                                 trade.outcome = 'TARGET_HIT';
                                 trade.exitTime = t.time;
                                 trade.exitPrice = t.price;
                                 trade.pnl = curPnl;
-                            } else if (curPnl <= -75) {
+                            } else if (curPnl <= -slPts) {
                                 trade.outcome = 'SL_HIT';
                                 trade.exitTime = t.time;
                                 trade.exitPrice = t.price;
@@ -1465,12 +1463,12 @@ function updateDashboard() {
                 return res;
             }
 
-            const dailyTrades = getDisciplinedTrades(lastDay.timeline, strikeList, focusSym);
+            const dailyTrades = getDisciplinedTrades(lastDay.timeline || [], strikeList, focusSym);
             const isSecondSess = (focusSym === 'CRUDEOILM') ? (curTime >= '17:00') : (curTime >= '11:30');
             const sessionLabel = (focusSym === 'CRUDEOILM') 
                 ? (isSecondSess ? "EVENING MCX SWING #2" : "DAY SWING #1")
                 : (isSecondSess ? "AFTERNOON SWING #2" : "MORNING SWING #1");
-            const curTrade = dailyTrades[sessionLabel];
+            const curTrade = dailyTrades ? dailyTrades[sessionLabel] : null;
 
             // 3-Tier Rolling Flows for Card 3
             const roll5 = getRollingWindowFlow(combinedTimeline, strikeList, currentCandleIdx, 5);
@@ -1497,82 +1495,65 @@ function updateDashboard() {
                 elRoll15.innerHTML = `<span class="${col15} font-bold">${dot15} ${roll15.netLots >= 0 ? '+' : ''}${roll15.netLots.toLocaleString()} (${roll15.pChg >= 0 ? '+' : ''}${roll15.pChg.toFixed(1)}p)</span>`;
             }
 
-            // --- 3. RENDER VERDICT BASED ON LATCHED DISCIPLINED SESSION TRADE ---
+            // Render Verdict Based on Latched Disciplined Session Trade
             if (!curTrade) {
-                // ⚪ No Trade in this session (Chop / Whipsaw Avoided)
                 badgeFarItm.textContent = `⚪ ${sessionLabel} (CHOP AVOIDED)`;
                 badgeFarItm.className = "badge-neutral px-2.5 py-1 rounded text-xs font-black uppercase";
                 if (elWhaleBadge) { elWhaleBadge.textContent = "Chop Trap Filter"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-neutral"; }
 
-                txtFarItmExp.innerHTML = `Institutional order flow remained conflicted without 3-minute breakout persistence. Standing aside to preserve capital.`;
+                txtFarItmExp.innerHTML = `Order flow remained balanced without 3-minute breakout persistence. Standing aside to preserve capital.`;
 
-                masterBadge.textContent = `⚪ ${sessionLabel}: NO TRADE / CHOP AVOIDED (CAPITAL PRESERVATION)`;
+                masterBadge.textContent = `⚪ ${sessionLabel}: NO TRADE / CHOP AVOIDED`;
                 masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-neutral shadow-md";
                 if (elRecTrade) { elRecTrade.textContent = 'NO TRADE / WAIT'; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-slate-300 tracking-tight'; }
-                if (elTradeAction) elTradeAction.textContent = 'Capital Preservation: Rangebound Chop / Morning Whip Filtered';
+                if (elTradeAction) elTradeAction.textContent = 'Capital Preservation: Rangebound Chop Filtered';
                 if (elConfBadge) { elConfBadge.textContent = 'CAPITAL PRESERVATION'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-slate-800 text-amber-300 border border-slate-700'; }
                 if (elRecStrike) elRecStrike.textContent = `Range: ₹${lowPrice.toFixed(0)} - ₹${highPrice.toFixed(0)}`;
-                if (elKeyLevel) elKeyLevel.textContent = `Breakout: Above ₹${(highPrice + 25).toFixed(0)} | Below ₹${(lowPrice - 25).toFixed(0)}`;
+                if (elKeyLevel) elKeyLevel.textContent = `High: ₹${highPrice.toFixed(0)} | Low: ₹${lowPrice.toFixed(0)}`;
 
                 expBox.innerHTML = `
                     <div class="flex items-center gap-2 text-amber-400 font-bold mb-1">
                         <span>🛡️ CAPITAL PRESERVATION ACTIVE (${sessionLabel}):</span>
                     </div>
-                    <div>Market formed rangebound chop or two-way whipsaws without sustained 3-minute institutional breakout backing. <b>The system strictly filters out false morning spikes and unconfirmed dips. Capital is preserved by refusing low-probability chop.</b></div>
+                    <div>Market formed rangebound chop without sustained institutional breakout backing. <b>The system strictly filters out low-probability chop to preserve capital.</b></div>
                 `;
             } else if (curTime < curTrade.entryTime) {
-                // ⚪ Observing flow before trade confirmation
                 badgeFarItm.textContent = `⚪ ${sessionLabel} (OBSERVING FLOW)`;
                 badgeFarItm.className = "badge-neutral px-2.5 py-1 rounded text-xs font-black uppercase";
                 if (elWhaleBadge) { elWhaleBadge.textContent = "Observing Flow"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-neutral"; }
 
-                txtFarItmExp.innerHTML = `Monitoring Far ITM order flow and ATM writing walls for high-conviction 3-minute breakout confluence.`;
+                txtFarItmExp.innerHTML = `Monitoring order flow for high-conviction breakout confluence.`;
 
                 masterBadge.textContent = `⚪ ${sessionLabel}: OBSERVING FLOW (WAITING FOR SETUP)`;
                 masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-neutral shadow-md";
                 if (elRecTrade) { elRecTrade.textContent = 'WAITING FOR SETUP'; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-slate-400 tracking-tight'; }
-                if (elTradeAction) elTradeAction.textContent = 'Session Observation: Awaiting 3-Minute Breakout Confluence';
+                if (elTradeAction) elTradeAction.textContent = 'Session Observation: Awaiting Breakout Confluence';
                 if (elConfBadge) { elConfBadge.textContent = 'OBSERVING'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-slate-800 text-sky-300 border border-slate-700'; }
                 if (elRecStrike) elRecStrike.textContent = `Range: ₹${lowPrice.toFixed(0)} - ₹${highPrice.toFixed(0)}`;
                 if (elKeyLevel) elKeyLevel.textContent = 'Awaiting Setup Confirmation';
 
-                expBox.innerHTML = `
-                    <div class="flex items-center gap-2 text-sky-400 font-bold mb-1">
-                        <span>⏳ SESSION INITIALIZATION (${sessionLabel}):</span>
-                    </div>
-                    <div>Algorithm is monitoring institutional Far ITM accumulation and writing walls. Standing aside until a high-conviction breakout confirms.</div>
-                `;
+                expBox.innerHTML = `<div>Algorithm is monitoring institutional order flow. Standing aside until a high-conviction breakout confirms.</div>`;
             } else if (curTrade.exitTime && curTime > curTrade.exitTime) {
-                // 🎯 Trade Completed & Session Locked
                 if (curTrade.outcome === 'TARGET_HIT') {
                     badgeFarItm.textContent = `🎯 TARGET HIT (+${curTrade.pnl.toFixed(0)}p)`;
                     badgeFarItm.className = "badge-bullish px-2.5 py-1 rounded text-xs font-black uppercase";
                     if (elWhaleBadge) { elWhaleBadge.textContent = "Profit Booked"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-bullish"; }
 
-                    txtFarItmExp.innerHTML = `Target achieved (+${curTrade.pnl.toFixed(0)} pts). Session is locked. Capital preserved!`;
-
                     masterBadge.textContent = `🎯 ${sessionLabel}: TARGET ACHIEVED (+${curTrade.pnl.toFixed(0)} PTS PROFIT LOCKED)`;
                     masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-bullish shadow-md";
                     if (elRecTrade) { elRecTrade.textContent = 'PROFIT BOOKED'; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-emerald-400 tracking-tight'; }
-                    if (elTradeAction) elTradeAction.textContent = `Session Complete: Target Hit at ₹${curTrade.exitPrice.toFixed(0)} (+${curTrade.pnl.toFixed(0)} pts). No More Trades!`;
+                    if (elTradeAction) elTradeAction.textContent = `Session Complete: Target Hit at ₹${curTrade.exitPrice.toFixed(0)} (+${curTrade.pnl.toFixed(0)} pts). Profit Locked!`;
                     if (elConfBadge) { elConfBadge.textContent = 'TARGET ACHIEVED'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-emerald-950 text-emerald-300 border border-emerald-700/50'; }
                     if (elRecStrike) elRecStrike.textContent = `Profit: +${curTrade.pnl.toFixed(0)} pts Booked`;
                     if (elKeyLevel) elKeyLevel.textContent = `Target Reached at ${curTrade.exitTime} | Session Locked`;
 
-                    expBox.innerHTML = `
-                        <div class="flex items-center gap-2 text-emerald-400 font-bold mb-1">
-                            <span>🎯 TARGET ACHIEVED - SESSION PROFIT LOCKED:</span>
-                        </div>
-                        <div>Institutional target was successfully reached at ${curTrade.exitTime}. Position closed. <b>Rule: Discipline strictly forbids overtrading or taking new trades in the same session. Profit is locked!</b></div>
-                    `;
+                    expBox.innerHTML = `<div>Institutional target was reached at ${curTrade.exitTime}. <b>Profit is locked. Discipline strictly forbids overtrading in the same session.</b></div>`;
                 } else if (curTrade.outcome === 'SL_HIT') {
-                    badgeFarItm.textContent = `🛑 SL HIT (-75p)`;
+                    badgeFarItm.textContent = `🛑 SL HIT (-${Math.abs(curTrade.pnl).toFixed(0)}p)`;
                     badgeFarItm.className = "badge-neutral px-2.5 py-1 rounded text-xs font-black uppercase";
                     if (elWhaleBadge) { elWhaleBadge.textContent = "SL Executed"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-neutral"; }
 
-                    txtFarItmExp.innerHTML = `Strict stop loss triggered (-75 pts). No revenge trading. Standing aside.`;
-
-                    masterBadge.textContent = `🛑 ${sessionLabel}: STOP LOSS HIT (-75 PTS) - CAPITAL PRESERVED`;
+                    masterBadge.textContent = `🛑 ${sessionLabel}: STOP LOSS HIT (-${Math.abs(curTrade.pnl).toFixed(0)} PTS)`;
                     masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-neutral shadow-md";
                     if (elRecTrade) { elRecTrade.textContent = 'STAND ASIDE'; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-slate-300 tracking-tight'; }
                     if (elTradeAction) elTradeAction.textContent = 'Disciplined Stop Loss Executed. No Revenge Trading. Stand Aside!';
@@ -1580,12 +1561,7 @@ function updateDashboard() {
                     if (elRecStrike) elRecStrike.textContent = 'Capital Preserved';
                     if (elKeyLevel) elKeyLevel.textContent = `Stop Hit at ${curTrade.exitTime} | Session Locked`;
 
-                    expBox.innerHTML = `
-                        <div class="flex items-center gap-2 text-amber-400 font-bold mb-1">
-                            <span>🛑 DISCIPLINED STOP LOSS EXECUTED:</span>
-                        </div>
-                        <div>Stop loss was triggered at ${curTrade.exitTime}. Position closed immediately to prevent capital erosion. <b>Rule: Strict discipline requires standing aside until the next session. No revenge trades!</b></div>
-                    `;
+                    expBox.innerHTML = `<div>Stop loss was triggered at ${curTrade.exitTime}. <b>Discipline requires standing aside until the next session. No revenge trades!</b></div>`;
                 } else {
                     badgeFarItm.textContent = `🏁 SESSION CLOSED`;
                     badgeFarItm.className = "badge-neutral px-2.5 py-1 rounded text-xs font-black uppercase";
@@ -1599,17 +1575,13 @@ function updateDashboard() {
                     expBox.innerHTML = `<div>Session has ended. Position squared off at market close.</div>`;
                 }
             } else {
-                // 🟢 / 🔴 Trade is ACTIVELY RUNNING
+                // Trade is ACTIVELY RUNNING
                 const isCall = curTrade.dir === 'CALL';
                 const runPnl = isCall ? (engBNF.endPrice - curTrade.entryPrice) : (curTrade.entryPrice - engBNF.endPrice);
 
                 badgeFarItm.textContent = `${isCall ? '🟢' : '🔴'} ${sessionLabel} (${isCall ? 'BULLISH' : 'BEARISH'} CONFLUENCE)`;
                 badgeFarItm.className = isCall ? "badge-bullish px-2.5 py-1 rounded text-xs font-black uppercase" : "badge-bearish px-2.5 py-1 rounded text-xs font-black uppercase";
                 if (elWhaleBadge) { elWhaleBadge.textContent = isCall ? "SURE-SHOT LONG" : "SURE-SHOT SHORT"; elWhaleBadge.className = `px-2 py-0.5 rounded text-[10px] font-bold uppercase ${isCall ? 'badge-bullish' : 'badge-bearish'}`; }
-
-                txtFarItmExp.innerHTML = `
-                    <b>🎯 ${sessionLabel}:</b> Institutions active in ${curTrade.strike} with <b>${Math.abs(curTrade.flow).toLocaleString()} lots</b> backing. Running P&L: <b>${runPnl >= 0 ? '+' : ''}${runPnl.toFixed(1)} pts</b>.
-                `;
 
                 masterBadge.textContent = `${isCall ? '🟢' : '🔴'} ${sessionLabel}: BUY ${isCall ? 'CALLS' : 'PUTS'} (ACTIVE / HOLDING)`;
                 masterBadge.className = `px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase ${isCall ? 'badge-bullish' : 'badge-bearish'} shadow-md`;
@@ -1623,7 +1595,7 @@ function updateDashboard() {
                     <div class="flex items-center gap-2 ${isCall ? 'text-emerald-400' : 'text-rose-400'} font-bold mb-1">
                         <span>🎯 SURE-SHOT TRADE ACTIVE (${sessionLabel}):</span>
                     </div>
-                    <div>Institutional flow (${Math.abs(curTrade.flow).toLocaleString()} lots) confirmed. Minor candle wiggles are normal retracements. <b>Rule: Hold ${curTrade.strike} firmly with strict SL ₹${curTrade.sl.toFixed(0)} and Target ₹${curTrade.tgt.toFixed(0)}. Do NOT flip!</b></div>
+                    <div>Institutional flow confirmed. Hold ${curTrade.strike} firmly with SL ₹${curTrade.sl.toFixed(0)} and Target ₹${curTrade.tgt.toFixed(0)}. Do NOT flip!</div>
                 `;
             }
 
@@ -1638,7 +1610,7 @@ function updateDashboard() {
             tbody.innerHTML = '';
 
             if (rows.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="11" class="py-4 text-center text-slate-500">No Far ITM/OTM strikes beyond 300 pts active in this window.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="11" class="py-4 text-center text-slate-500">No Far ITM/OTM strikes active in this window.</td></tr>';
                 return;
             }
 
@@ -1752,11 +1724,14 @@ function updateDashboard() {
                             display: true,
                             position: 'right',
                             grid: { drawOnChartArea: false },
-                            ticks: { color: '#94a3b8', font: { size: 10 } }
+                            ticks: { color: '#94a3b8', font: { size: 9 } }
                         }
                     },
                     plugins: {
-                        legend: { position: 'bottom', labels: { color: '#cbd5e1', font: { size: 10 } } }
+                        legend: {
+                            position: 'bottom',
+                            labels: { color: '#cbd5e1', font: { size: 10 } }
+                        }
                     }
                 }
             });
@@ -1774,18 +1749,21 @@ function updateDashboard() {
                 const sNum = parseFloat(s);
                 const diff = sNum - spotPrice;
                 let tag = '';
-                if (Math.abs(diff) < 100) tag = '[ATM]';
-                else if (diff < -250) tag = '[Deep ITM]';
-                else if (diff > 250) tag = '[Deep OTM]';
+                const atmThresh = currentInstrument === 'CRUDEOILM' ? 50 : 100;
+                const farThresh = currentInstrument === 'CRUDEOILM' ? 100 : 250;
+                if (Math.abs(diff) < atmThresh) tag = '[ATM]';
+                else if (diff < -farThresh) tag = '[Deep ITM]';
+                else if (diff > farThresh) tag = '[Deep OTM]';
 
                 labels.push(`${s} ${tag}`);
 
+                const wc = windowChanges && windowChanges[s];
                 if (ladderMode === 'change') {
-                    ceData.push(windowChanges[s].ce_chg);
-                    peData.push(windowChanges[s].pe_chg);
+                    ceData.push(wc ? wc.ce_chg : 0);
+                    peData.push(wc ? wc.pe_chg : 0);
                 } else {
-                    ceData.push(baseOI[s] ? baseOI[s].ce : 0);
-                    peData.push(baseOI[s] ? baseOI[s].pe : 0);
+                    ceData.push((baseOI && baseOI[s]) ? baseOI[s].ce : 0);
+                    peData.push((baseOI && baseOI[s]) ? baseOI[s].pe : 0);
                 }
             });
 
@@ -1828,54 +1806,44 @@ function updateDashboard() {
             const tbody = document.getElementById('tblTimelineBody');
             tbody.innerHTML = '';
 
-            document.getElementById('rowCountBadge').textContent = `Showing ${timeline.length} records`;
-
-            timeline.forEach(t => {
+            timeline.slice().reverse().forEach(t => {
                 const tr = document.createElement('tr');
-                tr.className = 'timeline-row hover:bg-slate-800/40 transition';
+                tr.className = 'hover:bg-slate-800/40 transition border-b border-slate-800/40';
 
-                const netChg = t.pe_chg - t.ce_chg;
-                const netSign = netChg >= 0 ? '+' : '';
-                const netColor = netChg >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold';
-
-                const ceFlow = t.ce_b >= t.ce_w ? `<span class="text-emerald-400 font-semibold">🟢 B (${t.ce_b})</span>` : `<span class="text-rose-400 font-semibold">🔴 W (${t.ce_w})</span>`;
-                const peFlow = t.pe_w >= t.pe_b ? `<span class="text-rose-400 font-semibold">🔴 W (${t.pe_w})</span>` : `<span class="text-emerald-400 font-semibold">🟢 B (${t.pe_b})</span>`;
-
-                let sentBadge = `<span class="px-1.5 py-0.5 rounded text-[10px] badge-neutral">NEUTRAL</span>`;
-                if (netChg > 1000 && t.ce_b > t.ce_w) {
-                    sentBadge = `<span class="px-1.5 py-0.5 rounded text-[10px] badge-bullish font-bold">🟢 BULLISH</span>`;
-                } else if (netChg < -1000 && t.ce_w > t.ce_b) {
-                    sentBadge = `<span class="px-1.5 py-0.5 rounded text-[10px] badge-bearish font-bold">🔴 BEARISH</span>`;
-                }
+                const netLots = (t.ce_b + t.pe_w + t.ce_sc) - (t.pe_b + t.ce_w + t.pe_sc);
+                const flowColor = netLots >= 0 ? 'text-emerald-400' : 'text-rose-400';
+                const ceChgColor = t.ce_chg >= 0 ? 'text-emerald-400' : 'text-rose-400';
+                const peChgColor = t.pe_chg >= 0 ? 'text-emerald-400' : 'text-rose-400';
 
                 tr.innerHTML = `
-                    <td class="py-2 px-2.5 font-semibold text-white whitespace-nowrap">
-                        ${isSingleDay ? t.time : `<span class="text-blue-400 font-bold">${t.date.substring(0,5)}</span> ${t.time}`}
-                    </td>
-                    <td class="py-2 px-2.5 text-right font-mono font-bold text-slate-200">${t.price.toFixed(2)}</td>
-                    <td class="py-2 px-2.5 text-right font-mono ${t.ce_chg >= 0 ? 'text-rose-400' : 'text-blue-400'}">${t.ce_chg >= 0 ? '+' : ''}${t.ce_chg.toLocaleString()}</td>
-                    <td class="py-2 px-2.5 text-right font-mono ${t.pe_chg >= 0 ? 'text-emerald-400' : 'text-amber-400'}">${t.pe_chg >= 0 ? '+' : ''}${t.pe_chg.toLocaleString()}</td>
-                    <td class="py-2 px-2.5 text-right font-mono ${netColor}">${netSign}${netChg.toLocaleString()}</td>
-                    <td class="py-2 px-2.5 text-xs">${ceFlow}</td>
-                    <td class="py-2 px-2.5 text-xs">${peFlow}</td>
-                    <td class="py-2 px-2.5 text-right font-mono font-bold text-amber-400">${t.tot_lots.toLocaleString()}</td>
-                    <td class="py-2 px-2.5 text-center">${sentBadge}</td>
+                    <td class="py-2 px-3 font-mono font-bold text-white whitespace-nowrap">${t.dateTimeLabel}</td>
+                    <td class="py-2 px-3 font-mono font-bold text-sky-400 whitespace-nowrap">₹${t.price.toFixed(1)}</td>
+                    <td class="py-2 px-3 font-mono ${ceChgColor} whitespace-nowrap">${t.ce_chg >= 0 ? '+' : ''}${t.ce_chg.toLocaleString()}</td>
+                    <td class="py-2 px-3 font-mono ${peChgColor} whitespace-nowrap">${t.pe_chg >= 0 ? '+' : ''}${t.pe_chg.toLocaleString()}</td>
+                    <td class="py-2 px-3 font-mono text-emerald-400 whitespace-nowrap">${t.ce_b.toLocaleString()}</td>
+                    <td class="py-2 px-3 font-mono text-rose-400 whitespace-nowrap">${t.ce_w.toLocaleString()}</td>
+                    <td class="py-2 px-3 font-mono text-sky-400 whitespace-nowrap">${t.ce_sc.toLocaleString()}</td>
+                    <td class="py-2 px-3 font-mono text-amber-400 whitespace-nowrap">${t.ce_unw.toLocaleString()}</td>
+                    <td class="py-2 px-3 font-mono text-emerald-400 whitespace-nowrap">${t.pe_b.toLocaleString()}</td>
+                    <td class="py-2 px-3 font-mono text-rose-400 whitespace-nowrap">${t.pe_w.toLocaleString()}</td>
+                    <td class="py-2 px-3 font-mono text-sky-400 whitespace-nowrap">${t.pe_sc.toLocaleString()}</td>
+                    <td class="py-2 px-3 font-mono text-amber-400 whitespace-nowrap">${t.pe_unw.toLocaleString()}</td>
+                    <td class="py-2 px-3 font-mono font-bold ${flowColor} whitespace-nowrap">${netLots >= 0 ? '+' : ''}${netLots.toLocaleString()}</td>
                 `;
                 tbody.appendChild(tr);
             });
         }
 
         function filterTable() {
-            const filter = document.getElementById('tblSearch').value.toUpperCase();
-            const rows = document.querySelectorAll('.timeline-row');
-            rows.forEach(r => {
-                const text = r.textContent || r.innerText;
-                r.style.display = text.toUpperCase().indexOf(filter) > -1 ? "" : "none";
-            });
+            const input = document.getElementById('searchTable');
+            const filter = input.value.toUpperCase();
+            const tbody = document.getElementById('tblTimelineBody');
+            const rows = tbody.getElementsByTagName('tr');
+            for (let i = 0; i < rows.length; i++) {
+                const text = rows[i].textContent || rows[i].innerText;
+                rows[i].style.display = text.toUpperCase().indexOf(filter) > -1 ? "" : "none";
+            }
         }
-
-        let currentMode = 'backtest';
-        let livePollTimer = null;
 
         function setDashboardMode(mode) {
             currentMode = mode;
@@ -1892,7 +1860,7 @@ function updateDashboard() {
 
                 pollLiveData();
                 if (!livePollTimer) {
-                    livePollTimer = setInterval(pollLiveData, 10000);
+                    livePollTimer = setInterval(pollLiveData, 5000);
                 }
             } else {
                 btnB.className = 'flex items-center gap-1.5 px-3 py-1.5 text-xs font-black rounded-lg transition bg-blue-600 text-white shadow ring-2 ring-blue-500/50';
@@ -1913,31 +1881,33 @@ function updateDashboard() {
                 .then(res => res.json())
                 .then(data => {
                     const badge = document.getElementById('liveStatusBadge');
-                    if (data.is_market_open) {
-                        badge.innerHTML = `<span class="text-emerald-400 font-bold">🟢 LIVE MARKET STREAMING</span> (${data.server_time.substring(11)})`;
+                    const isCrude = (currentInstrument === 'CRUDEOILM');
+                    const isOpen = isCrude ? data.crude_open : data.bnf_open;
+
+                    if (isOpen) {
+                        const mName = isCrude ? "MCX CRUDEOILM LIVE (09:00 - 23:30 IST)" : "NSE BANKNIFTY LIVE (09:15 - 15:30 IST)";
+                        badge.innerHTML = `<span class="text-emerald-400 font-bold">🟢 ${mName}</span> (${data.server_time ? data.server_time.substring(11) : ''})`;
                         badge.className = "text-[11px] font-mono px-2.5 py-1 rounded-md bg-emerald-950/60 text-emerald-300 border border-emerald-800/50";
-                        
+                    } else {
+                        const cName = isCrude ? "⚪ MCX Closed (Opens Weekdays 09:00 AM)" : "⚪ NSE Closed (Opens Weekdays 09:15 AM)";
+                        badge.innerHTML = `${cName}`;
+                        badge.className = "text-[11px] font-mono px-2.5 py-1 rounded-md bg-slate-900 text-slate-400 border border-slate-800";
+                    }
+
+                    if (isCrude) {
+                        if (data.crudeoilm && data.crudeoilm.ltp > 0) {
+                            document.getElementById('valBNFPrice').textContent = `₹${data.crudeoilm.ltp.toFixed(2)}`;
+                            const sign = data.crudeoilm.change >= 0 ? '+' : '';
+                            document.getElementById('valBNFChange').textContent = `${sign}${data.crudeoilm.change.toFixed(2)}% Live (Vol: ${data.crudeoilm.volume ? data.crudeoilm.volume.toLocaleString() : 0})`;
+                            document.getElementById('valBNFChange').className = `text-xs font-mono font-bold mt-0.5 ${data.crudeoilm.change >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+                        }
+                    } else {
                         if (data.banknifty && data.banknifty.ltp > 0) {
                             document.getElementById('valBNFPrice').textContent = `₹${data.banknifty.ltp.toFixed(2)}`;
                             const sign = data.banknifty.change >= 0 ? '+' : '';
                             document.getElementById('valBNFChange').textContent = `${sign}${data.banknifty.change.toFixed(2)}% Live`;
-                            document.getElementById('valBNFChange').className = `text-[11px] font-mono ${data.banknifty.change >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+                            document.getElementById('valBNFChange').className = `text-xs font-mono font-bold mt-0.5 ${data.banknifty.change >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
                         }
-                        if (data.hdfc && data.hdfc.ltp > 0) {
-                            document.getElementById('valHDFCPrice').textContent = `₹${data.hdfc.ltp.toFixed(2)}`;
-                            const sign = data.hdfc.change >= 0 ? '+' : '';
-                            document.getElementById('valHDFCChange').textContent = `${sign}${data.hdfc.change.toFixed(2)}% Live`;
-                            document.getElementById('valHDFCChange').className = `text-[11px] font-mono ${data.hdfc.change >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
-                        }
-                        if (data.icici && data.icici.ltp > 0) {
-                            document.getElementById('valICICIPrice').textContent = `₹${data.icici.ltp.toFixed(2)}`;
-                            const sign = data.icici.change >= 0 ? '+' : '';
-                            document.getElementById('valICICIChange').textContent = `${sign}${data.icici.change.toFixed(2)}% Live`;
-                            document.getElementById('valICICIChange').className = `text-[11px] font-mono ${data.icici.change >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
-                        }
-                    } else {
-                        badge.innerHTML = `⚪ Market Closed (Opens Mon 09:15 AM)`;
-                        badge.className = "text-[11px] font-mono px-2.5 py-1 rounded-md bg-slate-900 text-slate-400 border border-slate-800";
                     }
                 })
                 .catch(err => {
@@ -2000,8 +1970,9 @@ function updateDashboard() {
             updateDashboard();
             pollLiveData();
             fetchBackendData();
-            setInterval(fetchBackendData, 60000); // Check for new 1-minute ticks every minute
+            setInterval(fetchBackendData, 60000);
         });
+
     </script>
 </body>
 </html>
