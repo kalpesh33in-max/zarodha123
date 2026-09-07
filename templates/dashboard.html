@@ -1162,12 +1162,44 @@ function updateDashboard() {
             const currentCandleIdx = combinedTimeline.length - 1;
             const currentT = combinedTimeline[currentCandleIdx];
             const curTime = currentT ? currentT.time : '09:15';
-            const isAfternoon = (curTime >= '11:30');
-            const sessionStartT = isAfternoon ? '11:30' : '09:15';
 
-            // Filter active session snapshots (Rock-Solid 1-2 Trade Engine)
+            // --- 1. BYPASS 09:15 TO 09:20 OPENING SPIKE NOISE ---
+            if (curTime < '09:20') {
+                badgeFarItm.textContent = "⚪ OPENING FILTER (09:15-09:20)";
+                badgeFarItm.className = "badge-neutral px-2.5 py-1 rounded text-xs font-black uppercase";
+                if (elWhaleBadge) { elWhaleBadge.textContent = "Stabilizing"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-neutral"; }
+                txtFarItmExp.innerHTML = `Bypassing 09:15-09:20 opening spike volatility. Market stabilizes at 09:20 AM.`;
+
+                masterBadge.textContent = "⚪ OPENING STABILIZATION / STAND ASIDE (09:15-09:20)";
+                masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-neutral shadow-md";
+                if (elRecTrade) { elRecTrade.textContent = 'NO TRADE / WAIT'; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-slate-300 tracking-tight'; }
+                if (elTradeAction) elTradeAction.textContent = 'Stand Aside: Opening 5-Minute Noise Filter';
+                if (elConfBadge) { elConfBadge.textContent = 'OPENING FILTER'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-slate-800 text-amber-300 border border-slate-700'; }
+                if (elRecStrike) elRecStrike.textContent = 'Activates at 09:20 AM';
+                if (elKeyLevel) elKeyLevel.textContent = 'Initial Balance Establishing';
+
+                expBox.innerHTML = `
+                    <div class="flex items-center gap-2 text-amber-400 font-bold mb-1">
+                        <span>🛡️ OPENING SPIKE FILTER ACTIVE (09:15 - 09:20):</span>
+                    </div>
+                    <div>Market is in the initial 5-minute settlement and stop-hunt phase. Algorithm skips this fast noise to prevent false signals. <b>High-conviction tracking activates automatically at 09:20 AM.</b></div>
+                `;
+
+                renderFarItmModalTable(farItmRowsForModal);
+                renderPriceChart(combinedTimeline, isSingleDay);
+                renderLadderChart(strikeWindowChanges, focusSym);
+                renderChronologicalTable(combinedTimeline);
+                return;
+            }
+
+            // --- 2. SESSION TIMING (Morning starts strictly at 09:20, Afternoon at 11:30) ---
+            const isAfternoon = (curTime >= '11:30');
+            const sessionStartT = isAfternoon ? '11:30' : '09:20';
+
+            // Active session slice
             const sessionSub = combinedTimeline.filter(t => t.time >= sessionStartT && t.time <= curTime);
             let sessNetLots = 0, sessPChg = 0, sessBull = 0, sessBear = 0;
+            let nearCeW = 0, nearPeW = 0;
 
             if (sessionSub.length >= 3) {
                 const sPStart = sessionSub[0].price;
@@ -1186,6 +1218,11 @@ function updateDashboard() {
                             if (dist >= 250 && t.stk[s]) {
                                 sessBull += t.stk[s][7] + t.stk[s][8]; // PE Write + PE SC
                                 sessBear += t.stk[s][6] + t.stk[s][9]; // PE Buy + PE Unwind
+                            }
+                            // Near ATM Strikes (within 200 pts) for Ceiling vs Floor
+                            if (Math.abs(dist) <= 200 && t.stk[s]) {
+                                nearCeW += t.stk[s][3];
+                                nearPeW += t.stk[s][7];
                             }
                         });
                     }
@@ -1218,27 +1255,26 @@ function updateDashboard() {
                 elRoll15.innerHTML = `<span class="${col15} font-bold">${dot15} ${roll15.netLots >= 0 ? '+' : ''}${roll15.netLots.toLocaleString()} (${roll15.pChg >= 0 ? '+' : ''}${roll15.pChg.toFixed(1)}p)</span>`;
             }
 
-            // --- ROCK-SOLID 1-TO-2 SURE-SHOT TRADES DECISION ENGINE ---
-            // High threshold: Prevents twitching/quick changes. Only 1 trade per session (Morning #1 or Afternoon #2)
+            // --- 3. ATM WRITING WALL CONFLUENCE (Floor vs. Ceiling) ---
             const threshLots = isAfternoon ? 2000 : 1800;
             const threshPts = isAfternoon ? 30 : 25;
 
-            const isSureCall = (sessNetLots >= threshLots && sessPChg >= threshPts && sessBull >= sessBear * 1.3) || 
-                               (netFarLots >= 4000 && engBNF.chgPts >= 30 && sessNetLots >= 1000);
+            // Bullish: Far ITM Net >= threshLots, Price >= threshPts, AND Put Writing Floor >= Call Writing Ceiling * 0.85
+            const isSureCall = (sessNetLots >= threshLots) && (sessPChg >= threshPts) && (nearPeW >= nearCeW * 0.85);
 
-            const isSurePut = (sessNetLots <= -threshLots && sessPChg <= -threshPts && sessBear >= sessBull * 1.3) || 
-                              (netFarLots <= -4000 && engBNF.chgPts <= -30 && sessNetLots <= -1000);
+            // Bearish: Far ITM Net <= -threshLots, Price <= -threshPts, AND Call Writing Ceiling >= Put Writing Floor * 0.85
+            const isSurePut = (sessNetLots <= -threshLots) && (sessPChg <= -threshPts) && (nearCeW >= nearPeW * 0.85);
 
             const sessionLabel = isAfternoon ? "AFTERNOON SWING #2" : "MORNING SWING #1";
 
             if (isSureCall && !isSurePut) {
                 // 🟢 High-Conviction Call Swing Trade
-                badgeFarItm.textContent = `🟢 ${sessionLabel} (BULLISH)`;
+                badgeFarItm.textContent = `🟢 ${sessionLabel} (BULLISH CONFLUENCE)`;
                 badgeFarItm.className = "badge-bullish px-2.5 py-1 rounded text-xs font-black uppercase";
                 if (elWhaleBadge) { elWhaleBadge.textContent = "SURE-SHOT LONG"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-bullish"; }
 
                 txtFarItmExp.innerHTML = `
-                    <b>🎯 ${sessionLabel}:</b> Institutions accumulated <b>+${sessNetLots.toLocaleString()} lots</b> net in this session with spot surging <b>+${sessPChg.toFixed(1)} pts</b>. Trailing Short Covering confirms smart money backing.
+                    <b>🎯 ${sessionLabel}:</b> Institutions accumulated <b>+${sessNetLots.toLocaleString()} lots</b> net with spot up <b>+${sessPChg.toFixed(1)} pts</b>. ATM Put Writing floor (${nearPeW.toLocaleString()} lots) protects against downside!
                 `;
 
                 masterBadge.textContent = `🟢 ${sessionLabel}: BUY CALLS (HOLDING / BUY ON DIPS)`;
@@ -1253,16 +1289,16 @@ function updateDashboard() {
                     <div class="flex items-center gap-2 text-emerald-400 font-bold mb-1">
                         <span>🎯 SURE-SHOT TRADE ACTIVE (${sessionLabel}):</span>
                     </div>
-                    <div>Institutional Far ITM accumulation has decisively confirmed (+${sessNetLots.toLocaleString()} lots in session). Minor 1-to-2 candle pullbacks are normal retracements. <b>Rule: Do NOT flip to Puts! Hold ${atmStrike} CE firmly with strict SL ₹${(engBNF.endPrice - 65).toFixed(0)} and Target ₹${(engBNF.endPrice + 150).toFixed(0)}.</b></div>
+                    <div>Institutional Far ITM accumulation (+${sessNetLots.toLocaleString()} lots) confirmed with ATM Put Writing floor (${nearPeW.toLocaleString()} lots vs ${nearCeW.toLocaleString()} CE-W). Minor pullbacks are normal retracements. <b>Rule: Hold ${atmStrike} CE firmly with strict SL ₹${(engBNF.endPrice - 65).toFixed(0)} and Target ₹${(engBNF.endPrice + 150).toFixed(0)}.</b></div>
                 `;
             } else if (isSurePut && !isSureCall) {
                 // 🔴 High-Conviction Put Swing Trade
-                badgeFarItm.textContent = `🔴 ${sessionLabel} (BEARISH)`;
+                badgeFarItm.textContent = `🔴 ${sessionLabel} (BEARISH CONFLUENCE)`;
                 badgeFarItm.className = "badge-bearish px-2.5 py-1 rounded text-xs font-black uppercase";
                 if (elWhaleBadge) { elWhaleBadge.textContent = "SURE-SHOT SHORT"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-bearish"; }
 
                 txtFarItmExp.innerHTML = `
-                    <b>🎯 ${sessionLabel}:</b> Institutions dumped <b>${Math.abs(sessNetLots).toLocaleString()} lots</b> net in this session with spot falling <b>${sessPChg.toFixed(1)} pts</b>. Heavy Put accumulation confirms waterfall pressure.
+                    <b>🎯 ${sessionLabel}:</b> Institutions dumped <b>${Math.abs(sessNetLots).toLocaleString()} lots</b> net with spot down <b>${sessPChg.toFixed(1)} pts</b>. ATM Call Writing ceiling (${nearCeW.toLocaleString()} lots) caps upside!
                 `;
 
                 masterBadge.textContent = `🔴 ${sessionLabel}: BUY PUTS (HOLDING / BUY ON BOUNCES)`;
@@ -1277,30 +1313,32 @@ function updateDashboard() {
                     <div class="flex items-center gap-2 text-rose-400 font-bold mb-1">
                         <span>🎯 SURE-SHOT TRADE ACTIVE (${sessionLabel}):</span>
                     </div>
-                    <div>Institutional distribution has decisively confirmed (${sessNetLots.toLocaleString()} lots in session). Minor bounces are dead-cat pullbacks. <b>Rule: Do NOT flip to Calls! Hold ${atmStrike} PE firmly with strict SL ₹${(engBNF.endPrice + 65).toFixed(0)} and Target ₹${(engBNF.endPrice - 150).toFixed(0)}.</b></div>
+                    <div>Institutional distribution (${sessNetLots.toLocaleString()} lots) confirmed with ATM Call Writing ceiling (${nearCeW.toLocaleString()} lots vs ${nearPeW.toLocaleString()} PE-W). <b>Rule: Hold ${atmStrike} PE firmly with strict SL ₹${(engBNF.endPrice + 65).toFixed(0)} and Target ₹${(engBNF.endPrice - 150).toFixed(0)}.</b></div>
                 `;
             } else {
-                // ⚪ Calm Default: No Trade / Wait for Setup
+                // ⚪ Calm Default: No Trade / Wait for Setup (Capital Preservation)
+                const wallState = nearCeW > nearPeW * 1.2 ? "Call Ceiling Blocking Upside" : (nearPeW > nearCeW * 1.2 ? "Put Floor Blocking Downside" : "Writers Conflicted / Rangebound");
                 const chopLabel = isAfternoon ? "AFTERNOON CHOP" : "MORNING CONSOLIDATION";
+
                 badgeFarItm.textContent = `⚪ ${chopLabel}`;
                 badgeFarItm.className = "badge-neutral px-2.5 py-1 rounded text-xs font-black uppercase";
-                if (elWhaleBadge) { elWhaleBadge.textContent = "Neutral"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-neutral"; }
+                if (elWhaleBadge) { elWhaleBadge.textContent = "Chop Trap Filter"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-neutral"; }
 
-                txtFarItmExp.innerHTML = `Session order flow is within normal range (${sessNetLots >= 0 ? '+' : ''}${sessNetLots.toLocaleString()} lots). Waiting for clear institutional breakout.`;
+                txtFarItmExp.innerHTML = `ATM Walls: ${wallState} (${nearCeW.toLocaleString()} CE-W vs ${nearPeW.toLocaleString()} PE-W). Standing aside to prevent false breakout traps.`;
 
                 masterBadge.textContent = `⚪ ${chopLabel}: NO TRADE / WAIT (CAPITAL PRESERVATION)`;
                 masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-neutral shadow-md";
                 if (elRecTrade) { elRecTrade.textContent = 'NO TRADE / WAIT'; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-slate-300 tracking-tight'; }
-                if (elTradeAction) elTradeAction.textContent = 'Wait for 1-to-2 Sure-Shot Setup (Zero Noise)';
+                if (elTradeAction) elTradeAction.textContent = `Capital Preservation: ${wallState}`;
                 if (elConfBadge) { elConfBadge.textContent = 'CAPITAL PRESERVATION'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-slate-800 text-amber-300 border border-slate-700'; }
                 if (elRecStrike) elRecStrike.textContent = `Range: ₹${lowPrice.toFixed(0)} - ₹${highPrice.toFixed(0)}`;
                 if (elKeyLevel) elKeyLevel.textContent = `Breakout: Above ₹${(highPrice + 25).toFixed(0)} | Below ₹${(lowPrice - 25).toFixed(0)}`;
 
                 expBox.innerHTML = `
                     <div class="flex items-center gap-2 text-amber-400 font-bold mb-1">
-                        <span>🛡️ CAPITAL PRESERVATION ACTIVE (WAITING FOR SURE-SHOT SETUP):</span>
+                        <span>🛡️ CAPITAL PRESERVATION ACTIVE (RANGEBOUND CHOP FILTER):</span>
                     </div>
-                    <div>Market is currently consolidating or between major institutional waves. The system avoids quick flips or false signals. <b>Rule: Be patient. Wait for the definitive Morning or Afternoon institutional swing.</b></div>
+                    <div>Market is in a mean-reverting range or conflicted by ATM writing walls (${wallState}). The system prevents taking trades near Day High/Low to eliminate SL hits. <b>Rule: Wait patiently for the high-conviction breakout.</b></div>
                 `;
             }
 
