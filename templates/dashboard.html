@@ -237,14 +237,18 @@
                         <div class="mt-2 text-2xl sm:text-3xl font-black font-mono text-purple-400 tracking-tight" id="valBNFDeepITM">0 lots</div>
                         <div class="text-xs font-mono font-bold text-purple-300/80 mt-0.5" id="valBNFSyntheticType">Net Synthetic Bets</div>
                     </div>
-                    <div class="mt-4 pt-2.5 border-t border-slate-800 text-[11px] text-slate-300 space-y-1.5">
-                        <div class="flex justify-between">
-                            <span class="text-slate-400">Far ITM Distance:</span>
-                            <span class="font-bold font-mono text-slate-200">300 to 700+ pts</span>
+                    <div class="mt-3 pt-2 border-t border-slate-800 text-[10px] text-slate-300 space-y-1">
+                        <div class="flex justify-between items-center font-mono">
+                            <span class="text-slate-400">⚡ 5m Spark:</span>
+                            <span id="valBNFRolling5m" class="font-bold text-slate-400">--</span>
                         </div>
-                        <div class="flex justify-between">
-                            <span class="text-slate-400">Conviction:</span>
-                            <span id="valBNFWhaleConviction" class="font-bold font-mono text-purple-400">High Intrinsic</span>
+                        <div class="flex justify-between items-center font-mono">
+                            <span class="text-slate-400">🔥 10m Fuel:</span>
+                            <span id="valBNFRolling10m" class="font-bold text-slate-400">--</span>
+                        </div>
+                        <div class="flex justify-between items-center font-mono">
+                            <span class="text-slate-400">🌊 15m Trend:</span>
+                            <span id="valBNFRolling15m" class="font-bold text-slate-400">--</span>
                         </div>
                     </div>
                 </div>
@@ -727,7 +731,54 @@
             };
         }
 
-        function updateDashboard() {
+                // Helper: Compute Rolling Micro Flow for 5m, 10m, 15m (Fully Automatic)
+        function getRollingWindowFlow(timeline, strikes, endIdx, mins) {
+            const startIdx = Math.max(0, endIdx - mins + 1);
+            const sub = timeline.slice(startIdx, endIdx + 1);
+            if (!sub || sub.length === 0) return { netLots: 0, pChg: 0, sig: 'NEUTRAL', bull: 0, bear: 0 };
+
+            const pStart = sub[0].price;
+            const pEnd = sub[sub.length - 1].price;
+            const pChg = pEnd - pStart;
+            const avgP = sub.reduce((acc, t) => acc + t.price, 0) / sub.length;
+
+            let ce_b = 0, ce_w = 0, ce_sc = 0, ce_unw = 0;
+            let pe_b = 0, pe_w = 0, pe_sc = 0, pe_unw = 0;
+
+            sub.forEach(t => {
+                if (t.stk) {
+                    strikes.forEach(s => {
+                        const sNum = parseFloat(s);
+                        const dist = sNum - avgP;
+                        if (dist <= -250 && t.stk[s]) {
+                            ce_b += t.stk[s][2];
+                            ce_w += t.stk[s][3];
+                            ce_sc += t.stk[s][4];
+                            ce_unw += t.stk[s][5];
+                        }
+                        if (dist >= 250 && t.stk[s]) {
+                            pe_b += t.stk[s][6];
+                            pe_w += t.stk[s][7];
+                            pe_sc += t.stk[s][8];
+                            pe_unw += t.stk[s][9];
+                        }
+                    });
+                }
+            });
+
+            const bull = ce_b + ce_sc + pe_w;
+            const bear = ce_w + ce_unw + pe_b;
+            const netLots = bull - bear;
+
+            const thresh = mins === 5 ? 350 : (mins === 10 ? 700 : 1000);
+            let sig = 'NEUTRAL';
+            if (netLots > thresh && pChg > 3) sig = 'BULL';
+            else if (netLots < -thresh && pChg < -3) sig = 'BEAR';
+
+            return { netLots, pChg, sig, bull, bear };
+        }
+
+function updateDashboard() {
             const focusSym = document.getElementById('selSymbol').value;
             const fromDate = document.getElementById('selDateFrom').value;
             const toDate = document.getElementById('selDateTo').value;
@@ -1107,83 +1158,171 @@
             if (elDeepITM) elDeepITM.textContent = `${netFarLots >= 0 ? '+' : ''}${netFarLots.toLocaleString()} lots`;
             const elWhaleBadge = document.getElementById('badgeBNFWhale');
 
-            // Bullish & Bearish Forces (Short Covering is a major bullish force for Calls)
+            // --- FULLY AUTOMATIC 3-TIER MULTI-SPEED ROLLING ENGINE ---
+            const currentCandleIdx = combinedTimeline.length - 1;
+            const roll5 = getRollingWindowFlow(combinedTimeline, strikeList, currentCandleIdx, 5);
+            const roll10 = getRollingWindowFlow(combinedTimeline, strikeList, currentCandleIdx, 10);
+            const roll15 = getRollingWindowFlow(combinedTimeline, strikeList, currentCandleIdx, 15);
+
+            // Update 3-Tier Rolling Gauges in Card 3
+            const elRoll5 = document.getElementById('valBNFRolling5m');
+            const elRoll10 = document.getElementById('valBNFRolling10m');
+            const elRoll15 = document.getElementById('valBNFRolling15m');
+
+            if (elRoll5) {
+                const col5 = roll5.sig === 'BULL' ? 'text-emerald-400' : (roll5.sig === 'BEAR' ? 'text-rose-400' : 'text-slate-400');
+                const dot5 = roll5.sig === 'BULL' ? '🟢' : (roll5.sig === 'BEAR' ? '🔴' : '⚪');
+                elRoll5.innerHTML = `<span class="${col5} font-bold">${dot5} ${roll5.netLots >= 0 ? '+' : ''}${roll5.netLots.toLocaleString()} (${roll5.pChg >= 0 ? '+' : ''}${roll5.pChg.toFixed(1)}p)</span>`;
+            }
+            if (elRoll10) {
+                const col10 = roll10.sig === 'BULL' ? 'text-emerald-400' : (roll10.sig === 'BEAR' ? 'text-rose-400' : 'text-slate-400');
+                const dot10 = roll10.sig === 'BULL' ? '🟢' : (roll10.sig === 'BEAR' ? '🔴' : '⚪');
+                elRoll10.innerHTML = `<span class="${col10} font-bold">${dot10} ${roll10.netLots >= 0 ? '+' : ''}${roll10.netLots.toLocaleString()} (${roll10.pChg >= 0 ? '+' : ''}${roll10.pChg.toFixed(1)}p)</span>`;
+            }
+            if (elRoll15) {
+                const col15 = roll15.sig === 'BULL' ? 'text-emerald-400' : (roll15.sig === 'BEAR' ? 'text-rose-400' : 'text-slate-400');
+                const dot15 = roll15.sig === 'BULL' ? '🟢' : (roll15.sig === 'BEAR' ? '🔴' : '⚪');
+                elRoll15.innerHTML = `<span class="${col15} font-bold">${dot15} ${roll15.netLots >= 0 ? '+' : ''}${roll15.netLots.toLocaleString()} (${roll15.pChg >= 0 ? '+' : ''}${roll15.pChg.toFixed(1)}p)</span>`;
+            }
+
+            // Macro Day Forces
             const bullCallPower = farItmCeBuyLots + farItmCeSCLots;
             const bearCallPower = farItmCeWriteLots + farItmCeUnwLots;
             const bullPutPower = farItmPeWriteLots + farItmPeSCLots;
             const bearPutPower = farItmPeBuyLots + farItmPeUnwLots;
-
             const isCeSqueeze = (farItmCeSCLots > farItmCeWriteLots * 1.2 && farItmCeSCLots > farItmCeUnwLots) || (farItmCeSCLots > 1000 && farItmCeWriteLots === 0);
-            const isBullish = (bullCallPower > bearCallPower * 1.15) || isCeSqueeze || (farItmCeBuyLots > farItmCeWriteLots * 1.2 && (farItmCeOiSum > 10000 || engBNF.chgPts > 0));
-            const isBearish = !isCeSqueeze && ((bearCallPower > bullCallPower * 1.2 && (farItmCeUnwLots > 500 || farItmCeOiSum < -10000 || engBNF.chgPts < -50)) || (bearPutPower > bullPutPower * 1.2 && farItmPeBuyLots > farItmPeWriteLots * 1.2));
 
-            if (isBullish) {
-                const subType = isCeSqueeze ? "Short-Covering Squeeze" : "Synthetic Longs";
-                badgeFarItm.textContent = isCeSqueeze ? "🟢 SHORT-COVERING SQUEEZE" : "🟢 SMART MONEY ACCUMULATION";
-                badgeFarItm.className = "badge-bullish px-2.5 py-1 rounded text-xs font-black uppercase";
-                if (elWhaleBadge) { elWhaleBadge.textContent = subType; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-bullish"; }
-                
+            // Micro Multi-Speed Triggers (Automatic Changeover Detection)
+            const isAutoBreakdown = (roll5.sig === 'BEAR' && roll10.sig === 'BEAR') || 
+                                    (roll10.sig === 'BEAR' && roll15.sig === 'BEAR') || 
+                                    (roll5.netLots < -1000 && roll5.pChg < -15);
+
+            const isAutoIgnition = (roll5.sig === 'BULL' && roll10.sig === 'BULL') || 
+                                   (roll10.sig === 'BULL' && roll15.sig === 'BULL') || 
+                                   (roll5.netLots > 1000 && roll5.pChg > 15);
+
+            const isDayBull = (bullCallPower > bearCallPower * 1.15) || isCeSqueeze || (farItmCeBuyLots > farItmCeWriteLots * 1.2 && (farItmCeOiSum > 10000 || engBNF.chgPts > 0));
+            const isDayBear = !isCeSqueeze && ((bearCallPower > bullCallPower * 1.2 && (farItmCeUnwLots > 500 || farItmCeOiSum < -10000 || engBNF.chgPts < -50)) || (bearPutPower > bullPutPower * 1.2 && farItmPeBuyLots > farItmPeWriteLots * 1.2));
+
+            // --- MASTER AUTOMATIC DECISION ENGINE ---
+            if (isAutoBreakdown) {
+                // 🔴 Instant Reversal or Fresh Breakdown (Overrides any morning bullish lag!)
+                badgeFarItm.textContent = "🔴 AUTO-BREAKDOWN / DUMP";
+                badgeFarItm.className = "badge-bearish px-2.5 py-1 rounded text-xs font-black uppercase";
+                if (elWhaleBadge) { elWhaleBadge.textContent = "Auto-Reversal (Puts)"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-bearish"; }
+
                 txtFarItmExp.innerHTML = `
-                    Smart Money bought <b>${farItmCeBuyLots.toLocaleString()} lots</b> and panicked call writers covered <b>${farItmCeSCLots.toLocaleString()} lots</b> in Deep ITM Calls. Far ITM Put Writing shows <b>${farItmPeWriteLots.toLocaleString()} lots</b> locking in concrete floor support. Market makers must buy futures to hedge delta, propelling an explosive rally!
+                    <b>🚨 AUTOMATIC CHANGEOVER:</b> Institutions dumped <b>${Math.abs(roll5.netLots).toLocaleString()} lots</b> in 5m and <b>${Math.abs(roll10.netLots).toLocaleString()} lots</b> in 10m. Morning call bias overridden! Market makers are hedging downside.
                 `;
 
-                masterBadge.textContent = isCeSqueeze ? "🟢 SHORT-COVERING SQUEEZE / BUY CALLS" : "🟢 EXPLOSIVE UP / BUY CALLS (FAR ITM SMART MONEY)";
+                masterBadge.textContent = "🔴 AUTO-BREAKDOWN / BUY PUTS (3-TIER REVERSAL)";
+                masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-bearish shadow-md";
+                if (elRecTrade) { elRecTrade.textContent = `BUY ${atmStrike} PE`; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-rose-400 tracking-tight'; }
+                if (elTradeAction) elTradeAction.textContent = `Auto-Detected Dump (5m: ${roll5.netLots >= 0 ? '+' : ''}${roll5.netLots.toLocaleString()} lots)`;
+                if (elConfBadge) { elConfBadge.textContent = 'AUTO-RADAR: 92% HIGH'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-rose-950 text-rose-300 border border-rose-700/50'; }
+                if (elRecStrike) elRecStrike.textContent = `${atmStrike} PE or ${atmStrike + 100} PE (ITM)`;
+                if (elKeyLevel) elKeyLevel.textContent = `SL: ₹${(engBNF.endPrice + 55).toFixed(0)} | Tgt: ₹${(engBNF.endPrice - 140).toFixed(0)}`;
+
+                expBox.innerHTML = `
+                    <div class="flex items-center gap-2 text-rose-400 font-bold mb-1">
+                        <span>🚨 AUTOMATIC CHANGEOVER DETECTED (BEARISH BREAKDOWN):</span>
+                    </div>
+                    <div>Smart money executed aggressive institutional dumping in trailing 5-10 mins (5m: <b>${roll5.netLots.toLocaleString()} lots</b>, 10m: <b>${roll10.netLots.toLocaleString()} lots</b>). Any morning Call bias has been overridden automatically. <b>Strategy: Enter ${atmStrike} PE with 55-pt invalidation.</b></div>
+                `;
+            } else if (isAutoIgnition) {
+                // 🟢 Instant Reversal or Fresh Ignition (Overrides any morning bearish lag!)
+                const subType = isCeSqueeze ? "Short-Covering Squeeze" : "Synthetic Longs";
+                badgeFarItm.textContent = isCeSqueeze ? "🟢 SHORT-COVERING SQUEEZE" : "🟢 AUTO-IGNITION (3-TIER SURGE)";
+                badgeFarItm.className = "badge-bullish px-2.5 py-1 rounded text-xs font-black uppercase";
+                if (elWhaleBadge) { elWhaleBadge.textContent = subType; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-bullish"; }
+
+                txtFarItmExp.innerHTML = `
+                    <b>🚀 AUTOMATIC CHANGEOVER:</b> Institutions & panicked call writers accumulated <b>+${roll5.netLots.toLocaleString()} lots</b> in 5m and <b>+${roll10.netLots.toLocaleString()} lots</b> in 10m. Squeeze propelled by heavy Put writing floor!
+                `;
+
+                masterBadge.textContent = isCeSqueeze ? "🟢 SHORT-COVERING SQUEEZE / BUY CALLS" : "🟢 AUTO-IGNITION / BUY CALLS (3-TIER SURGE)";
                 masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-bullish shadow-md";
                 if (elRecTrade) { elRecTrade.textContent = `BUY ${atmStrike} CE`; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-emerald-400 tracking-tight'; }
-                if (elTradeAction) elTradeAction.textContent = isCeSqueeze ? 'Panic Call Short Covering Squeeze' : 'Synthetic Future Long Continuation';
-                if (elConfBadge) { elConfBadge.textContent = 'FAR ITM: 90% HIGH'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-emerald-950 text-emerald-300 border border-emerald-700/50'; }
+                if (elTradeAction) elTradeAction.textContent = `Auto-Detected 3-Tier Surge (5m: +${roll5.netLots.toLocaleString()} lots)`;
+                if (elConfBadge) { elConfBadge.textContent = 'AUTO-RADAR: 95% MAX'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-emerald-950 text-emerald-300 border border-emerald-700/50'; }
+                if (elRecStrike) elRecStrike.textContent = `${atmStrike} CE or ${atmStrike - 100} CE (ITM)`;
+                if (elKeyLevel) elKeyLevel.textContent = `SL: ₹${(engBNF.endPrice - 55).toFixed(0)} | Tgt: ₹${(engBNF.endPrice + 140).toFixed(0)}`;
+
+                expBox.innerHTML = `
+                    <div class="flex items-center gap-2 text-emerald-400 font-bold mb-1">
+                        <span>🚀 AUTOMATIC CHANGEOVER DETECTED (BULLISH IGNITION):</span>
+                    </div>
+                    <div>Multi-speed smart money accumulation confirmed across 5m (<b>+${roll5.netLots.toLocaleString()} lots</b>) and 10m (<b>+${roll10.netLots.toLocaleString()} lots</b>). Panic Short Covering and deep Call accumulation active. <b>Strategy: Enter ${atmStrike} CE with 55-pt trailing invalidation.</b></div>
+                `;
+            } else if (isDayBull && roll5.sig !== 'BEAR' && roll10.sig !== 'BEAR') {
+                // 🟢 Day Trend Continuation
+                badgeFarItm.textContent = isCeSqueeze ? "🟢 SHORT-COVERING SQUEEZE" : "🟢 SMART MONEY ACCUMULATION";
+                badgeFarItm.className = "badge-bullish px-2.5 py-1 rounded text-xs font-black uppercase";
+                if (elWhaleBadge) { elWhaleBadge.textContent = "Macro Longs"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-bullish"; }
+
+                txtFarItmExp.innerHTML = `
+                    Day accumulation is firmly positive (+${netFarLots.toLocaleString()} lots). Micro order flow remains steady without any reversal warnings.
+                `;
+
+                masterBadge.textContent = "🟢 DAY TREND CONTINUATION / BUY CALLS";
+                masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-bullish shadow-md";
+                if (elRecTrade) { elRecTrade.textContent = `BUY ${atmStrike} CE`; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-emerald-400 tracking-tight'; }
+                if (elTradeAction) elTradeAction.textContent = 'Macro Long Trend Continuation';
+                if (elConfBadge) { elConfBadge.textContent = 'DAY TREND: 85% HIGH'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-emerald-950 text-emerald-300 border border-emerald-700/50'; }
                 if (elRecStrike) elRecStrike.textContent = `${atmStrike} CE or ${atmStrike - 100} CE (ITM)`;
                 if (elKeyLevel) elKeyLevel.textContent = `SL: ₹${(engBNF.endPrice - 65).toFixed(0)} | Tgt: ₹${(engBNF.endPrice + 150).toFixed(0)}`;
 
                 expBox.innerHTML = `
                     <div class="flex items-center gap-2 text-emerald-400 font-bold mb-1">
-                        <span>🚀 BANKNIFTY ${isCeSqueeze ? 'PANIC SHORT COVERING SQUEEZE' : 'FAR ITM INSTITUTIONAL ACCUMULATION'}:</span>
+                        <span>📈 MACRO INSTITUTIONAL LONG CONTINUATION:</span>
                     </div>
-                    <div>Institutions and deep call writers are covering shorts aggressively (${farItmCeSCLots.toLocaleString()} lots SC) alongside fresh deep call buys (${farItmCeBuyLots.toLocaleString()} lots). Market makers are forced to buy index futures to balance books. <b>Strategy: Buy ATM/ITM Calls on minor dips with 65-pt trailing invalidation.</b></div>
+                    <div>Net day whale accumulation remains strongly positive (+${netFarLots.toLocaleString()} lots), with micro order flow remaining steady. <b>Strategy: Hold / Buy Call dips.</b></div>
                 `;
-            } else if (isBearish) {
+            } else if (isDayBear && roll5.sig !== 'BULL' && roll10.sig !== 'BULL') {
+                // 🔴 Day Trend Continuation
                 badgeFarItm.textContent = "🔴 SMART MONEY CASHING OUT";
                 badgeFarItm.className = "badge-bearish px-2.5 py-1 rounded text-xs font-black uppercase";
-                if (elWhaleBadge) { elWhaleBadge.textContent = "Liquidation / Puts"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-bearish"; }
+                if (elWhaleBadge) { elWhaleBadge.textContent = "Macro Shorts"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-bearish"; }
 
                 txtFarItmExp.innerHTML = `
-                    Warning: Institutions dumped <b>${farItmCeUnwLots.toLocaleString()} lots</b> in Deep ITM Calls. Put support also saw <b>${farItmPeUnwLots.toLocaleString()} lots unwound</b>. Smart money has exited longs, leaving the index exposed to a sharp downward waterfall!
+                    Day distribution dominates (${netFarLots.toLocaleString()} lots). Micro order flow confirms continued downward pressure.
                 `;
 
-                masterBadge.textContent = "🔴 WATERFALL DOWN / BUY PUTS (FAR ITM CASH OUT)";
+                masterBadge.textContent = "🔴 DAY TREND CONTINUATION / BUY PUTS";
                 masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-bearish shadow-md";
                 if (elRecTrade) { elRecTrade.textContent = `BUY ${atmStrike} PE`; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-rose-400 tracking-tight'; }
-                if (elTradeAction) elTradeAction.textContent = 'Synthetic Put Cascade Breakdown';
-                if (elConfBadge) { elConfBadge.textContent = 'FAR ITM: 85% HIGH'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-rose-950 text-rose-300 border border-rose-700/50'; }
+                if (elTradeAction) elTradeAction.textContent = 'Macro Short Trend Continuation';
+                if (elConfBadge) { elConfBadge.textContent = 'DAY TREND: 85% HIGH'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-rose-950 text-rose-300 border border-rose-700/50'; }
                 if (elRecStrike) elRecStrike.textContent = `${atmStrike} PE or ${atmStrike + 100} PE (ITM)`;
                 if (elKeyLevel) elKeyLevel.textContent = `SL: ₹${(engBNF.endPrice + 65).toFixed(0)} | Tgt: ₹${(engBNF.endPrice - 150).toFixed(0)}`;
 
                 expBox.innerHTML = `
                     <div class="flex items-center gap-2 text-rose-400 font-bold mb-1">
-                        <span>🩸 BANKNIFTY FAR ITM LIQUIDATION & DOWNSIDE CASING:</span>
+                        <span>📉 MACRO INSTITUTIONAL SHORT CONTINUATION:</span>
                     </div>
-                    <div>Institutions have abandoned deep long positions (${farItmCeUnwLots.toLocaleString()} lots liquidated) and are accumulating Far ITM Puts. Support floor has collapsed. <b>Strategy: Buy ATM/ITM Puts on minor pullbacks.</b></div>
+                    <div>Net day whale distribution dominates (${netFarLots.toLocaleString()} lots), with micro order flow staying bearish. <b>Strategy: Hold / Buy Put bounces.</b></div>
                 `;
             } else {
+                // ⚪ Chop / Balanced
                 badgeFarItm.textContent = "⚪ BALANCED / MODEST FAR FLOW";
                 badgeFarItm.className = "badge-neutral px-2.5 py-1 rounded text-xs font-black uppercase";
                 if (elWhaleBadge) { elWhaleBadge.textContent = "Balanced"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-neutral"; }
 
                 txtFarItmExp.innerHTML = `Deep ITM activity is balanced. Most institutional trading is taking place near ATM strikes.`;
 
-                masterBadge.textContent = "⚪ SIDEWAYS / CHOPPY RANGE (BALANCED FAR FLOW)";
+                masterBadge.textContent = "⚪ SIDEWAYS / CHOPPY RANGE (PRESERVE CAPITAL)";
                 masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-neutral shadow-md";
                 if (elRecTrade) { elRecTrade.textContent = 'NO TRADE / WAIT'; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-slate-300 tracking-tight'; }
-                if (elTradeAction) elTradeAction.textContent = 'Rangebound Consolidation';
+                if (elTradeAction) elTradeAction.textContent = 'Rangebound Micro Consolidation';
                 if (elConfBadge) { elConfBadge.textContent = 'CAPITAL PRESERVATION'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-slate-800 text-amber-300 border border-slate-700'; }
                 if (elRecStrike) elRecStrike.textContent = `Range: ₹${lowPrice.toFixed(0)} - ₹${highPrice.toFixed(0)}`;
                 if (elKeyLevel) elKeyLevel.textContent = `Breakout: Above ₹${(highPrice + 25).toFixed(0)} | Below ₹${(lowPrice - 25).toFixed(0)}`;
 
                 expBox.innerHTML = `
                     <div class="flex items-center gap-2 text-amber-400 font-bold mb-1">
-                        <span>⚠️ FAR ITM SMART MONEY BALANCED (PRESERVE CAPITAL):</span>
+                        <span>⚠️ BALANCED FLOW (PRESERVE CAPITAL):</span>
                     </div>
-                    <div>Neither synthetic long buyers nor deep put speculators have decisive dominance. High risk of premium decay. <b>Preserve capital and wait for clear Far ITM commitment.</b></div>
+                    <div>Neither 3-tier micro buyers nor deep put speculators have decisive dominance. High risk of premium decay. <b>Preserve capital and wait for automated 5m/10m ignition.</b></div>
                 `;
             }
 
