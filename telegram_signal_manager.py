@@ -14,8 +14,7 @@ import env_config
 
 IST = ZoneInfo("Asia/Kolkata")
 
-PRIMARY_CHAT_ID = "-1003907739730"
-FALLBACK_CHAT_ID = getattr(env_config, "CHAT_ID_BN", "-1003665271298")
+TARGET_CHAT_ID = "-1003907739730"
 
 BOT_TOKENS = [
     getattr(env_config, "TELE_TOKEN_BN", "8190193308:AAGQGzTdKzZoytMF-YRnM_PwtYKY88cAUHs"),
@@ -25,11 +24,9 @@ BOT_TOKENS = [
 BOT_TOKENS = [t for t in BOT_TOKENS if t and len(t) > 20]
 
 def send_signal_telegram(message, chat_ids=None):
-    """Sends institutional trade alert to designated Telegram channels/groups."""
+    """Sends institutional trade alert EXCLUSIVELY to -1003907739730 (Bnf ,nifty,sense)."""
     if not chat_ids:
-        chat_ids = [PRIMARY_CHAT_ID]
-        if FALLBACK_CHAT_ID and FALLBACK_CHAT_ID not in chat_ids:
-            chat_ids.append(FALLBACK_CHAT_ID)
+        chat_ids = [TARGET_CHAT_ID]
 
     sent_any = False
     for cid in chat_ids:
