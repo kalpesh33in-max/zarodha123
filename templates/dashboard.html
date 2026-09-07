@@ -1340,7 +1340,27 @@
                 }
 
                 const res = {};
+                // Morning Box Detection for BankNifty (< 200 pts rangebound chop filter)
+                let mRange = 999999;
+                if (sym === 'BANKNIFTY') {
+                    const mSub = tl.filter(t => t.time >= '09:20' && t.time <= '11:30');
+                    if (mSub.length > 0) {
+                        let mHigh = -Infinity, mLow = Infinity;
+                        mSub.forEach(t => {
+                            if (t.price > mHigh) mHigh = t.price;
+                            if (t.price < mLow) mLow = t.price;
+                        });
+                        mRange = mHigh - mLow;
+                    }
+                }
+
                 sessions.forEach(sess => {
+                    const isAfternoon = (sess.name === 'AFTERNOON SWING #2');
+                    if (sym === 'BANKNIFTY' && isAfternoon && mRange < 200) {
+                        res[sess.name] = null;
+                        return;
+                    }
+
                     const sub = tl.filter(t => t.time >= sess.start && t.time <= sess.end);
                     if (sub.length < 5) {
                         res[sess.name] = null;

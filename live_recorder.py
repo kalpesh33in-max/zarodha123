@@ -25,6 +25,7 @@ class LiveMarketRecorder:
         self.inst_tokens = {}
         self.prev_state = {"BANKNIFTY": {}, "CRUDEOILM": {}}
         self.cum_totals = {"BANKNIFTY": {"ce": 0, "pe": 0}, "CRUDEOILM": {"ce": 0, "pe": 0}}
+        self.day_timelines = {"BANKNIFTY": [], "CRUDEOILM": []}
         self._init_instruments()
 
     def _init_instruments(self):
@@ -234,6 +235,20 @@ class LiveMarketRecorder:
 
                 save_candle(sym, date_str, candle_obj, [str(s) for s in cfg["strikes"]])
                 print(f"[LiveRecorder] Saved live {sym} tick @ {time_str} | Price: {ltp} | dCE: {minute_ce_chg} | dPE: {minute_pe_chg}")
+
+                # Live Institutional Strategy & Signal Evaluation (Telegram Dispatch)
+                try:
+                    from telegram_signal_manager import signal_engine
+                    if not self.day_timelines[sym]:
+                        day_file = os.path.join(BASE_DIR, "data", sym, f"{date_str}.json")
+                        if os.path.exists(day_file):
+                            with open(day_file, "r", encoding="utf-8") as f_in:
+                                self.day_timelines[sym] = json.load(f_in).get("timeline", [])
+                    if not any(t.get("time") == candle_obj["time"] for t in self.day_timelines[sym]):
+                        self.day_timelines[sym].append(candle_obj)
+                    signal_engine.process_live_timeline(sym, date_str, self.day_timelines[sym], [str(s) for s in cfg["strikes"]])
+                except Exception as sig_e:
+                    print(f"[LiveRecorder] Signal evaluation error for {sym}: {sig_e}")
             except Exception as e:
                 print(f"[LiveRecorder] Error recording {sym}: {e}")
 
