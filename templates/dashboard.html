@@ -1102,35 +1102,46 @@
             const elKeyLevel = document.getElementById('valBNFKeyLevel');
             const atmStrike = Math.round(engBNF.endPrice / 100) * 100;
 
-            const netFarLots = (farItmCeBuyLots + farItmPeWriteLots) - (farItmPeBuyLots + farItmCeWriteLots + farItmCeUnwLots);
+            const netFarLots = (farItmCeBuyLots + farItmCeSCLots + farItmPeWriteLots) - (farItmPeBuyLots + farItmPeSCLots + farItmCeWriteLots + farItmCeUnwLots);
             const elDeepITM = document.getElementById('valBNFDeepITM');
             if (elDeepITM) elDeepITM.textContent = `${netFarLots >= 0 ? '+' : ''}${netFarLots.toLocaleString()} lots`;
             const elWhaleBadge = document.getElementById('badgeBNFWhale');
 
-            if (farItmCeBuyLots > farItmCeWriteLots * 1.2 && (farItmCeOiSum > 10000 || engBNF.chgPts > 0)) {
-                badgeFarItm.textContent = "🟢 SMART MONEY ACCUMULATION";
+            // Bullish & Bearish Forces (Short Covering is a major bullish force for Calls)
+            const bullCallPower = farItmCeBuyLots + farItmCeSCLots;
+            const bearCallPower = farItmCeWriteLots + farItmCeUnwLots;
+            const bullPutPower = farItmPeWriteLots + farItmPeSCLots;
+            const bearPutPower = farItmPeBuyLots + farItmPeUnwLots;
+
+            const isCeSqueeze = (farItmCeSCLots > farItmCeWriteLots * 1.2 && farItmCeSCLots > farItmCeUnwLots) || (farItmCeSCLots > 1000 && farItmCeWriteLots === 0);
+            const isBullish = (bullCallPower > bearCallPower * 1.15) || isCeSqueeze || (farItmCeBuyLots > farItmCeWriteLots * 1.2 && (farItmCeOiSum > 10000 || engBNF.chgPts > 0));
+            const isBearish = !isCeSqueeze && ((bearCallPower > bullCallPower * 1.2 && (farItmCeUnwLots > 500 || farItmCeOiSum < -10000 || engBNF.chgPts < -50)) || (bearPutPower > bullPutPower * 1.2 && farItmPeBuyLots > farItmPeWriteLots * 1.2));
+
+            if (isBullish) {
+                const subType = isCeSqueeze ? "Short-Covering Squeeze" : "Synthetic Longs";
+                badgeFarItm.textContent = isCeSqueeze ? "🟢 SHORT-COVERING SQUEEZE" : "🟢 SMART MONEY ACCUMULATION";
                 badgeFarItm.className = "badge-bullish px-2.5 py-1 rounded text-xs font-black uppercase";
-                if (elWhaleBadge) { elWhaleBadge.textContent = "Synthetic Longs"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-bullish"; }
+                if (elWhaleBadge) { elWhaleBadge.textContent = subType; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-bullish"; }
                 
                 txtFarItmExp.innerHTML = `
-                    Smart Money bought <b>${farItmCeBuyLots.toLocaleString()} lots</b> and added <b>+${farItmCeOiSum.toLocaleString()} contracts</b> in Deep ITM Calls. Far ITM Put Writing shows <b>${farItmPeWriteLots.toLocaleString()} lots</b> locking in concrete floor support. Market makers must buy futures to hedge, propelling an explosive upside rally!
+                    Smart Money bought <b>${farItmCeBuyLots.toLocaleString()} lots</b> and panicked call writers covered <b>${farItmCeSCLots.toLocaleString()} lots</b> in Deep ITM Calls. Far ITM Put Writing shows <b>${farItmPeWriteLots.toLocaleString()} lots</b> locking in concrete floor support. Market makers must buy futures to hedge delta, propelling an explosive rally!
                 `;
 
-                masterBadge.textContent = "🟢 EXPLOSIVE UP / BUY CALLS (FAR ITM SMART MONEY)";
+                masterBadge.textContent = isCeSqueeze ? "🟢 SHORT-COVERING SQUEEZE / BUY CALLS" : "🟢 EXPLOSIVE UP / BUY CALLS (FAR ITM SMART MONEY)";
                 masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-bullish shadow-md";
                 if (elRecTrade) { elRecTrade.textContent = `BUY ${atmStrike} CE`; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-emerald-400 tracking-tight'; }
-                if (elTradeAction) elTradeAction.textContent = 'Synthetic Future Long Continuation';
-                if (elConfBadge) { elConfBadge.textContent = 'FAR ITM: 85% HIGH'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-emerald-950 text-emerald-300 border border-emerald-700/50'; }
+                if (elTradeAction) elTradeAction.textContent = isCeSqueeze ? 'Panic Call Short Covering Squeeze' : 'Synthetic Future Long Continuation';
+                if (elConfBadge) { elConfBadge.textContent = 'FAR ITM: 90% HIGH'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-emerald-950 text-emerald-300 border border-emerald-700/50'; }
                 if (elRecStrike) elRecStrike.textContent = `${atmStrike} CE or ${atmStrike - 100} CE (ITM)`;
                 if (elKeyLevel) elKeyLevel.textContent = `SL: ₹${(engBNF.endPrice - 65).toFixed(0)} | Tgt: ₹${(engBNF.endPrice + 150).toFixed(0)}`;
 
                 expBox.innerHTML = `
                     <div class="flex items-center gap-2 text-emerald-400 font-bold mb-1">
-                        <span>🚀 BANKNIFTY FAR ITM INSTITUTIONAL ACCUMULATION:</span>
+                        <span>🚀 BANKNIFTY ${isCeSqueeze ? 'PANIC SHORT COVERING SQUEEZE' : 'FAR ITM INSTITUTIONAL ACCUMULATION'}:</span>
                     </div>
-                    <div>Institutions are heavily accumulating Deep ITM Synthetic Call Longs (${farItmCeBuyLots.toLocaleString()} lots). Market makers are forced to cover shorts and buy index futures. <b>Strategy: Buy ATM/ITM Calls on dips with 65-pt trailing invalidation.</b></div>
+                    <div>Institutions and deep call writers are covering shorts aggressively (${farItmCeSCLots.toLocaleString()} lots SC) alongside fresh deep call buys (${farItmCeBuyLots.toLocaleString()} lots). Market makers are forced to buy index futures to balance books. <b>Strategy: Buy ATM/ITM Calls on minor dips with 65-pt trailing invalidation.</b></div>
                 `;
-            } else if (farItmCeUnwLots > 500 || farItmCeOiSum < -10000 || engBNF.chgPts < -50 || (farItmPeBuyLots > farItmPeWriteLots * 1.2)) {
+            } else if (isBearish) {
                 badgeFarItm.textContent = "🔴 SMART MONEY CASHING OUT";
                 badgeFarItm.className = "badge-bearish px-2.5 py-1 rounded text-xs font-black uppercase";
                 if (elWhaleBadge) { elWhaleBadge.textContent = "Liquidation / Puts"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-bearish"; }
