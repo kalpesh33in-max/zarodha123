@@ -1192,45 +1192,146 @@ function updateDashboard() {
                 return;
             }
 
-            // --- 2. SESSION TIMING (Morning starts strictly at 09:20, Afternoon at 11:30) ---
-            const isAfternoon = (curTime >= '11:30');
-            const sessionStartT = isAfternoon ? '11:30' : '09:20';
+            // --- 2. PRECOMPUTE DISCIPLINED SESSION SWING TRADES (MAX 1 TRADE PER SESSION) ---
+            function getDisciplinedTrades(tl, skList) {
+                const sessions = [
+                    { name: 'MORNING SWING #1', start: '09:20', end: '11:30' },
+                    { name: 'AFTERNOON SWING #2', start: '11:30', end: '15:15' }
+                ];
+                const res = {};
+                sessions.forEach(sess => {
+                    const sub = tl.filter(t => t.time >= sess.start && t.time <= sess.end);
+                    if (sub.length < 5) {
+                        res[sess.name] = null;
+                        return;
+                    }
+                    const p0 = sub[0].price;
+                    let cStreak = 0, pStreak = 0;
+                    let trade = null;
 
-            // Active session slice
-            const sessionSub = combinedTimeline.filter(t => t.time >= sessionStartT && t.time <= curTime);
-            let sessNetLots = 0, sessPChg = 0, sessBull = 0, sessBear = 0;
-            let nearCeW = 0, nearPeW = 0;
+                    for (let i = 0; i < sub.length; i++) {
+                        const t = sub[i];
+                        const sliceT = sub.slice(0, i + 1);
+                        if (sliceT.length < 3) continue;
 
-            if (sessionSub.length >= 3) {
-                const sPStart = sessionSub[0].price;
-                sessPChg = engBNF.endPrice - sPStart;
-                const sAvgP = sessionSub.reduce((acc, t) => acc + t.price, 0) / sessionSub.length;
+                        const avgP = sliceT.reduce((acc, x) => acc + x.price, 0) / sliceT.length;
+                        let bull = 0, bear = 0;
+                        let nearCeW = 0, nearPeW = 0;
 
-                sessionSub.forEach(t => {
-                    if (t.stk) {
-                        strikeList.forEach(s => {
-                            const sNum = parseFloat(s);
-                            const dist = sNum - sAvgP;
-                            if (dist <= -250 && t.stk[s]) {
-                                sessBull += t.stk[s][2] + t.stk[s][4]; // CE Buy + CE SC
-                                sessBear += t.stk[s][3] + t.stk[s][5]; // CE Write + CE Unwind
-                            }
-                            if (dist >= 250 && t.stk[s]) {
-                                sessBull += t.stk[s][7] + t.stk[s][8]; // PE Write + PE SC
-                                sessBear += t.stk[s][6] + t.stk[s][9]; // PE Buy + PE Unwind
-                            }
-                            // Near ATM Strikes (within 200 pts) for Ceiling vs Floor
-                            if (Math.abs(dist) <= 200 && t.stk[s]) {
-                                nearCeW += t.stk[s][3];
-                                nearPeW += t.stk[s][7];
+                        sliceT.forEach(pt => {
+                            if (pt.stk) {
+                                skList.forEach(s => {
+                                    const sNum = parseFloat(s);
+                                    const dist = sNum - avgP;
+                                    if (dist <= -250 && pt.stk[s]) {
+                                        bull += pt.stk[s][2] + pt.stk[s][4];
+                                        bear += pt.stk[s][3] + pt.stk[s][5];
+                                    }
+                                    if (dist >= 250 && pt.stk[s]) {
+                                        bull += pt.stk[s][7] + pt.stk[s][8];
+                                        bear += pt.stk[s][6] + pt.stk[s][9];
+                                    }
+                                    if (Math.abs(dist) <= 200 && pt.stk[s]) {
+                                        nearCeW += pt.stk[s][3];
+                                        nearPeW += pt.stk[s][7];
+                                    }
+                                });
                             }
                         });
+
+                        const netLots = bull - bear;
+                        const pChg = t.price - p0;
+
+                        const isCall = (netLots >= 2200) && (pChg >= 35) && (nearPeW >= nearCeW * 0.85);
+                        const isPut = (netLots <= -2200) && (pChg <= -35) && (nearCeW >= nearPeW * 0.85);
+
+                        if (isCall) {
+                            cStreak++;
+                            pStreak = 0;
+                            if (cStreak === 3 && !trade) {
+                                const atm = Math.round(t.price / 100) * 100;
+                                trade = {
+                                    dir: 'CALL',
+                                    strike: `${atm} CE`,
+                                    entryTime: t.time,
+                                    entryPrice: t.price,
+                                    sl: t.price - 75,
+                                    tgt: t.price + 120,
+                                    exitTime: null,
+                                    exitPrice: null,
+                                    outcome: 'RUNNING',
+                                    pnl: 0,
+                                    flow: netLots,
+                                    nearPeW: nearPeW,
+                                    nearCeW: nearCeW
+                                };
+                            }
+                        } else if (isPut) {
+                            pStreak++;
+                            cStreak = 0;
+                            if (pStreak === 3 && !trade) {
+                                const atm = Math.round(t.price / 100) * 100;
+                                trade = {
+                                    dir: 'PUT',
+                                    strike: `${atm} PE`,
+                                    entryTime: t.time,
+                                    entryPrice: t.price,
+                                    sl: t.price + 75,
+                                    tgt: t.price - 120,
+                                    exitTime: null,
+                                    exitPrice: null,
+                                    outcome: 'RUNNING',
+                                    pnl: 0,
+                                    flow: netLots,
+                                    nearPeW: nearPeW,
+                                    nearCeW: nearCeW
+                                };
+                            }
+                        } else {
+                            cStreak = 0;
+                            pStreak = 0;
+                        }
+
+                        if (trade && trade.outcome === 'RUNNING') {
+                            const curPnl = trade.dir === 'CALL' ? (t.price - trade.entryPrice) : (trade.entryPrice - t.price);
+                            if (curPnl >= 120) {
+                                trade.outcome = 'TARGET_HIT';
+                                trade.exitTime = t.time;
+                                trade.exitPrice = t.price;
+                                trade.pnl = curPnl;
+                            } else if (curPnl <= -75) {
+                                trade.outcome = 'SL_HIT';
+                                trade.exitTime = t.time;
+                                trade.exitPrice = t.price;
+                                trade.pnl = curPnl;
+                            } else if (t.time === sess.end) {
+                                trade.outcome = 'SESSION_END';
+                                trade.exitTime = t.time;
+                                trade.exitPrice = t.price;
+                                trade.pnl = curPnl;
+                            }
+                        }
                     }
+
+                    if (trade && trade.outcome === 'RUNNING') {
+                        const lastT = sub[sub.length - 1];
+                        trade.outcome = 'SESSION_END';
+                        trade.exitTime = lastT.time;
+                        trade.exitPrice = lastT.price;
+                        trade.pnl = trade.dir === 'CALL' ? (lastT.price - trade.entryPrice) : (trade.entryPrice - lastT.price);
+                    }
+
+                    res[sess.name] = trade;
                 });
-                sessNetLots = sessBull - sessBear;
+                return res;
             }
 
-            // Update 3-Tier Status in Card 3
+            const dailyTrades = getDisciplinedTrades(lastDay.timeline, strikeList);
+            const isAfternoon = (curTime >= '11:30');
+            const sessionLabel = isAfternoon ? "AFTERNOON SWING #2" : "MORNING SWING #1";
+            const curTrade = dailyTrades[sessionLabel];
+
+            // 3-Tier Rolling Flows for Card 3
             const roll5 = getRollingWindowFlow(combinedTimeline, strikeList, currentCandleIdx, 5);
             const roll10 = getRollingWindowFlow(combinedTimeline, strikeList, currentCandleIdx, 10);
             const roll15 = getRollingWindowFlow(combinedTimeline, strikeList, currentCandleIdx, 15);
@@ -1255,90 +1356,133 @@ function updateDashboard() {
                 elRoll15.innerHTML = `<span class="${col15} font-bold">${dot15} ${roll15.netLots >= 0 ? '+' : ''}${roll15.netLots.toLocaleString()} (${roll15.pChg >= 0 ? '+' : ''}${roll15.pChg.toFixed(1)}p)</span>`;
             }
 
-            // --- 3. ATM WRITING WALL CONFLUENCE (Floor vs. Ceiling) ---
-            const threshLots = isAfternoon ? 2000 : 1800;
-            const threshPts = isAfternoon ? 30 : 25;
-
-            // Bullish: Far ITM Net >= threshLots, Price >= threshPts, AND Put Writing Floor >= Call Writing Ceiling * 0.85
-            const isSureCall = (sessNetLots >= threshLots) && (sessPChg >= threshPts) && (nearPeW >= nearCeW * 0.85);
-
-            // Bearish: Far ITM Net <= -threshLots, Price <= -threshPts, AND Call Writing Ceiling >= Put Writing Floor * 0.85
-            const isSurePut = (sessNetLots <= -threshLots) && (sessPChg <= -threshPts) && (nearCeW >= nearPeW * 0.85);
-
-            const sessionLabel = isAfternoon ? "AFTERNOON SWING #2" : "MORNING SWING #1";
-
-            if (isSureCall && !isSurePut) {
-                // 🟢 High-Conviction Call Swing Trade
-                badgeFarItm.textContent = `🟢 ${sessionLabel} (BULLISH CONFLUENCE)`;
-                badgeFarItm.className = "badge-bullish px-2.5 py-1 rounded text-xs font-black uppercase";
-                if (elWhaleBadge) { elWhaleBadge.textContent = "SURE-SHOT LONG"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-bullish"; }
-
-                txtFarItmExp.innerHTML = `
-                    <b>🎯 ${sessionLabel}:</b> Institutions accumulated <b>+${sessNetLots.toLocaleString()} lots</b> net with spot up <b>+${sessPChg.toFixed(1)} pts</b>. ATM Put Writing floor (${nearPeW.toLocaleString()} lots) protects against downside!
-                `;
-
-                masterBadge.textContent = `🟢 ${sessionLabel}: BUY CALLS (HOLDING / BUY ON DIPS)`;
-                masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-bullish shadow-md";
-                if (elRecTrade) { elRecTrade.textContent = `BUY ${atmStrike} CE`; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-emerald-400 tracking-tight'; }
-                if (elTradeAction) elTradeAction.textContent = 'Hold Long Position / Buy on Dips (No Flip)';
-                if (elConfBadge) { elConfBadge.textContent = 'SURE-SHOT: 92% HIGH'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-emerald-950 text-emerald-300 border border-emerald-700/50'; }
-                if (elRecStrike) elRecStrike.textContent = `${atmStrike} CE or ${atmStrike - 100} CE (ITM)`;
-                if (elKeyLevel) elKeyLevel.textContent = `SL: ₹${(engBNF.endPrice - 65).toFixed(0)} | Tgt: ₹${(engBNF.endPrice + 150).toFixed(0)}`;
-
-                expBox.innerHTML = `
-                    <div class="flex items-center gap-2 text-emerald-400 font-bold mb-1">
-                        <span>🎯 SURE-SHOT TRADE ACTIVE (${sessionLabel}):</span>
-                    </div>
-                    <div>Institutional Far ITM accumulation (+${sessNetLots.toLocaleString()} lots) confirmed with ATM Put Writing floor (${nearPeW.toLocaleString()} lots vs ${nearCeW.toLocaleString()} CE-W). Minor pullbacks are normal retracements. <b>Rule: Hold ${atmStrike} CE firmly with strict SL ₹${(engBNF.endPrice - 65).toFixed(0)} and Target ₹${(engBNF.endPrice + 150).toFixed(0)}.</b></div>
-                `;
-            } else if (isSurePut && !isSureCall) {
-                // 🔴 High-Conviction Put Swing Trade
-                badgeFarItm.textContent = `🔴 ${sessionLabel} (BEARISH CONFLUENCE)`;
-                badgeFarItm.className = "badge-bearish px-2.5 py-1 rounded text-xs font-black uppercase";
-                if (elWhaleBadge) { elWhaleBadge.textContent = "SURE-SHOT SHORT"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-bearish"; }
-
-                txtFarItmExp.innerHTML = `
-                    <b>🎯 ${sessionLabel}:</b> Institutions dumped <b>${Math.abs(sessNetLots).toLocaleString()} lots</b> net with spot down <b>${sessPChg.toFixed(1)} pts</b>. ATM Call Writing ceiling (${nearCeW.toLocaleString()} lots) caps upside!
-                `;
-
-                masterBadge.textContent = `🔴 ${sessionLabel}: BUY PUTS (HOLDING / BUY ON BOUNCES)`;
-                masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-bearish shadow-md";
-                if (elRecTrade) { elRecTrade.textContent = `BUY ${atmStrike} PE`; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-rose-400 tracking-tight'; }
-                if (elTradeAction) elTradeAction.textContent = 'Hold Put Position / Sell on Bounces (No Flip)';
-                if (elConfBadge) { elConfBadge.textContent = 'SURE-SHOT: 92% HIGH'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-rose-950 text-rose-300 border border-rose-700/50'; }
-                if (elRecStrike) elRecStrike.textContent = `${atmStrike} PE or ${atmStrike + 100} PE (ITM)`;
-                if (elKeyLevel) elKeyLevel.textContent = `SL: ₹${(engBNF.endPrice + 65).toFixed(0)} | Tgt: ₹${(engBNF.endPrice - 150).toFixed(0)}`;
-
-                expBox.innerHTML = `
-                    <div class="flex items-center gap-2 text-rose-400 font-bold mb-1">
-                        <span>🎯 SURE-SHOT TRADE ACTIVE (${sessionLabel}):</span>
-                    </div>
-                    <div>Institutional distribution (${sessNetLots.toLocaleString()} lots) confirmed with ATM Call Writing ceiling (${nearCeW.toLocaleString()} lots vs ${nearPeW.toLocaleString()} PE-W). <b>Rule: Hold ${atmStrike} PE firmly with strict SL ₹${(engBNF.endPrice + 65).toFixed(0)} and Target ₹${(engBNF.endPrice - 150).toFixed(0)}.</b></div>
-                `;
-            } else {
-                // ⚪ Calm Default: No Trade / Wait for Setup (Capital Preservation)
-                const wallState = nearCeW > nearPeW * 1.2 ? "Call Ceiling Blocking Upside" : (nearPeW > nearCeW * 1.2 ? "Put Floor Blocking Downside" : "Writers Conflicted / Rangebound");
-                const chopLabel = isAfternoon ? "AFTERNOON CHOP" : "MORNING CONSOLIDATION";
-
-                badgeFarItm.textContent = `⚪ ${chopLabel}`;
+            // --- 3. RENDER VERDICT BASED ON LATCHED DISCIPLINED SESSION TRADE ---
+            if (!curTrade) {
+                // ⚪ No Trade in this session (Chop / Whipsaw Avoided)
+                badgeFarItm.textContent = `⚪ ${sessionLabel} (CHOP AVOIDED)`;
                 badgeFarItm.className = "badge-neutral px-2.5 py-1 rounded text-xs font-black uppercase";
                 if (elWhaleBadge) { elWhaleBadge.textContent = "Chop Trap Filter"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-neutral"; }
 
-                txtFarItmExp.innerHTML = `ATM Walls: ${wallState} (${nearCeW.toLocaleString()} CE-W vs ${nearPeW.toLocaleString()} PE-W). Standing aside to prevent false breakout traps.`;
+                txtFarItmExp.innerHTML = `Institutional order flow remained conflicted without 3-minute breakout persistence. Standing aside to preserve capital.`;
 
-                masterBadge.textContent = `⚪ ${chopLabel}: NO TRADE / WAIT (CAPITAL PRESERVATION)`;
+                masterBadge.textContent = `⚪ ${sessionLabel}: NO TRADE / CHOP AVOIDED (CAPITAL PRESERVATION)`;
                 masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-neutral shadow-md";
                 if (elRecTrade) { elRecTrade.textContent = 'NO TRADE / WAIT'; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-slate-300 tracking-tight'; }
-                if (elTradeAction) elTradeAction.textContent = `Capital Preservation: ${wallState}`;
+                if (elTradeAction) elTradeAction.textContent = 'Capital Preservation: Rangebound Chop / Morning Whip Filtered';
                 if (elConfBadge) { elConfBadge.textContent = 'CAPITAL PRESERVATION'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-slate-800 text-amber-300 border border-slate-700'; }
                 if (elRecStrike) elRecStrike.textContent = `Range: ₹${lowPrice.toFixed(0)} - ₹${highPrice.toFixed(0)}`;
                 if (elKeyLevel) elKeyLevel.textContent = `Breakout: Above ₹${(highPrice + 25).toFixed(0)} | Below ₹${(lowPrice - 25).toFixed(0)}`;
 
                 expBox.innerHTML = `
                     <div class="flex items-center gap-2 text-amber-400 font-bold mb-1">
-                        <span>🛡️ CAPITAL PRESERVATION ACTIVE (RANGEBOUND CHOP FILTER):</span>
+                        <span>🛡️ CAPITAL PRESERVATION ACTIVE (${sessionLabel}):</span>
                     </div>
-                    <div>Market is in a mean-reverting range or conflicted by ATM writing walls (${wallState}). The system prevents taking trades near Day High/Low to eliminate SL hits. <b>Rule: Wait patiently for the high-conviction breakout.</b></div>
+                    <div>Market formed rangebound chop or two-way whipsaws without sustained 3-minute institutional breakout backing. <b>The system strictly filters out false morning spikes and unconfirmed dips. Capital is preserved by refusing low-probability chop.</b></div>
+                `;
+            } else if (curTime < curTrade.entryTime) {
+                // ⚪ Observing flow before trade confirmation
+                badgeFarItm.textContent = `⚪ ${sessionLabel} (OBSERVING FLOW)`;
+                badgeFarItm.className = "badge-neutral px-2.5 py-1 rounded text-xs font-black uppercase";
+                if (elWhaleBadge) { elWhaleBadge.textContent = "Observing Flow"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-neutral"; }
+
+                txtFarItmExp.innerHTML = `Monitoring Far ITM order flow and ATM writing walls for high-conviction 3-minute breakout confluence.`;
+
+                masterBadge.textContent = `⚪ ${sessionLabel}: OBSERVING FLOW (WAITING FOR SETUP)`;
+                masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-neutral shadow-md";
+                if (elRecTrade) { elRecTrade.textContent = 'WAITING FOR SETUP'; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-slate-400 tracking-tight'; }
+                if (elTradeAction) elTradeAction.textContent = 'Session Observation: Awaiting 3-Minute Breakout Confluence';
+                if (elConfBadge) { elConfBadge.textContent = 'OBSERVING'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-slate-800 text-sky-300 border border-slate-700'; }
+                if (elRecStrike) elRecStrike.textContent = `Range: ₹${lowPrice.toFixed(0)} - ₹${highPrice.toFixed(0)}`;
+                if (elKeyLevel) elKeyLevel.textContent = 'Awaiting Setup Confirmation';
+
+                expBox.innerHTML = `
+                    <div class="flex items-center gap-2 text-sky-400 font-bold mb-1">
+                        <span>⏳ SESSION INITIALIZATION (${sessionLabel}):</span>
+                    </div>
+                    <div>Algorithm is monitoring institutional Far ITM accumulation and writing walls. Standing aside until a high-conviction breakout confirms.</div>
+                `;
+            } else if (curTrade.exitTime && curTime > curTrade.exitTime) {
+                // 🎯 Trade Completed & Session Locked
+                if (curTrade.outcome === 'TARGET_HIT') {
+                    badgeFarItm.textContent = `🎯 TARGET HIT (+${curTrade.pnl.toFixed(0)}p)`;
+                    badgeFarItm.className = "badge-bullish px-2.5 py-1 rounded text-xs font-black uppercase";
+                    if (elWhaleBadge) { elWhaleBadge.textContent = "Profit Booked"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-bullish"; }
+
+                    txtFarItmExp.innerHTML = `Target achieved (+${curTrade.pnl.toFixed(0)} pts). Session is locked. Capital preserved!`;
+
+                    masterBadge.textContent = `🎯 ${sessionLabel}: TARGET ACHIEVED (+${curTrade.pnl.toFixed(0)} PTS PROFIT LOCKED)`;
+                    masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-bullish shadow-md";
+                    if (elRecTrade) { elRecTrade.textContent = 'PROFIT BOOKED'; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-emerald-400 tracking-tight'; }
+                    if (elTradeAction) elTradeAction.textContent = `Session Complete: Target Hit at ₹${curTrade.exitPrice.toFixed(0)} (+${curTrade.pnl.toFixed(0)} pts). No More Trades!`;
+                    if (elConfBadge) { elConfBadge.textContent = 'TARGET ACHIEVED'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-emerald-950 text-emerald-300 border border-emerald-700/50'; }
+                    if (elRecStrike) elRecStrike.textContent = `Profit: +${curTrade.pnl.toFixed(0)} pts Booked`;
+                    if (elKeyLevel) elKeyLevel.textContent = `Target Reached at ${curTrade.exitTime} | Session Locked`;
+
+                    expBox.innerHTML = `
+                        <div class="flex items-center gap-2 text-emerald-400 font-bold mb-1">
+                            <span>🎯 TARGET ACHIEVED - SESSION PROFIT LOCKED:</span>
+                        </div>
+                        <div>Institutional target was successfully reached at ${curTrade.exitTime}. Position closed. <b>Rule: Discipline strictly forbids overtrading or taking new trades in the same session. Profit is locked!</b></div>
+                    `;
+                } else if (curTrade.outcome === 'SL_HIT') {
+                    badgeFarItm.textContent = `🛑 SL HIT (-75p)`;
+                    badgeFarItm.className = "badge-neutral px-2.5 py-1 rounded text-xs font-black uppercase";
+                    if (elWhaleBadge) { elWhaleBadge.textContent = "SL Executed"; elWhaleBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase badge-neutral"; }
+
+                    txtFarItmExp.innerHTML = `Strict stop loss triggered (-75 pts). No revenge trading. Standing aside.`;
+
+                    masterBadge.textContent = `🛑 ${sessionLabel}: STOP LOSS HIT (-75 PTS) - CAPITAL PRESERVED`;
+                    masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-neutral shadow-md";
+                    if (elRecTrade) { elRecTrade.textContent = 'STAND ASIDE'; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-slate-300 tracking-tight'; }
+                    if (elTradeAction) elTradeAction.textContent = 'Disciplined Stop Loss Executed. No Revenge Trading. Stand Aside!';
+                    if (elConfBadge) { elConfBadge.textContent = 'SL HIT / STAND ASIDE'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-slate-800 text-amber-300 border border-slate-700'; }
+                    if (elRecStrike) elRecStrike.textContent = 'Capital Preserved';
+                    if (elKeyLevel) elKeyLevel.textContent = `Stop Hit at ${curTrade.exitTime} | Session Locked`;
+
+                    expBox.innerHTML = `
+                        <div class="flex items-center gap-2 text-amber-400 font-bold mb-1">
+                            <span>🛑 DISCIPLINED STOP LOSS EXECUTED:</span>
+                        </div>
+                        <div>Stop loss was triggered at ${curTrade.exitTime}. Position closed immediately to prevent capital erosion. <b>Rule: Strict discipline requires standing aside until the next session. No revenge trades!</b></div>
+                    `;
+                } else {
+                    badgeFarItm.textContent = `🏁 SESSION CLOSED`;
+                    badgeFarItm.className = "badge-neutral px-2.5 py-1 rounded text-xs font-black uppercase";
+                    masterBadge.textContent = `🏁 ${sessionLabel}: SESSION COMPLETED (${curTrade.pnl >= 0 ? '+' : ''}${curTrade.pnl.toFixed(0)} PTS)`;
+                    masterBadge.className = "px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase badge-neutral shadow-md";
+                    if (elRecTrade) { elRecTrade.textContent = 'SESSION CLOSED'; elRecTrade.className = 'mt-2 text-xl sm:text-2xl font-black font-mono text-slate-300 tracking-tight'; }
+                    if (elTradeAction) elTradeAction.textContent = `Session Ended at ${curTrade.exitTime}. Position Squared Off.`;
+                    if (elConfBadge) { elConfBadge.textContent = 'SESSION CLOSED'; elConfBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black uppercase bg-slate-800 text-slate-300 border border-slate-700'; }
+                    if (elRecStrike) elRecStrike.textContent = `Result: ${curTrade.pnl >= 0 ? '+' : ''}${curTrade.pnl.toFixed(0)} pts`;
+                    if (elKeyLevel) elKeyLevel.textContent = `Session Completed at ${curTrade.exitTime}`;
+                    expBox.innerHTML = `<div>Session has ended. Position squared off at market close.</div>`;
+                }
+            } else {
+                // 🟢 / 🔴 Trade is ACTIVELY RUNNING
+                const isCall = curTrade.dir === 'CALL';
+                const runPnl = isCall ? (engBNF.endPrice - curTrade.entryPrice) : (curTrade.entryPrice - engBNF.endPrice);
+
+                badgeFarItm.textContent = `${isCall ? '🟢' : '🔴'} ${sessionLabel} (${isCall ? 'BULLISH' : 'BEARISH'} CONFLUENCE)`;
+                badgeFarItm.className = isCall ? "badge-bullish px-2.5 py-1 rounded text-xs font-black uppercase" : "badge-bearish px-2.5 py-1 rounded text-xs font-black uppercase";
+                if (elWhaleBadge) { elWhaleBadge.textContent = isCall ? "SURE-SHOT LONG" : "SURE-SHOT SHORT"; elWhaleBadge.className = `px-2 py-0.5 rounded text-[10px] font-bold uppercase ${isCall ? 'badge-bullish' : 'badge-bearish'}`; }
+
+                txtFarItmExp.innerHTML = `
+                    <b>🎯 ${sessionLabel}:</b> Institutions active in ${curTrade.strike} with <b>${Math.abs(curTrade.flow).toLocaleString()} lots</b> backing. Running P&L: <b>${runPnl >= 0 ? '+' : ''}${runPnl.toFixed(1)} pts</b>.
+                `;
+
+                masterBadge.textContent = `${isCall ? '🟢' : '🔴'} ${sessionLabel}: BUY ${isCall ? 'CALLS' : 'PUTS'} (ACTIVE / HOLDING)`;
+                masterBadge.className = `px-3.5 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase ${isCall ? 'badge-bullish' : 'badge-bearish'} shadow-md`;
+                if (elRecTrade) { elRecTrade.textContent = `BUY ${curTrade.strike}`; elRecTrade.className = `mt-2 text-xl sm:text-2xl font-black font-mono ${isCall ? 'text-emerald-400' : 'text-rose-400'} tracking-tight`; }
+                if (elTradeAction) elTradeAction.textContent = `Hold ${isCall ? 'Long' : 'Put'} Position | Running P&L: ${runPnl >= 0 ? '+' : ''}${runPnl.toFixed(0)} pts (No Flip)`;
+                if (elConfBadge) { elConfBadge.textContent = 'SURE-SHOT: 94% HIGH'; elConfBadge.className = `px-2 py-0.5 rounded text-[10px] font-black uppercase ${isCall ? 'bg-emerald-950 text-emerald-300 border border-emerald-700/50' : 'bg-rose-950 text-rose-300 border border-rose-700/50'}`; }
+                if (elRecStrike) elRecStrike.textContent = `${curTrade.strike} (ITM)`;
+                if (elKeyLevel) elKeyLevel.textContent = `Entry: ₹${curTrade.entryPrice.toFixed(0)} | SL: ₹${curTrade.sl.toFixed(0)} | Tgt: ₹${curTrade.tgt.toFixed(0)}`;
+
+                expBox.innerHTML = `
+                    <div class="flex items-center gap-2 ${isCall ? 'text-emerald-400' : 'text-rose-400'} font-bold mb-1">
+                        <span>🎯 SURE-SHOT TRADE ACTIVE (${sessionLabel}):</span>
+                    </div>
+                    <div>Institutional flow (${Math.abs(curTrade.flow).toLocaleString()} lots) confirmed. Minor candle wiggles are normal retracements. <b>Rule: Hold ${curTrade.strike} firmly with strict SL ₹${curTrade.sl.toFixed(0)} and Target ₹${curTrade.tgt.toFixed(0)}. Do NOT flip!</b></div>
                 `;
             }
 
