@@ -205,6 +205,16 @@ def start_background_services(source):
         )
         boot_thread.start()
 
+    # Start Live Market Recorder (BNF 09:15-15:30 & CRUDEOILM 09:00-23:30)
+    try:
+        from live_recorder import LiveMarketRecorder
+        recorder = LiveMarketRecorder()
+        rec_thread = threading.Thread(target=recorder.run_loop, daemon=True)
+        rec_thread.start()
+        print(f"[{source}] Live Market Recorder daemon started (BNF 09:15-15:30, CRUDEOILM 09:00-23:30).")
+    except Exception as re_err:
+        print(f"[{source}] Live Market Recorder startup error: {re_err}")
+
 
 def ensure_background_services_started(source):
     if AUTO_START_BACKGROUND:
@@ -235,13 +245,23 @@ def status_view():
         "server_time": datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')
     })
 
+@app.route("/api/data")
+def rolling_market_data():
+    try:
+        from storage_manager import load_all_data
+        data = load_all_data()
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/api/live")
 def live_market_data():
     now_ist = datetime.now(IST)
     is_weekday = now_ist.weekday() < 5
-    market_open = datetime.strptime("09:15:00", "%H:%M:%S").time()
-    market_close = datetime.strptime("15:30:00", "%H:%M:%S").time()
-    is_live = is_weekday and (market_open <= now_ist.time() <= market_close)
+    t = now_ist.time()
+    bnf_open = is_weekday and (datetime.strptime("09:15:00", "%H:%M:%S").time() <= t <= datetime.strptime("15:30:00", "%H:%M:%S").time())
+    crude_open = is_weekday and (datetime.strptime("09:00:00", "%H:%M:%S").time() <= t <= datetime.strptime("23:30:00", "%H:%M:%S").time())
+    is_live = bnf_open or crude_open
 
     try:
         from websocket_flow import get_symbol_quotes, get_ws_status
@@ -249,7 +269,8 @@ def live_market_data():
         quotes = get_symbol_quotes([
             "NFO:BANKNIFTY26SEPFUT",
             "NFO:HDFCBANK26SEPFUT",
-            "NFO:ICICIBANK26SEPFUT"
+            "NFO:ICICIBANK26SEPFUT",
+            "MCX:CRUDEOILM26SEPFUT"
         ], max_age_seconds=120)
     except Exception:
         ws_status = {"connected": False}
@@ -258,16 +279,36 @@ def live_market_data():
     bnf = quotes.get("NFO:BANKNIFTY26SEPFUT", {})
     hdfc = quotes.get("NFO:HDFCBANK26SEPFUT", {})
     icici = quotes.get("NFO:ICICIBANK26SEPFUT", {})
+    crude = quotes.get("MCX:CRUDEOILM26SEPFUT", {})
+
+    # Fallback to KiteConnect quote for CRUDEOILM if not streaming via WS
+    if not crude.get("last_price"):
+        token = load_saved_token()
+        if token:
+            try:
+                kite.set_access_token(token)
+                cq = kite.quote(["MCX:CRUDEOILM26SEPFUT"])
+                crude = cq.get("MCX:CRUDEOILM26SEPFUT", {})
+            except Exception:
+                pass
 
     return jsonify({
         "server_time": now_ist.strftime("%Y-%m-%d %H:%M:%S"),
         "is_market_open": is_live,
+        "bnf_open": bnf_open,
+        "crude_open": crude_open,
         "ws_connected": ws_status.get("connected", False),
         "banknifty": {
             "ltp": bnf.get("last_price", 0.0),
             "oi": bnf.get("oi", 0),
             "volume": bnf.get("volume", 0),
             "change": bnf.get("change", 0.0)
+        },
+        "crudeoilm": {
+            "ltp": crude.get("last_price", 0.0),
+            "oi": crude.get("oi", 0),
+            "volume": crude.get("volume", 0),
+            "change": crude.get("net_change", crude.get("change", 0.0))
         },
         "hdfc": {
             "ltp": hdfc.get("last_price", 0.0),
