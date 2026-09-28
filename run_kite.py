@@ -2,7 +2,7 @@ import threading
 import os
 import time
 import requests
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, request, send_file, jsonify, make_response
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -232,7 +232,11 @@ def home():
     ensure_background_services_started("HTTP /")
     dashboard_file = os.path.join(app.root_path, "templates", "dashboard.html")
     if os.path.exists(dashboard_file):
-        return send_file(dashboard_file, mimetype="text/html")
+        resp = make_response(send_file(dashboard_file, mimetype="text/html"))
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        return resp
     status = "RUNNING" if (scanner_thread and scanner_thread.is_alive()) else "STOPPED"
     return f"<h3>Kite Scanner Status: {status}</h3><p>Server Time: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')}</p>"
 
