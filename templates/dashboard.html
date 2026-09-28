@@ -3500,9 +3500,9 @@
                 });
         }
 
-        async function fetchBackendData() {
-            // In BACKTEST mode, completely IGNORE auto-refresh to preserve user backtesting state
-            if (currentMode === 'backtest') {
+        async function fetchBackendData(isInitial = false) {
+            // In BACKTEST mode, completely IGNORE auto-refresh to preserve user backtesting state (except initial load)
+            if (currentMode === 'backtest' && !isInitial) {
                 return;
             }
 
@@ -3519,27 +3519,31 @@
                         RAW_DATA.CRUDEOILM = freshData.CRUDEOILM;
                         updated = true;
                     }
-                    if (updated && currentMode === 'live') {
-                        const sym = currentInstrument || 'BANKNIFTY';
-                        const allDates = Object.keys(RAW_DATA[sym] || {}).sort((a, b) => parseDateString(a) - parseDateString(b));
-                        if (allDates.length > 0) {
-                            const latestD = allDates[allDates.length - 1];
-                            const selFrom = document.getElementById('selDateFrom');
-                            const selTo = document.getElementById('selDateTo');
-                            if (selFrom && selTo) {
-                                selFrom.value = latestD;
-                                selTo.value = latestD;
-                            }
-                            const sampleDay = RAW_DATA[sym] && RAW_DATA[sym][latestD];
-                            if (sampleDay && sampleDay.timeline && sampleDay.timeline.length > 0) {
-                                const selEnd = document.getElementById('selEnd');
-                                if (selEnd) {
-                                    selEnd.value = sampleDay.timeline[sampleDay.timeline.length - 1].time;
+                    if (updated) {
+                        renderQuickSelectBar();
+                        populateDropdowns();
+                        if (currentMode === 'live' || isInitial) {
+                            const sym = currentInstrument || 'BANKNIFTY';
+                            const allDates = Object.keys(RAW_DATA[sym] || {}).sort((a, b) => parseDateString(a) - parseDateString(b));
+                            if (allDates.length > 0) {
+                                const latestD = allDates[allDates.length - 1];
+                                const selFrom = document.getElementById('selDateFrom');
+                                const selTo = document.getElementById('selDateTo');
+                                if (selFrom && selTo) {
+                                    selFrom.value = latestD;
+                                    selTo.value = latestD;
+                                }
+                                const sampleDay = RAW_DATA[sym] && RAW_DATA[sym][latestD];
+                                if (sampleDay && sampleDay.timeline && sampleDay.timeline.length > 0) {
+                                    const selEnd = document.getElementById('selEnd');
+                                    if (selEnd) {
+                                        selEnd.value = sampleDay.timeline[sampleDay.timeline.length - 1].time;
+                                    }
                                 }
                             }
+                            globalPlaybackIdx = -1;
+                            updateDashboard();
                         }
-                        globalPlaybackIdx = -1;
-                        updateDashboard();
                     }
                 }
             } catch (e) {
@@ -3552,8 +3556,8 @@
             populateDropdowns();
             updateDashboard();
             pollLiveData();
-            fetchBackendData();
-            setInterval(fetchBackendData, 60000);
+            fetchBackendData(true);
+            setInterval(() => fetchBackendData(false), 60000);
         });
 
     </script>
