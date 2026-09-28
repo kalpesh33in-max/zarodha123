@@ -252,6 +252,14 @@ class LiveMarketRecorder:
             except Exception as e:
                 print(f"[LiveRecorder] Error recording {sym}: {e}")
 
+        # 3:14 PM Hero-Zero Expiry Strangle & 3:29 PM Hard Kill Evaluation
+        try:
+            from telegram_signal_manager import signal_engine
+            signal_engine.check_and_trigger_hero_zero(kite=self.kite)
+            signal_engine.check_and_trigger_hero_zero_hard_kill(kite=self.kite)
+        except Exception as hz_e:
+            print(f"[LiveRecorder] Hero-Zero evaluation error: {hz_e}")
+
     def run_loop(self):
         self.running = True
         print("[LiveRecorder] Service active. Recording BankNifty (09:15-15:30) and CrudeOilM (09:00-23:30)...")

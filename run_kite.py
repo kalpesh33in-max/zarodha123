@@ -254,6 +254,102 @@ def rolling_market_data():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/confluence/status")
+def api_confluence_status():
+    try:
+        from storage_manager import load_symbol_data
+        from telegram_signal_manager import signal_engine
+        sym = request.args.get("sym", "BANKNIFTY").upper()
+        data = load_symbol_data(sym)
+        if not data:
+            return jsonify({"status": "no_data", "symbol": sym})
+        latest_date = sorted(data.keys())[-1]
+        day_obj = data[latest_date]
+        timeline = day_obj.get("timeline", [])
+        strikes = [str(s) for s in day_obj.get("strikes", [])]
+        alert_msg = signal_engine.evaluate_confluence_alert(sym, latest_date, timeline, strikes, force_check=False)
+        return jsonify({
+            "status": "ok",
+            "symbol": sym,
+            "date": latest_date,
+            "candles_count": len(timeline),
+            "confluence_triggered": bool(alert_msg),
+            "alert": alert_msg
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+@app.route("/api/confluence/test", methods=["GET", "POST"])
+def api_confluence_test():
+    try:
+        from storage_manager import load_symbol_data
+        from telegram_signal_manager import signal_engine
+        sym = request.args.get("sym", "BANKNIFTY").upper()
+        data = load_symbol_data(sym)
+        if not data:
+            return jsonify({"status": "no_data", "symbol": sym})
+        latest_date = sorted(data.keys())[-1]
+        day_obj = data[latest_date]
+        timeline = day_obj.get("timeline", [])
+        strikes = [str(s) for s in day_obj.get("strikes", [])]
+        alert_msg = signal_engine.evaluate_confluence_alert(sym, latest_date, timeline, strikes, force_check=True)
+        return jsonify({
+            "status": "success",
+            "symbol": sym,
+            "date": latest_date,
+            "candles_count": len(timeline),
+            "alert_delivered": bool(alert_msg),
+            "alert": alert_msg
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+@app.route("/api/hero_zero/status")
+def api_hero_zero_status():
+    try:
+        from telegram_signal_manager import signal_engine, IST
+        sym = request.args.get("sym")
+        now = datetime.now(IST)
+        setup, err = signal_engine.get_expiry_hero_zero_setup(now=now, kite=kite, forced_sym=sym.upper() if sym else None)
+        today_str = now.strftime("%Y-%m-%d")
+        return jsonify({
+            "status": "ok",
+            "time_ist": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "weekday": now.strftime("%A"),
+            "is_314_trigger_time": (now.hour == 15 and now.minute == 14),
+            "is_329_kill_time": (now.hour == 15 and now.minute == 29),
+            "already_triggered_today": bool(signal_engine.hero_zero_triggered.get(today_str)),
+            "already_killed_today": bool(signal_engine.hero_zero_killed.get(today_str)),
+            "setup": setup,
+            "error": err
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+@app.route("/api/hero_zero/trigger", methods=["GET", "POST"])
+def api_hero_zero_trigger():
+    try:
+        from telegram_signal_manager import signal_engine, IST
+        action = request.args.get("action", "entry").lower()
+        sym = request.args.get("sym")
+        now = datetime.now(IST)
+        if action == "kill":
+            ok, res = signal_engine.check_and_trigger_hero_zero_hard_kill(now=now, kite=kite, force=True)
+            return jsonify({"status": "success" if ok else "failed", "action": "kill", "result": res})
+        else:
+            if sym:
+                setup, err = signal_engine.get_expiry_hero_zero_setup(now=now, kite=kite, forced_sym=sym.upper())
+                if setup:
+                    from telegram_signal_manager import send_signal_telegram
+                    sent = send_signal_telegram(setup["entry_msg"])
+                    return jsonify({"status": "success" if sent else "failed", "action": "entry", "symbol": sym, "setup": setup})
+                return jsonify({"status": "failed", "error": err})
+            else:
+                ok, res = signal_engine.check_and_trigger_hero_zero(now=now, kite=kite, force=True)
+                return jsonify({"status": "success" if ok else "failed", "action": "entry", "result": res})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
 @app.route("/api/live")
 def live_market_data():
     now_ist = datetime.now(IST)
