@@ -2606,18 +2606,23 @@
                     const vwap = computeDailyVwap(sliceT, i);
 
                     const far15 = computeFarItmMultiSpeedFlow(sliceT, skList, i, 15, curSpotP, farDistThresh);
+                    const far10 = computeFarItmMultiSpeedFlow(sliceT, skList, i, 10, curSpotP, farDistThresh);
                     const far5 = computeFarItmMultiSpeedFlow(sliceT, skList, i, 5, curSpotP, farDistThresh);
+
                     const atm15 = computeAtmItmMultiSpeedFlow(sliceT, skList, i, 15, curSpotP, farDistThresh);
+                    const atm10 = computeAtmItmMultiSpeedFlow(sliceT, skList, i, 10, curSpotP, farDistThresh);
                     const atm5 = computeAtmItmMultiSpeedFlow(sliceT, skList, i, 5, curSpotP, farDistThresh);
+
                     const fut15 = getRollingFuturesFlow(sliceT, i, 15);
+                    const fut10 = getRollingFuturesFlow(sliceT, i, 10);
                     const fut5 = getRollingFuturesFlow(sliceT, i, 5);
 
-                    const isFutBull = (fut15.sig === 'BULL' || fut5.sig === 'BULL') && fut5.pChg > 0;
-                    const isFutBear = (fut15.sig === 'BEAR' || fut5.sig === 'BEAR') && fut5.pChg < 0;
-                    const isAtmBull = atm15.netLots >= atmVolThresh || atm5.netLots >= Math.round(atmVolThresh * 1.2);
-                    const isAtmBear = atm15.netLots <= -atmVolThresh || atm5.netLots <= -Math.round(atmVolThresh * 1.2);
-                    const isFarBull = far15.netLots >= farVolThresh || far5.netLots >= Math.round(farVolThresh * 1.25);
-                    const isFarBear = far15.netLots <= -farVolThresh || far5.netLots <= -Math.round(farVolThresh * 1.25);
+                    const isFutBull = (fut15.sig === 'BULL' || fut10.sig === 'BULL' || fut5.sig === 'BULL') && (fut5.pChg > 0 || fut10.pChg > 0);
+                    const isFutBear = (fut15.sig === 'BEAR' || fut10.sig === 'BEAR' || fut5.sig === 'BEAR') && (fut5.pChg < 0 || fut10.pChg < 0);
+                    const isAtmBull = atm15.netLots >= atmVolThresh || atm10.netLots >= Math.round(atmVolThresh * 1.1) || atm5.netLots >= Math.round(atmVolThresh * 1.2);
+                    const isAtmBear = atm15.netLots <= -atmVolThresh || atm10.netLots <= -Math.round(atmVolThresh * 1.1) || atm5.netLots <= -Math.round(atmVolThresh * 1.2);
+                    const isFarBull = far15.netLots >= farVolThresh || far10.netLots >= Math.round(farVolThresh * 1.15) || far5.netLots >= Math.round(farVolThresh * 1.25);
+                    const isFarBear = far15.netLots <= -farVolThresh || far10.netLots <= -Math.round(farVolThresh * 1.15) || far5.netLots <= -Math.round(farVolThresh * 1.25);
 
                     const alertBearPressure = (isFutBear || isAtmBear) && !(isFutBull || isAtmBull);
                     const alertBullMomentum = (isFutBull || isAtmBull) && !(isFutBear || isAtmBear);
