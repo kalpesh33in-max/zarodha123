@@ -456,6 +456,21 @@ def live_logs_view():
 </body>
 </html>"""
 
+@app.route("/api/deploy_update")
+def deploy_update():
+    """Pulls latest Model 6 updates from GitHub origin/master directly on the server."""
+    try:
+        import subprocess
+        res = subprocess.run(["git", "pull", "origin", "master"], cwd=app.root_path, capture_output=True, text=True, timeout=15)
+        return jsonify({
+            "status": "success" if res.returncode == 0 else "error",
+            "stdout": res.stdout,
+            "stderr": res.stderr,
+            "server_time": datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 @app.route("/api/autologin")
 def trigger_autologin():
     try:
