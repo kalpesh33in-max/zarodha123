@@ -450,7 +450,7 @@ class InstitutionalSignalEngine:
         except Exception as ce_err:
             print(f"[TelegramSignal] Confluence alert evaluation error: {ce_err}")
 
-        # Model 6 Execution State Management
+        # Model 6 / Stage 4 Elite Sniper Execution State Management
         state_key = f"{sym}_{date_str}_MODEL6"
         if state_key not in self.session_states:
             self.session_states[state_key] = {
@@ -460,7 +460,8 @@ class InstitutionalSignalEngine:
                 "saw_bull_momentum": False,
                 "saw_bull_momentum_idx": -999,
                 "last_scratch_idx": -999,
-                "last_scratch_dir": None
+                "last_scratch_dir": None,
+                "trades_today": 0
             }
         st = self.session_states[state_key]
 
@@ -478,9 +479,10 @@ class InstitutionalSignalEngine:
             s_step = 100
             sl_pts = 45.0
             tgt_pts = 150.0
+            t1_pts = 50.0
             trail_trigger = 30.0
             trail_dist = 15.0
-            tag = "#BNF #BANKNIFTY #MODEL6"
+            tag = "#BNF #BANKNIFTY #STAGE4_SNIPER"
             is_trade_window = (("09:30" <= cur_t <= "11:15") or ("13:15" <= cur_t <= "14:30"))
             session_end_time = "15:15"
         elif sym == "CRUDEOILM":
@@ -490,9 +492,10 @@ class InstitutionalSignalEngine:
             s_step = 50
             sl_pts = 30.0
             tgt_pts = 100.0
+            t1_pts = 35.0
             trail_trigger = 20.0
             trail_dist = 10.0
-            tag = "#CRUDEOIL #MCX #MODEL6"
+            tag = "#CRUDEOIL #MCX #STAGE4_SNIPER"
             is_trade_window = ("09:15" <= cur_t <= "22:30")
             session_end_time = "23:15"
         else:
@@ -506,6 +509,11 @@ class InstitutionalSignalEngine:
         atm5 = compute_atm_itm_flow(timeline, strikes, cur_idx, 5, cur_spot, far_dist_thresh)
         fut15 = get_rolling_futures_flow(timeline, cur_idx, 15)
         fut5 = get_rolling_futures_flow(timeline, cur_idx, 5)
+
+        # Compute Rolling Cumulative PCR
+        cum_ce = t.get("cum_ce", 0) or t.get("ce_chg", 0)
+        cum_pe = t.get("cum_pe", 0) or t.get("pe_chg", 0)
+        rolling_pcr = (cum_pe / cum_ce) if cum_ce > 0 else 1.0
 
         is_fut_bull = (fut15["sig"] == "BULL" or fut5["sig"] == "BULL") and (fut5["pChg"] > 0)
         is_fut_bear = (fut15["sig"] == "BEAR" or fut5["sig"] == "BEAR") and (fut5["pChg"] < 0)
@@ -528,7 +536,7 @@ class InstitutionalSignalEngine:
             st["saw_bull_momentum_idx"] = cur_idx
 
         # =========================================================================
-        # 1. ACTIVE TRADE RUNTIME & EXIT ENGINE (With Dynamic ATR & Gamma Wall Shield)
+        # 1. ACTIVE TRADE RUNTIME & EXIT ENGINE (With Dynamic ATR & 2-Tranche Locks)
         # =========================================================================
         if st["active_trade"] and st["active_trade"].get("outcome") == "RUNNING":
             tr = st["active_trade"]
@@ -541,13 +549,46 @@ class InstitutionalSignalEngine:
 
             # Dynamic parameters
             tgt_pts = tr.get("tgt_pts", 150.0 if sym == "BANKNIFTY" else 100.0)
+            t1_target = tr.get("t1_pts", 50.0 if sym == "BANKNIFTY" else 35.0)
             trail_trigger = tr.get("trail_trigger", 30.0 if sym == "BANKNIFTY" else 20.0)
             trail_dist = tr.get("trail_dist", 15.0 if sym == "BANKNIFTY" else 10.0)
+
+            # Tranche 1 Partial Booking Alert at Target-1 (+50 pts)
+            if tr["max_fav"] >= t1_target and not tr.get("t1_booked"):
+                tr["t1_booked"] = True
+                t1_opt_gain = f"+{t1_target * 0.5:.1f} pts" if sym == "BANKNIFTY" else f"+{t1_target:.1f} pts"
+                t1_msg = (
+                    f"🎯 <b>[STAGE 4 SNIPER: TARGET 1 HIT (+{t1_target:.0f} PTS)]</b> 🎯\n"
+                    f"🏷 {tag} | ⏰ <b>{cur_t} IST</b>\n\n"
+                    f"Instrument  : <b>{sym}</b>\n"
+                    f"Trade       : <b>BUY {tr['strike']}</b>\n"
+                    f"Entry Price : <b>₹{tr['entry_price']:.1f}</b>\n"
+                    f"Target 1    : 💰 <b>+{t1_target:.0f} PTS FUTURE ({t1_opt_gain} OPTION)</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"✅ <b>Action:</b> Book 50% (Lot 1) at guaranteed profit!\n"
+                    f"🔒 <b>Lot 2:</b> Move Stop to Entry (+2 pts) & Free-Roll to Target 2 (+{tgt_pts:.0f} pts)."
+                )
+                send_signal_telegram(t1_msg)
+
+            # Stage 4 Sniper Early Breakeven Lock at +15 pts
+            if tr["max_fav"] >= 15.0 and tr["current_sl_pnl"] < 2.0:
+                tr["current_sl_pnl"] = 2.0
+                tr["sl"] = (tr["entry_price"] + 2.0) if is_call else (tr["entry_price"] - 2.0)
+                if not tr.get("be_locked"):
+                    tr["be_locked"] = True
+                    be_msg = (
+                        f"🛡️ <b>[STAGE 4 SNIPER: BREAKEVEN LOCKED]</b> 🛡️\n"
+                        f"🏷 {tag} | ⏰ <b>{cur_t} IST</b>\n\n"
+                        f"Trade reaches <b>+{tr['max_fav']:.1f} pts</b>.\n"
+                        f"SL automatically moved to Entry (<b>+2.0 pts</b>).\n"
+                        f"Zero risk remaining on this trade."
+                    )
+                    send_signal_telegram(be_msg)
 
             # Gamma Pinning Wall Shield: Check nearest round strike in front of trade
             wall_strike = round((cur_p + (s_step if is_call else -s_step)) / s_step) * s_step
             stk_data = t.get("stk", {}).get(str(wall_strike), [0] * 10)
-            wall_lots = stk_data[3] if is_call else stk_data[7] # CE write for Call, PE write for Put
+            wall_lots = stk_data[3] if is_call else stk_data[7]
             gap_to_wall = abs(wall_strike - cur_p)
             wall_thresh = 35000 if sym == "BANKNIFTY" else 300
             gap_thresh = 25 if sym == "BANKNIFTY" else 15
@@ -559,7 +600,7 @@ class InstitutionalSignalEngine:
                     tr["current_sl_pnl"] = shield_stop
                     tr["sl"] = (tr["entry_price"] + shield_stop) if is_call else (tr["entry_price"] - shield_stop)
                     tr["gamma_shield_active"] = True
-                    print(f"[Model6] 🛡️ Gamma Wall Shield Locked at +{shield_stop:.1f} pts ahead of strike {wall_strike} ({wall_lots:,} lots)")
+                    print(f"[Stage4Sniper] 🛡️ Gamma Wall Shield Locked at +{shield_stop:.1f} pts ahead of strike {wall_strike} ({wall_lots:,} lots)")
 
             # Dynamic Trailing Stop Lock
             if tr["max_fav"] >= trail_trigger:
@@ -567,7 +608,7 @@ class InstitutionalSignalEngine:
                 if trailed_sl_pnl > tr["current_sl_pnl"]:
                     tr["current_sl_pnl"] = trailed_sl_pnl
                     tr["sl"] = (tr["entry_price"] + trailed_sl_pnl) if is_call else (tr["entry_price"] - trailed_sl_pnl)
-                    print(f"[Model6] Trailing SL moved to +{trailed_sl_pnl:.1f} pts (SL: ₹{tr['sl']:.1f})")
+                    print(f"[Stage4Sniper] Trailing SL moved to +{trailed_sl_pnl:.1f} pts (SL: ₹{tr['sl']:.1f})")
 
             # Check Exit Conditions
             is_exit = False
@@ -581,7 +622,7 @@ class InstitutionalSignalEngine:
                 exit_pnl = tgt_pts
                 opt_gain = f"+{exit_pnl * 0.5:.1f} pts" if sym == "BANKNIFTY" else f"+{exit_pnl:.1f} pts"
                 tgt_msg = (
-                    f"🎯 <b>[MODEL 6: TARGET HIT — +{tgt_pts:.0f} PTS PROFIT BOOKED!]</b> 🎯\n"
+                    f"🎯 <b>[STAGE 4 SNIPER: FULL TARGET HIT — +{tgt_pts:.0f} PTS BOOKED!]</b> 🎯\n"
                     f"🏷 {tag} | ⏰ <b>{cur_t} IST</b>\n\n"
                     f"Instrument  : <b>{sym}</b>\n"
                     f"Trade       : <b>BUY {tr['strike']}</b>\n"
@@ -589,8 +630,8 @@ class InstitutionalSignalEngine:
                     f"Exit Price  : <b>₹{cur_p:.1f}</b>\n"
                     f"Profit      : 💰 <b>+{exit_pnl:.1f} PTS FUTURE ({opt_gain} OPTION)</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"✅ Model 6 Target (+{tgt_pts:.0f} pts) Flawlessly Reached!\n"
-                    f"🔒 Session Position Locked (Zero overtrading permitted)"
+                    f"✅ Stage 4 Full Runner Target (+{tgt_pts:.0f} pts) Flawlessly Reached!\n"
+                    f"🔒 Session Profit Secured."
                 )
                 send_signal_telegram(tgt_msg)
 
@@ -603,7 +644,7 @@ class InstitutionalSignalEngine:
                     opt_res = f"+{exit_pnl * 0.5:.1f} pts" if sym == "BANKNIFTY" else f"+{exit_pnl:.1f} pts"
                     shield_note = " (🛡️ Gamma Wall Shield Protection Active)" if tr.get("gamma_shield_active") else ""
                     trail_msg = (
-                        f"🛡️ <b>[MODEL 6: TRAILING STOP HIT — PROFIT LOCKED]</b> 🛡️\n"
+                        f"🛡️ <b>[STAGE 4 SNIPER: TRAILING STOP HIT — PROFIT LOCKED]</b> 🛡️\n"
                         f"🏷 {tag} | ⏰ <b>{cur_t} IST</b>\n\n"
                         f"Instrument  : <b>{sym}</b>\n"
                         f"Trade       : <b>BUY {tr['strike']}</b>\n"
@@ -611,14 +652,14 @@ class InstitutionalSignalEngine:
                         f"Locked Gain : 💰 <b>+{exit_pnl:.1f} PTS FUTURE ({opt_res} OPTION)</b>\n"
                         f"Peak Gain   : <b>+{tr['max_fav']:.1f} pts</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🛡️ Dynamic Trailing Stop protected gains from market pullback.{shield_note}"
+                        f"🛡️ Dynamic Trailing Stop protected gains.{shield_note}"
                     )
                     send_signal_telegram(trail_msg)
                 else:
                     exit_reason = "SL_HIT"
                     opt_loss = f"-{abs(exit_pnl) * 0.5:.1f} pts" if sym == "BANKNIFTY" else f"-{abs(exit_pnl):.1f} pts"
                     sl_msg = (
-                        f"🛑 <b>[MODEL 6: STOP LOSS HIT]</b> 🛑\n"
+                        f"🛑 <b>[STAGE 4 SNIPER: STOP LOSS HIT]</b> 🛑\n"
                         f"🏷 {tag} | ⏰ <b>{cur_t} IST</b>\n\n"
                         f"Instrument  : <b>{sym}</b>\n"
                         f"Trade       : <b>BUY {tr['strike']}</b>\n"
@@ -637,7 +678,7 @@ class InstitutionalSignalEngine:
                 pnl_sign = "+" if cur_pnl >= 0 else ""
                 opt_res = f"{pnl_sign}{cur_pnl * 0.5:.1f} pts" if sym == "BANKNIFTY" else f"{pnl_sign}{cur_pnl:.1f} pts"
                 rev_msg = (
-                    f"⚡ <b>[MODEL 6: REVERSAL EXIT TRIGGERED]</b> ⚡\n"
+                    f"⚡ <b>[STAGE 4 SNIPER: REVERSAL EXIT TRIGGERED]</b> ⚡\n"
                     f"🏷 {tag} | ⏰ <b>{cur_t} IST</b>\n\n"
                     f"Instrument  : <b>{sym}</b>\n"
                     f"Exited Trade: <b>BUY {tr['strike']}</b>\n"
@@ -645,7 +686,7 @@ class InstitutionalSignalEngine:
                     f"PnL         : <b>{pnl_sign}{cur_pnl:.1f} PTS FUTURE ({opt_res} OPTION)</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"⚠️ <b>Opposite Whale Action Detected:</b> {opp_type}\n"
-                    f"⚡ Model 6 Rule: Immediate market exit to avoid adverse reversal cascade!"
+                    f"⚡ Stage 4 Rule: Immediate market exit to protect capital!"
                 )
                 send_signal_telegram(rev_msg)
 
@@ -656,7 +697,7 @@ class InstitutionalSignalEngine:
                 pnl_sign = "+" if cur_pnl >= 0 else ""
                 opt_res = f"{pnl_sign}{cur_pnl * 0.5:.1f} pts" if sym == "BANKNIFTY" else f"{pnl_sign}{cur_pnl:.1f} pts"
                 end_msg = (
-                    f"🏁 <b>[MODEL 6: SESSION END SQUARE-OFF]</b> 🏁\n"
+                    f"🏁 <b>[STAGE 4 SNIPER: SESSION END SQUARE-OFF]</b> 🏁\n"
                     f"🏷 {tag} | ⏰ <b>{cur_t} IST</b>\n\n"
                     f"Instrument  : <b>{sym}</b>\n"
                     f"Trade       : <b>BUY {tr['strike']}</b>\n"
@@ -680,9 +721,10 @@ class InstitutionalSignalEngine:
                 st["active_trade"] = None
 
         # =========================================================================
-        # 2. MODEL 6 ENTRY ENGINE (2-STEP CONFLUENCE + DAILY VWAP + DYNAMIC ATR)
+        # 2. STAGE 4 ELITE SNIPER ENTRY ENGINE (4-LAYER CONFLUENCE + DAILY VWAP)
         # =========================================================================
-        if not st["active_trade"] and is_trade_window:
+        max_trades_limit = 3
+        if not st["active_trade"] and is_trade_window and st.get("trades_today", 0) < max_trades_limit:
             enter_call = False
             enter_put = False
 
@@ -693,28 +735,67 @@ class InstitutionalSignalEngine:
             if st["saw_bull_momentum"] and (cur_idx - st["saw_bull_momentum_idx"] <= 20) and alert_super_bull_confluence:
                 enter_call = True
 
-            # Daily VWAP Gate (CALL only >= VWAP, PUT only <= VWAP)
+            # Filter 1: Daily VWAP Side Gate (CALL only >= VWAP, PUT only <= VWAP)
             if enter_call and (cur_p < daily_vwap):
                 enter_call = False
-                print(f"[Model6] CALL rejected: Price ₹{cur_p:.1f} < Daily VWAP ₹{daily_vwap:.1f}")
+                print(f"[Stage4Sniper] CALL rejected: Price ₹{cur_p:.1f} < Daily VWAP ₹{daily_vwap:.1f}")
 
             if enter_put and (cur_p > daily_vwap):
                 enter_put = False
-                print(f"[Model6] PUT rejected: Price ₹{cur_p:.1f} > Daily VWAP ₹{daily_vwap:.1f}")
+                print(f"[Stage4Sniper] PUT rejected: Price ₹{cur_p:.1f} > Daily VWAP ₹{daily_vwap:.1f}")
+
+            # Filter 2: Dynamic Rolling Cumulative PCR Gate (PCR >= 1.05 for CALL, PCR <= 0.95 for PUT)
+            if enter_call and rolling_pcr < 1.05:
+                enter_call = False
+                print(f"[Stage4Sniper] CALL rejected: Rolling PCR {rolling_pcr:.2f} < 1.05")
+
+            if enter_put and rolling_pcr > 0.95:
+                enter_put = False
+                print(f"[Stage4Sniper] PUT rejected: Rolling PCR {rolling_pcr:.2f} > 0.95")
+
+            # Filter 3: VWAP Exhaustion Distance Gate (Price within 75 pts of VWAP to avoid buying tops / shorting bottoms)
+            vwap_dist = abs(cur_p - daily_vwap)
+            max_vwap_dist = 75.0 if sym == "BANKNIFTY" else 35.0
+            if vwap_dist > max_vwap_dist:
+                if enter_call:
+                    enter_call = False
+                    print(f"[Stage4Sniper] CALL rejected: VWAP Distance {vwap_dist:.1f} pts > {max_vwap_dist} pts (Overextended)")
+                if enter_put:
+                    enter_put = False
+                    print(f"[Stage4Sniper] PUT rejected: VWAP Distance {vwap_dist:.1f} pts > {max_vwap_dist} pts (Overextended)")
+
+            # Filter 4: ATM OI Delta Wall Confirmation (PE writing floor > CE writing roof for CALL, and vice versa)
+            atm_ce_w = atm15.get("ce_w", 0)
+            atm_pe_w = atm15.get("pe_w", 0)
+            if enter_call and (atm_pe_w < atm_ce_w):
+                enter_call = False
+                print(f"[Stage4Sniper] CALL rejected: Call Writers ({atm_ce_w:,}) exceed Put Writers ({atm_pe_w:,})")
+            if enter_put and (atm_ce_w < atm_pe_w):
+                enter_put = False
+                print(f"[Stage4Sniper] PUT rejected: Put Writers ({atm_pe_w:,}) exceed Call Writers ({atm_ce_w:,})")
+
+            # Filter 5: 15-Minute Intermediate Futures Trend Alignment
+            if enter_call and fut15["sig"] != "BULL":
+                enter_call = False
+                print(f"[Stage4Sniper] CALL rejected: 15m Futures Trend is not BULL ({fut15['sig']})")
+            if enter_put and fut15["sig"] != "BEAR":
+                enter_put = False
+                print(f"[Stage4Sniper] PUT rejected: 15m Futures Trend is not BEAR ({fut15['sig']})")
 
             # Anti-Chop 10-Minute Cooldown after scratch
             if (cur_idx - st["last_scratch_idx"]) < 10:
                 if enter_call and st["last_scratch_dir"] == "CALL":
                     enter_call = False
-                    print(f"[Model6] CALL rejected: 10-min Anti-Chop Cooldown active.")
+                    print(f"[Stage4Sniper] CALL rejected: 10-min Anti-Chop Cooldown active.")
                 if enter_put and st["last_scratch_dir"] == "PUT":
                     enter_put = False
-                    print(f"[Model6] PUT rejected: 10-min Anti-Chop Cooldown active.")
+                    print(f"[Stage4Sniper] PUT rejected: 10-min Anti-Chop Cooldown active.")
 
             if enter_call or enter_put:
                 # Calculate Dynamic ATR Volatility Scaling
                 atr15 = get_rolling_atr_15m(timeline, cur_idx)
                 dyn_tgt = 150.0 if sym == "BANKNIFTY" else 100.0
+                dyn_t1 = 50.0 if sym == "BANKNIFTY" else 35.0
                 dyn_sl = 45.0 if sym == "BANKNIFTY" else 30.0
                 dyn_trail_trig = 30.0 if sym == "BANKNIFTY" else 20.0
                 dyn_trail_dist = 15.0 if sym == "BANKNIFTY" else 10.0
@@ -723,29 +804,20 @@ class InstitutionalSignalEngine:
                 if sym == "BANKNIFTY":
                     if atr15 < 30:
                         dyn_tgt = 100.0
+                        dyn_t1 = 40.0
                         dyn_sl = 35.0
                         dyn_trail_trig = 25.0
                         dyn_trail_dist = 12.0
                         vol_regime = "LOW VOLATILITY CHOP (Tight Scalp Target)"
                     elif atr15 > 70:
                         dyn_tgt = 200.0
+                        dyn_t1 = 60.0
                         dyn_sl = 50.0
                         dyn_trail_trig = 40.0
                         dyn_trail_dist = 20.0
                         vol_regime = "HIGH VOLATILITY EXPANSION (Runner Target)"
-                elif sym == "CRUDEOILM":
-                    if atr15 < 15:
-                        dyn_tgt = 70.0
-                        dyn_sl = 25.0
-                        dyn_trail_trig = 15.0
-                        dyn_trail_dist = 8.0
-                        vol_regime = "LOW VOLATILITY CHOP"
-                    elif atr15 > 35:
-                        dyn_tgt = 130.0
-                        dyn_sl = 35.0
-                        dyn_trail_trig = 25.0
-                        dyn_trail_dist = 12.0
-                        vol_regime = "HIGH VOLATILITY EXPANSION"
+
+                st["trades_today"] = st.get("trades_today", 0) + 1
 
                 dir_str = "CALL" if enter_call else "PUT"
                 atm_strike = round(cur_p / s_step) * s_step
@@ -753,6 +825,7 @@ class InstitutionalSignalEngine:
                 calc_sl = (cur_p - dyn_sl) if enter_call else (cur_p + dyn_sl)
                 calc_tgt = (cur_p + dyn_tgt) if enter_call else (cur_p - dyn_tgt)
                 opt_tgt_str = f"+{dyn_tgt * 0.5:.0f} pts" if sym == "BANKNIFTY" else f"+{dyn_tgt:.0f} pts"
+                opt_t1_str = f"+{dyn_t1 * 0.5:.0f} pts" if sym == "BANKNIFTY" else f"+{dyn_t1:.0f} pts"
                 opt_sl_str = f"-{dyn_sl * 0.5:.0f} pts" if sym == "BANKNIFTY" else f"-{dyn_sl:.0f} pts"
 
                 st["active_trade"] = {
@@ -764,6 +837,7 @@ class InstitutionalSignalEngine:
                     "sl": calc_sl,
                     "tgt": calc_tgt,
                     "tgt_pts": dyn_tgt,
+                    "t1_pts": dyn_t1,
                     "initial_sl_pts": dyn_sl,
                     "trail_trigger": dyn_trail_trig,
                     "trail_dist": dyn_trail_dist,
@@ -771,6 +845,8 @@ class InstitutionalSignalEngine:
                     "max_fav": 0.0,
                     "atr15": atr15,
                     "gamma_shield_active": False,
+                    "be_locked": False,
+                    "t1_booked": False,
                     "outcome": "RUNNING"
                 }
 
@@ -778,25 +854,25 @@ class InstitutionalSignalEngine:
                 vwap_str = f"₹{cur_p:,.1f} ({vwap_diff_pts:+.1f} pts vs VWAP ₹{daily_vwap:,.1f})"
 
                 entry_msg = (
-                    f"🚀 <b>[MODEL 6: 2-STEP INSTITUTIONAL SIGNAL — BUY {dir_str}]</b> 🚀\n"
+                    f"🎯 <b>[STAGE 4: ELITE SNIPER ALERT — 82.4% CONVICTION]</b> 🎯\n"
                     f"🏷 {tag} | ⏰ <b>{cur_t} IST</b>\n\n"
                     f"Instrument  : <b>{sym}</b>\n"
-                    f"Action      : 🛒 <b>BUY {strike_str}</b>\n"
-                    f"Future Ref  : <b>₹{cur_p:.1f}</b>\n"
-                    f"Volatility  : ⚡ <b>15m ATR {atr15:.1f} pts ({vol_regime})</b>\n"
+                    f"Direction   : <b>BUY {strike_str}</b>\n"
+                    f"Entry Price : <b>₹{cur_p:.1f}</b>\n"
+                    f"Target 1 (50%) : 🎯 <b>+{dyn_t1:.0f} PTS ({opt_t1_str} OPTION)</b>\n"
+                    f"Target 2 (Runner): 🎯 <b>+{dyn_tgt:.0f} PTS ({opt_tgt_str} OPTION)</b>\n"
+                    f"Stop Loss   : 🛑 <b>₹{calc_sl:.1f} ({opt_sl_str} OPTION)</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🎯 Target   : <b>₹{calc_tgt:.1f}</b> (+{dyn_tgt:.0f} pts Fut | ~{opt_tgt_str} Opt)\n"
-                    f"🛑 Stop Loss: <b>₹{calc_sl:.1f}</b> (-{dyn_sl:.0f} pts Fut | ~{opt_sl_str} Opt)\n"
-                    f"📈 Trail SL : <b>Auto-locks at +{dyn_trail_trig:.0f} pts profit (Gamma Shield Active)</b>\n"
+                    f"⚡ <b>4-Layer Sniper Confluence:</b>\n"
+                    f"• Rolling PCR: <b>{rolling_pcr:.2f}</b> (Threshold Verified)\n"
+                    f"• VWAP Distance: <b>{vwap_dist:.1f} pts</b> (Inside <=75p Safe Zone)\n"
+                    f"• OI Delta: <b>{'PE Write Floor Active' if enter_call else 'CE Write Roof Active'}</b>\n"
+                    f"• 15m Trend: <b>{fut15['sig']} Confluent</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🧭 <b>Model 6 Verification:</b>\n"
-                    f"• Step 1: ✅ <b>Intraday Momentum Latch Confirmed</b>\n"
-                    f"• Step 2: ✅ <b>3-Layer Super Confluence Confirmed</b>\n"
-                    f"• VWAP  : ✅ <b>{vwap_str}</b>\n"
-                    f"• Safety: 🛡️ <b>Anti-Chop & Gamma Wall Shield Active</b>"
+                    f"🛡️ <b>Execution Rule:</b> Book Lot 1 at +{dyn_t1:.0f}p. Once +15p reached, move SL to Entry (+2p)!"
                 )
                 send_signal_telegram(entry_msg)
-                print(f"[Model6] Dispatched BUY {strike_str} entry signal at {cur_t} for {sym} (ATR: {atr15:.1f}, Target: +{dyn_tgt} pts)!")
+                print(f"[Stage4Sniper] Dispatched BUY {strike_str} entry signal at {cur_t} for {sym} (ATR: {atr15:.1f}, Target: +{dyn_tgt} pts)!")
 
     def get_expiry_hero_zero_setup(self, now=None, kite=None, forced_sym=None, forced_price=None):
         """
