@@ -185,6 +185,17 @@ def get_rolling_futures_flow(timeline, end_idx, lookback_mins):
     return {"pChg": p_chg, "sig": sig}
 
 
+def get_rolling_atr_15m(timeline, end_idx):
+    """Computes rolling 15-minute high-low ATR price range."""
+    start_idx = max(0, end_idx - 15 + 1)
+    sub = timeline[start_idx:end_idx + 1]
+    if len(sub) < 2:
+        return 20.0
+    prices = [float(t.get("price", 0.0) or 0.0) for t in sub]
+    return max(prices) - min(prices)
+
+
+
 class InstitutionalSignalEngine:
     def __init__(self):
         self.session_states = {}
@@ -517,7 +528,7 @@ class InstitutionalSignalEngine:
             st["saw_bull_momentum_idx"] = cur_idx
 
         # =========================================================================
-        # 1. ACTIVE TRADE RUNTIME & EXIT ENGINE
+        # 1. ACTIVE TRADE RUNTIME & EXIT ENGINE (With Dynamic ATR & Gamma Wall Shield)
         # =========================================================================
         if st["active_trade"] and st["active_trade"].get("outcome") == "RUNNING":
             tr = st["active_trade"]
@@ -527,6 +538,28 @@ class InstitutionalSignalEngine:
             # Update peak favorable excursion
             if cur_pnl > tr["max_fav"]:
                 tr["max_fav"] = cur_pnl
+
+            # Dynamic parameters
+            tgt_pts = tr.get("tgt_pts", 150.0 if sym == "BANKNIFTY" else 100.0)
+            trail_trigger = tr.get("trail_trigger", 30.0 if sym == "BANKNIFTY" else 20.0)
+            trail_dist = tr.get("trail_dist", 15.0 if sym == "BANKNIFTY" else 10.0)
+
+            # Gamma Pinning Wall Shield: Check nearest round strike in front of trade
+            wall_strike = round((cur_p + (s_step if is_call else -s_step)) / s_step) * s_step
+            stk_data = t.get("stk", {}).get(str(wall_strike), [0] * 10)
+            wall_lots = stk_data[3] if is_call else stk_data[7] # CE write for Call, PE write for Put
+            gap_to_wall = abs(wall_strike - cur_p)
+            wall_thresh = 35000 if sym == "BANKNIFTY" else 300
+            gap_thresh = 25 if sym == "BANKNIFTY" else 15
+            min_fav_thresh = 20.0 if sym == "BANKNIFTY" else 15.0
+
+            if wall_lots > wall_thresh and gap_to_wall <= gap_thresh and tr["max_fav"] >= min_fav_thresh:
+                shield_stop = max(5.0, tr["max_fav"] - 5.0)
+                if shield_stop > tr["current_sl_pnl"]:
+                    tr["current_sl_pnl"] = shield_stop
+                    tr["sl"] = (tr["entry_price"] + shield_stop) if is_call else (tr["entry_price"] - shield_stop)
+                    tr["gamma_shield_active"] = True
+                    print(f"[Model6] 🛡️ Gamma Wall Shield Locked at +{shield_stop:.1f} pts ahead of strike {wall_strike} ({wall_lots:,} lots)")
 
             # Dynamic Trailing Stop Lock
             if tr["max_fav"] >= trail_trigger:
@@ -541,7 +574,7 @@ class InstitutionalSignalEngine:
             exit_reason = ""
             exit_pnl = cur_pnl
 
-            # 1. Target Hit (+150 pts BNF / +100 pts Crude)
+            # 1. Target Hit
             if cur_pnl >= tgt_pts:
                 is_exit = True
                 exit_reason = "TARGET_HIT"
@@ -568,6 +601,7 @@ class InstitutionalSignalEngine:
                 if tr["current_sl_pnl"] > 0:
                     exit_reason = "TRAIL_PROFIT_LOCKED"
                     opt_res = f"+{exit_pnl * 0.5:.1f} pts" if sym == "BANKNIFTY" else f"+{exit_pnl:.1f} pts"
+                    shield_note = " (🛡️ Gamma Wall Shield Protection Active)" if tr.get("gamma_shield_active") else ""
                     trail_msg = (
                         f"🛡️ <b>[MODEL 6: TRAILING STOP HIT — PROFIT LOCKED]</b> 🛡️\n"
                         f"🏷 {tag} | ⏰ <b>{cur_t} IST</b>\n\n"
@@ -577,7 +611,7 @@ class InstitutionalSignalEngine:
                         f"Locked Gain : 💰 <b>+{exit_pnl:.1f} PTS FUTURE ({opt_res} OPTION)</b>\n"
                         f"Peak Gain   : <b>+{tr['max_fav']:.1f} pts</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🛡️ Dynamic Trailing Stop protected gains from market pullback."
+                        f"🛡️ Dynamic Trailing Stop protected gains from market pullback.{shield_note}"
                     )
                     send_signal_telegram(trail_msg)
                 else:
@@ -591,7 +625,7 @@ class InstitutionalSignalEngine:
                         f"Exit Price  : <b>₹{cur_p:.1f}</b>\n"
                         f"Loss        : <b>{exit_pnl:.1f} PTS FUTURE ({opt_loss} OPTION)</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🛡️ Disciplined 45-pt Risk Boundary Preserved. Stand Aside!"
+                        f"🛡️ Disciplined Risk Boundary Preserved. Stand Aside!"
                     )
                     send_signal_telegram(sl_msg)
 
@@ -646,7 +680,7 @@ class InstitutionalSignalEngine:
                 st["active_trade"] = None
 
         # =========================================================================
-        # 2. MODEL 6 ENTRY ENGINE (2-STEP CONFLUENCE + DAILY VWAP FILTER)
+        # 2. MODEL 6 ENTRY ENGINE (2-STEP CONFLUENCE + DAILY VWAP + DYNAMIC ATR)
         # =========================================================================
         if not st["active_trade"] and is_trade_window:
             enter_call = False
@@ -678,13 +712,48 @@ class InstitutionalSignalEngine:
                     print(f"[Model6] PUT rejected: 10-min Anti-Chop Cooldown active.")
 
             if enter_call or enter_put:
+                # Calculate Dynamic ATR Volatility Scaling
+                atr15 = get_rolling_atr_15m(timeline, cur_idx)
+                dyn_tgt = 150.0 if sym == "BANKNIFTY" else 100.0
+                dyn_sl = 45.0 if sym == "BANKNIFTY" else 30.0
+                dyn_trail_trig = 30.0 if sym == "BANKNIFTY" else 20.0
+                dyn_trail_dist = 15.0 if sym == "BANKNIFTY" else 10.0
+                vol_regime = "NORMAL VOLATILITY"
+
+                if sym == "BANKNIFTY":
+                    if atr15 < 30:
+                        dyn_tgt = 100.0
+                        dyn_sl = 35.0
+                        dyn_trail_trig = 25.0
+                        dyn_trail_dist = 12.0
+                        vol_regime = "LOW VOLATILITY CHOP (Tight Scalp Target)"
+                    elif atr15 > 70:
+                        dyn_tgt = 200.0
+                        dyn_sl = 50.0
+                        dyn_trail_trig = 40.0
+                        dyn_trail_dist = 20.0
+                        vol_regime = "HIGH VOLATILITY EXPANSION (Runner Target)"
+                elif sym == "CRUDEOILM":
+                    if atr15 < 15:
+                        dyn_tgt = 70.0
+                        dyn_sl = 25.0
+                        dyn_trail_trig = 15.0
+                        dyn_trail_dist = 8.0
+                        vol_regime = "LOW VOLATILITY CHOP"
+                    elif atr15 > 35:
+                        dyn_tgt = 130.0
+                        dyn_sl = 35.0
+                        dyn_trail_trig = 25.0
+                        dyn_trail_dist = 12.0
+                        vol_regime = "HIGH VOLATILITY EXPANSION"
+
                 dir_str = "CALL" if enter_call else "PUT"
                 atm_strike = round(cur_p / s_step) * s_step
                 strike_str = f"{atm_strike} {'CE' if enter_call else 'PE'}"
-                calc_sl = (cur_p - sl_pts) if enter_call else (cur_p + sl_pts)
-                calc_tgt = (cur_p + tgt_pts) if enter_call else (cur_p - tgt_pts)
-                opt_tgt_str = f"+{tgt_pts * 0.5:.0f} pts" if sym == "BANKNIFTY" else f"+{tgt_pts:.0f} pts"
-                opt_sl_str = f"-{sl_pts * 0.5:.0f} pts" if sym == "BANKNIFTY" else f"-{sl_pts:.0f} pts"
+                calc_sl = (cur_p - dyn_sl) if enter_call else (cur_p + dyn_sl)
+                calc_tgt = (cur_p + dyn_tgt) if enter_call else (cur_p - dyn_tgt)
+                opt_tgt_str = f"+{dyn_tgt * 0.5:.0f} pts" if sym == "BANKNIFTY" else f"+{dyn_tgt:.0f} pts"
+                opt_sl_str = f"-{dyn_sl * 0.5:.0f} pts" if sym == "BANKNIFTY" else f"-{dyn_sl:.0f} pts"
 
                 st["active_trade"] = {
                     "dir": dir_str,
@@ -694,8 +763,14 @@ class InstitutionalSignalEngine:
                     "entry_idx": cur_idx,
                     "sl": calc_sl,
                     "tgt": calc_tgt,
-                    "current_sl_pnl": -sl_pts,
+                    "tgt_pts": dyn_tgt,
+                    "initial_sl_pts": dyn_sl,
+                    "trail_trigger": dyn_trail_trig,
+                    "trail_dist": dyn_trail_dist,
+                    "current_sl_pnl": -dyn_sl,
                     "max_fav": 0.0,
+                    "atr15": atr15,
+                    "gamma_shield_active": False,
                     "outcome": "RUNNING"
                 }
 
@@ -708,19 +783,20 @@ class InstitutionalSignalEngine:
                     f"Instrument  : <b>{sym}</b>\n"
                     f"Action      : 🛒 <b>BUY {strike_str}</b>\n"
                     f"Future Ref  : <b>₹{cur_p:.1f}</b>\n"
+                    f"Volatility  : ⚡ <b>15m ATR {atr15:.1f} pts ({vol_regime})</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🎯 Target   : <b>₹{calc_tgt:.1f}</b> (+{tgt_pts:.0f} pts Fut | ~{opt_tgt_str} Opt)\n"
-                    f"🛑 Stop Loss: <b>₹{calc_sl:.1f}</b> (-{sl_pts:.0f} pts Fut | ~{opt_sl_str} Opt)\n"
-                    f"📈 Trail SL : <b>Auto-locks +15 pts at +30 pts profit</b>\n"
+                    f"🎯 Target   : <b>₹{calc_tgt:.1f}</b> (+{dyn_tgt:.0f} pts Fut | ~{opt_tgt_str} Opt)\n"
+                    f"🛑 Stop Loss: <b>₹{calc_sl:.1f}</b> (-{dyn_sl:.0f} pts Fut | ~{opt_sl_str} Opt)\n"
+                    f"📈 Trail SL : <b>Auto-locks at +{dyn_trail_trig:.0f} pts profit (Gamma Shield Active)</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"🧭 <b>Model 6 Verification:</b>\n"
                     f"• Step 1: ✅ <b>Intraday Momentum Latch Confirmed</b>\n"
                     f"• Step 2: ✅ <b>3-Layer Super Confluence Confirmed</b>\n"
                     f"• VWAP  : ✅ <b>{vwap_str}</b>\n"
-                    f"• Safety: 🛡️ <b>Anti-Chop & Reversal Protection Active</b>"
+                    f"• Safety: 🛡️ <b>Anti-Chop & Gamma Wall Shield Active</b>"
                 )
                 send_signal_telegram(entry_msg)
-                print(f"[Model6] Dispatched BUY {strike_str} entry signal at {cur_t} for {sym}!")
+                print(f"[Model6] Dispatched BUY {strike_str} entry signal at {cur_t} for {sym} (ATR: {atr15:.1f}, Target: +{dyn_tgt} pts)!")
 
     def get_expiry_hero_zero_setup(self, now=None, kite=None, forced_sym=None, forced_price=None):
         """
